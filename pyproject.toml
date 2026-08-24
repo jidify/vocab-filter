@@ -1,0 +1,16 @@
+[project]
+name = "vocab-filter"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "glossbert>=1.0.6",
+    "idiomatch>=0.2.14",
+    "lemminflect>=0.2.3",
+    "nltk>=3.10.3",
+    "sentence-transformers>=6.0.0",
+    "simalign>=0.4",
+    "wn>=1.1.1",
+    "wordfreq>=3.1.1",
+]

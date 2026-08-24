@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Corpus / datasets volumineux (téléchargés séparément, pas versionnés)
+one-million-sense-tagged-instances-wn30.tar.gz
+one-million-sense-tagged-instances-wn30/
+omsti-wn30.tar.gz
+bnc2014spoken-xml.zip
+spoken-bnc2014/
+wonef-fscore.xml
+wonef-fscore.xml.bz2
+wonef-precision.xml
+wonef-precision.xml.bz2
+word_cefr_minified.db
+wordlist.txt
+stemdict.txt
+word-prevalence.txt
+kuperman-aoa.csv
+idioms_match.txt
