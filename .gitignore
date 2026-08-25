@@ -29,3 +29,6 @@ idioms_match.txt
 # Sorties générées par le pipeline (pipeline/*.py) — regénérables via
 # run_pipeline.py, pas versionnées (mêmes conventions que ci-dessus).
 pipeline_out/
+
+# Identifiants (clés API des modèles frontière — voir sense_fr_frontier.py)
+.env

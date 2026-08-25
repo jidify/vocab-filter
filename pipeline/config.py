@@ -140,6 +140,18 @@ SENSE_FR_REVIEW_PATH = OUT_DIR / "sense_fr_review.csv"
 SENSE_FR_LLM_DRAWS = 3
 SENSE_FR_LLM_MIN_AGREE = 2  # sur SENSE_FR_LLM_DRAWS, pour retenir un consensus LLM
 
+# ------------------------------------------------------------------
+# Traduction par modèle frontière (pipeline/sense_fr_frontier.py) — via
+# LiteLLM, en remplacement/complément du chemin ollama local ci-dessus.
+# ------------------------------------------------------------------
+
+# Préfixé par le fournisseur (voir litellm) : "anthropic/...", "openai/...".
+# Paramétrable via --model ; ce défaut sert aussi de base à l'estimation
+# de coût du plan (~$0.44 pour les 900 sens de "The Humans").
+SENSE_FR_FRONTIER_MODEL = "anthropic/claude-opus-5"
+SENSE_FR_FRONTIER_BATCH_SIZE = 90   # sens par appel (~1500-2000 tokens d'entrée/lot)
+SENSE_FR_FRONTIER_MAX_WORKERS = 10  # lots traités en parallèle (litellm.batch_completion)
+
 
 def ensure_out_dir() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)

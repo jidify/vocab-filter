@@ -1,11 +1,12 @@
 """Verrou de non-régression sur le magasin data/sense_fr.jsonl (voir
 le plan, point 5) : empreinte des paires (clé, fr) dont le statut est
-`validated` (décidé par un humain via sense_fr_commit.py) ou
-`auto_strong` (décidé automatiquement par sense_fr.py, sous conditions
-strictes — voir sa docstring). Ces deux statuts ne sont produits QUE
-par ces deux scripts ; ce verrou détecte toute modification qui ne
-passerait pas par eux (édition manuelle du fichier, bug d'un futur
-run, etc.).
+`validated` (décidé par un humain via sense_fr_commit.py), `auto_strong`
+(décidé automatiquement par sense_fr.py ou sense_fr_frontier.py, sous
+conditions strictes — voir leurs docstrings) ou `auto_llm` (modèle
+frontière seul, sur un sens qu'aucune ressource lexicale ne couvre —
+voir sense_fr_frontier.py). Ces statuts ne sont produits QUE par ces
+scripts ; ce verrou détecte toute modification qui ne passerait pas par
+eux (édition manuelle du fichier, bug d'un futur run, etc.).
 
 Élargit le verrou automatiquement quand de nouvelles clés apparaissent
 (nouvelles validations légitimes) ; échoue seulement si une paire déjà
@@ -21,7 +22,7 @@ import json
 
 from pipeline import config, sense_fr
 
-LOCKED_STATUSES = {"validated", "auto_strong"}
+LOCKED_STATUSES = {"validated", "auto_strong", "auto_llm"}
 
 
 def compute_lock(store: dict[str, dict]) -> dict[str, str]:
