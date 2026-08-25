@@ -48,6 +48,7 @@ from __future__ import annotations
 import bz2
 import difflib
 import json
+import re
 import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import date
@@ -259,6 +260,28 @@ def llm_translate_votes(
     return votes
 
 
+def llm_stem_votes(llm_votes_raw: list[tuple[str, list[str]]]) -> tuple[Counter, dict[str, str]]:
+    """Comme `llm_vote_counts` (Counter sur le `fr` principal de
+    chaque tirage), mais compte aussi les `fr_alt` du même tirage comme
+    une proposition DE CE TIRAGE. Un accord LLM<->ressource peut porter
+    sur une variante listée en alt plutôt que sur le libellé principal
+    (ex. LLM répond "complètement" en fr principal mais "totalement" en
+    alt, et c'est "totalement" que la ressource propose : l'ancien
+    calcul, basé sur fr seul, ratait ce recoupement). Un même tirage ne
+    vote qu'une fois par stem, même si ce stem apparaît plusieurs fois
+    dans ses alt."""
+    counts: Counter = Counter()
+    labels: dict[str, str] = {}
+    for fr, alt in llm_votes_raw:
+        stems_this_draw = {senses.fr_stem(fr): fr}
+        for a in alt:
+            stems_this_draw.setdefault(senses.fr_stem(a), a)
+        for stem, label in stems_this_draw.items():
+            counts[stem] += 1
+            labels.setdefault(stem, label)
+    return counts, labels
+
+
 def llm_backtranslate(fr_candidate: str, definition_en: str) -> str | None:
     if not llm_is_available():
         return None
@@ -271,13 +294,51 @@ def llm_backtranslate(fr_candidate: str, definition_en: str) -> str | None:
     return en or None
 
 
-def backtranslation_matches(en_guess: str, english_lemmas: list[str]) -> bool:
-    """Correspondance tolérante (casefold exact, ou similarité
-    orthographique élevée pour absorber les variations d'inflexion :
-    "recover" vs "recovering") — même logique difflib que
-    score.py::fr_opacity_and_faux_ami, appliquée ici dans l'autre
-    sens (anglais contre anglais)."""
-    guess_key = en_guess.casefold()
+_BT_PREFIX_RE = re.compile(r"^(to|the|a|an)\s+", re.I)
+
+
+def _bt_normalize(text: str) -> str:
+    text = _BT_PREFIX_RE.sub("", text.strip().casefold())
+    return text.strip(" .,;:!?\"'")
+
+
+def _synset_neighbours(synset) -> set:
+    """Voisinage sémantique immédiat d'un synset : lui-même, ses
+    `similar_tos()` (aller-retour — indispensable pour les satellites
+    "s" : adequate.s.01 -> sufficient.a.01 n'est atteint que dans ce
+    sens) et les synsets dérivationnellement apparentés à ses lemmes."""
+    out = {synset}
+    out.update(synset.similar_tos())
+    for other in synset.similar_tos():
+        out.update(other.similar_tos())
+    for lemma in synset.lemmas():
+        for derived in lemma.derivationally_related_forms():
+            out.add(derived.synset())
+    return out
+
+
+def backtranslation_matches(en_guess: str, english_lemmas: list[str], synset=None) -> bool:
+    """Une rétro-traduction correcte n'est pas forcément un lemme du
+    synset d'origine : le LLM répond souvent par un synonyme fidèle au
+    SENS ("to behave" pour act.v.02, "sufficient" pour adequate.s.01)
+    plutôt que par le mot anglais exact. Comparer les CHAÎNES (même
+    tolérant, via difflib) confond donc "synonyme correct" et
+    "traduction fausse mais orthographiquement proche" — mesuré sur ce
+    magasin : 3 des 4 rétro-traductions correctes déjà en cache étaient
+    rejetées par l'ancien test.
+
+    Test principal, sémantique : la rétro-traduction retombe-t-elle,
+    via WordNet, dans le voisinage immédiat (_synset_neighbours) du
+    synset visé ? Repli orthographique (casefold exact ou similarité
+    difflib élevée) pour les mots absents de WordNet (formes fléchies,
+    expressions) — comportement d'origine, conservé en secours."""
+    guess_key = _bt_normalize(en_guess)
+
+    if synset is not None:
+        candidates = nwn.synsets(guess_key.replace(" ", "_"))
+        if candidates and (set(candidates) & _synset_neighbours(synset)):
+            return True
+
     for lemma in english_lemmas:
         lemma_key = lemma.casefold()
         if guess_key == lemma_key:
@@ -333,10 +394,14 @@ def collect_targets() -> dict[str, dict]:
 # Classification par sens (word) — omw-fr / WoNeF / LLM / rétro-traduction
 # ============================================================
 
-def classify_synset_key(target: dict) -> dict:
+def classify_synset_key(target: dict, diag: Counter | None = None) -> dict:
     """Construit l'entrée complète du magasin pour un sense_id
     (synset), avec ses preuves et son statut (`auto_strong` ou
-    `pending`)."""
+    `pending`).
+
+    `diag`, si fourni, reçoit un décompte par "porte" franchie ou non
+    pour les entrées `source_unique` — sert uniquement au diagnostic
+    de --retry-pending (voir run()), jamais stocké dans le magasin."""
     sense_id = target["key"]
     entry_base = {
         "key": sense_id, "kind": "synset", "lemmas_en": target["lemmas_en"],
@@ -400,7 +465,9 @@ def classify_synset_key(target: dict) -> dict:
             next((c for c in wonef if senses.fr_stem(c) == best_stem), None)
         fr_alt = sorted({c for c in omw + wonef if c != fr}, key=len)
         en_guess = llm_backtranslate(fr, definition_en) if fr else None
-        backtranslation_ok = bool(en_guess and backtranslation_matches(en_guess, english_lemmas))
+        backtranslation_ok = bool(
+            en_guess and backtranslation_matches(en_guess, english_lemmas, synset)
+        )
     elif omw and wonef:
         # "divergentes" : les DEUX ressources ont un avis, et elles se
         # CONTREDISENT (sinon on serait dans la branche `overlap`
@@ -422,11 +489,24 @@ def classify_synset_key(target: dict) -> dict:
         single_source = omw or wonef
         single_stems = omw_stems or wonef_stems
         agreement = "source_unique"
-        if llm_consensus_stem and llm_consensus_stem in single_stems:
-            fr = next((c for c in single_source if senses.fr_stem(c) == llm_consensus_stem), None)
+        # Accord LLM<->ressource élargi : un stem compte s'il a été
+        # proposé (en fr principal OU en fr_alt) dans au moins
+        # SENSE_FR_LLM_MIN_AGREE tirages distincts ET qu'il figure dans
+        # la ressource — pas seulement le stem majoritaire du fr
+        # principal (voir llm_stem_votes).
+        llm_stem_counts, _llm_stem_labels = llm_stem_votes(llm_votes_raw)
+        matching_stem = next(
+            (stem for stem, count in llm_stem_counts.most_common()
+             if count >= config.SENSE_FR_LLM_MIN_AGREE and stem in single_stems),
+            None,
+        )
+        if matching_stem:
+            fr = next((c for c in single_source if senses.fr_stem(c) == matching_stem), None)
             fr_alt = sorted({c for c in single_source if c != fr}, key=len)
             en_guess = llm_backtranslate(fr, definition_en) if fr else None
-            backtranslation_ok = bool(en_guess and backtranslation_matches(en_guess, english_lemmas))
+            backtranslation_ok = bool(
+                en_guess and backtranslation_matches(en_guess, english_lemmas, synset)
+            )
             if backtranslation_ok:
                 status = "auto_strong"
         if status != "auto_strong":
@@ -442,6 +522,16 @@ def classify_synset_key(target: dict) -> dict:
         # Jamais auto_strong ici : pas de ressource lexicale du tout,
         # donc le LLM (même unanime sur lui-même) reste une hypothèse,
         # pas une preuve (plan §5.5).
+
+    if diag is not None and agreement == "source_unique":
+        if not llm_votes_raw:
+            diag["source_unique/pas_de_votes_llm"] += 1
+        elif matching_stem is None:
+            diag["source_unique/consensus_hors_ressource"] += 1
+        elif status != "auto_strong":
+            diag["source_unique/retrotraduction_echouee"] += 1
+        else:
+            diag["source_unique/promue"] += 1
 
     entry_base.update({
         "pos": pos, "definition_en": definition_en,
@@ -597,7 +687,11 @@ def _stratified_sample(keys_by_agreement: dict[str, list[str]], limit: int) -> l
     return sample
 
 
-def run(retry_pending: bool = False, retry_limit: int | None = None) -> int:
+def run(
+    retry_pending: bool = False,
+    retry_limit: int | None = None,
+    retry_agreement: str | None = None,
+) -> int:
     config.ensure_data_dir()
     config.ensure_out_dir()
 
@@ -624,12 +718,21 @@ def run(retry_pending: bool = False, retry_limit: int | None = None) -> int:
         for k, e in store.items():
             if e["status"] == "pending":
                 by_agreement.setdefault(e["agreement"], []).append(k)
+        if retry_agreement is not None:
+            # Restreint à une seule catégorie : 3 des 4 catégories
+            # d'agreement (mwe_sans_ressource, aucune_source,
+            # divergentes) ne peuvent JAMAIS devenir auto_strong (voir
+            # la docstring du module) — sans ce filtre, un échantillon
+            # non ciblé dépense la plupart de ses appels LLM sur des
+            # entrées qui resteront `pending` par construction.
+            by_agreement = {retry_agreement: by_agreement.get(retry_agreement, [])}
         if retry_limit is not None:
             retry_keys = _stratified_sample(by_agreement, retry_limit)
         else:
             retry_keys = [k for keys in by_agreement.values() for k in keys]
         print(f"--retry-pending : {len(retry_keys)} entrée(s) `pending` du magasin "
               f"(tous livres confondus) vont être reclassées"
+              + (f", catégorie '{retry_agreement}'" if retry_agreement is not None else "")
               + (f" (échantillon limité à {retry_limit})." if retry_limit is not None else "."))
 
     to_process = [(k, targets[k]) for k in new_keys] + \
@@ -637,10 +740,11 @@ def run(retry_pending: bool = False, retry_limit: int | None = None) -> int:
 
     n_auto = 0
     n_promoted = 0
+    diag: Counter = Counter()
     for i, (key, target) in enumerate(to_process, start=1):
         was_pending = key in store and store[key]["status"] == "pending"
         if target["kind"] == "synset":
-            entry = classify_synset_key(target)
+            entry = classify_synset_key(target, diag=diag)
         else:
             entry = classify_mwe_key(target)
         store[key] = entry
@@ -669,6 +773,10 @@ def run(retry_pending: bool = False, retry_limit: int | None = None) -> int:
           f"{n_pending} en attente -> {config.SENSE_FR_REVIEW_PATH}).")
     if retry_pending:
         print(f"{n_promoted} entrée(s) promue(s) de `pending` à `auto_strong` grâce au LLM.")
+    if diag:
+        print("Ventilation par porte (entrées `source_unique` traitées ce run) :")
+        for k, v in sorted(diag.items()):
+            print(f"  {k}: {v}")
     return 0
 
 
@@ -685,8 +793,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--retry-limit", type=int, default=None,
         help="Avec --retry-pending, limite le nombre d'entrées reclassées (échantillon "
-             "réparti entre les catégories d'agreement) — pour tester avant de lancer "
-             "le retry complet, potentiellement long (jusqu'à ~4 appels LLM par entrée).",
+             "réparti entre les catégories d'agreement, ou une seule si --retry-agreement "
+             "est aussi fourni) — pour tester avant de lancer le retry complet, "
+             "potentiellement long (jusqu'à ~4 appels LLM par entrée).",
+    )
+    parser.add_argument(
+        "--retry-agreement", choices=sorted(AGREEMENT_RANK), default=None,
+        help="Avec --retry-pending, restreint le reclassement à une seule catégorie "
+             "d'agreement — utile pour cibler 'source_unique' (seule catégorie où le "
+             "LLM+rétro-traduction peuvent promouvoir en auto_strong ; les 3 autres "
+             "restent toujours `pending` par construction).",
     )
     args = parser.parse_args()
-    raise SystemExit(run(retry_pending=args.retry_pending, retry_limit=args.retry_limit))
+    raise SystemExit(run(
+        retry_pending=args.retry_pending,
+        retry_limit=args.retry_limit,
+        retry_agreement=args.retry_agreement,
+    ))
