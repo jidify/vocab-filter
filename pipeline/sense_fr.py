@@ -260,28 +260,6 @@ def llm_translate_votes(
     return votes
 
 
-def llm_stem_votes(llm_votes_raw: list[tuple[str, list[str]]]) -> tuple[Counter, dict[str, str]]:
-    """Comme `llm_vote_counts` (Counter sur le `fr` principal de
-    chaque tirage), mais compte aussi les `fr_alt` du même tirage comme
-    une proposition DE CE TIRAGE. Un accord LLM<->ressource peut porter
-    sur une variante listée en alt plutôt que sur le libellé principal
-    (ex. LLM répond "complètement" en fr principal mais "totalement" en
-    alt, et c'est "totalement" que la ressource propose : l'ancien
-    calcul, basé sur fr seul, ratait ce recoupement). Un même tirage ne
-    vote qu'une fois par stem, même si ce stem apparaît plusieurs fois
-    dans ses alt."""
-    counts: Counter = Counter()
-    labels: dict[str, str] = {}
-    for fr, alt in llm_votes_raw:
-        stems_this_draw = {senses.fr_stem(fr): fr}
-        for a in alt:
-            stems_this_draw.setdefault(senses.fr_stem(a), a)
-        for stem, label in stems_this_draw.items():
-            counts[stem] += 1
-            labels.setdefault(stem, label)
-    return counts, labels
-
-
 def llm_backtranslate(fr_candidate: str, definition_en: str) -> str | None:
     if not llm_is_available():
         return None
@@ -489,16 +467,18 @@ def classify_synset_key(target: dict, diag: Counter | None = None) -> dict:
         single_source = omw or wonef
         single_stems = omw_stems or wonef_stems
         agreement = "source_unique"
-        # Accord LLM<->ressource élargi : un stem compte s'il a été
-        # proposé (en fr principal OU en fr_alt) dans au moins
-        # SENSE_FR_LLM_MIN_AGREE tirages distincts ET qu'il figure dans
-        # la ressource — pas seulement le stem majoritaire du fr
-        # principal (voir llm_stem_votes).
-        llm_stem_counts, _llm_stem_labels = llm_stem_votes(llm_votes_raw)
-        matching_stem = next(
-            (stem for stem, count in llm_stem_counts.most_common()
-             if count >= config.SENSE_FR_LLM_MIN_AGREE and stem in single_stems),
-            None,
+        # Le stem qui compte est celui du fr PRINCIPAL majoritaire
+        # (llm_consensus_stem), jamais une simple mention en fr_alt.
+        # Une variante `fr_alt` est, par construction du prompt, une
+        # "variante acceptable" plus faible que la réponse principale
+        # — l'accepter comme preuve d'accord avec la ressource laisse
+        # une mention secondaire écraser le vrai choix du LLM. Mesuré
+        # sur ce magasin : privacy.n.01 promu vers "solitude" (le seul
+        # mot de WoNeF) alors que le LLM répondait "intimité" à
+        # l'unanimité en fr principal, "solitude" n'apparaissant qu'en
+        # fr_alt à chaque tirage — une contresens promu automatiquement.
+        matching_stem = (
+            llm_consensus_stem if llm_consensus_stem in single_stems else None
         )
         if matching_stem:
             fr = next((c for c in single_source if senses.fr_stem(c) == matching_stem), None)
