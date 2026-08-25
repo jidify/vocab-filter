@@ -6,7 +6,7 @@ Usage :
     uv run python run_pipeline.py --only mwe_judge # une seule étape
 
 Étapes, dans l'ordre d'exécution recommandé par le plan
-(S0+validation -> S1 -> S4 -> S2/S3 -> S5 -> S6/S7) :
+(S0+validation -> S1 -> S4 -> S2/S3 -> S5 -> S6b -> S6/S7) :
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ STAGES = [
     ("mwe_judge", "pipeline.mwe_judge"),
     ("select2", "pipeline.select"),  # relancé après mwe_judge pour appliquer les spans réservés
     ("senses", "pipeline.senses"),
+    ("sense_fr", "pipeline.sense_fr"),  # S6b : traduction FR de référence, par sense_id
     ("export", "pipeline.export"),
 ]
 

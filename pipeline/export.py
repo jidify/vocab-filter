@@ -11,7 +11,8 @@ from pipeline.score import build_records, aggregate_and_score, build_mwe_units
 
 CSV_FIELDS = [
     "canonical_form", "surface_forms", "unit_type", "pos", "sense_id",
-    "meaning_fr", "definition_en", "occurrences", "book_count", "dispersion",
+    "meaning_fr", "meaning_fr_official", "fr_status", "definition_en",
+    "occurrences", "book_count", "dispersion",
     "zipf_need", "aoa_component", "fr_opacity", "sense_surprise", "confidence",
     "score_comprehension", "score_reuse", "score_default", "needs_review",
 ]

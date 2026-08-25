@@ -113,7 +113,38 @@ UPOS_TO_WN = {"NOUN": "n", "VERB": "v", "ADJ": "a", "ADV": "r", "PROPN": "n"}
 
 CEFR_ORDER = {"A1": 1, "A2": 2, "B1": 3, "B2": 4, "C1": 5, "C2": 6}
 
+# ------------------------------------------------------------------
+# Traduction française de référence, indexée par sense_id (S6b)
+# ------------------------------------------------------------------
+
+# Magasin permanent, versionné dans git (contrairement à pipeline_out/,
+# régénéré à chaque run) : une ligne par sens, réutilisée d'un livre à
+# l'autre. Voir pipeline/sense_fr.py.
+DATA_DIR = ROOT / "data"
+SENSE_FR_STORE_PATH = DATA_DIR / "sense_fr.jsonl"
+SENSE_FR_LOCK_PATH = DATA_DIR / "sense_fr.lock.json"
+
+# wonef-precision.xml (voir WONEF_PRECISION_PATH ci-dessus) est absent
+# du dépôt : seule la variante f-score, compressée, est présente.
+WONEF_FSCORE_PATH = ROOT / "wonef-fscore.xml.bz2"
+
+SENSE_FR_REVIEW_PATH = OUT_DIR / "sense_fr_review.csv"
+
+# Nombre de formulations de prompt distinctes essayées pour la
+# traduction "de dictionnaire" (sans contexte de livre) d'un sens —
+# LLM_TEMPERATURE=0.0 rend le cache de llm.py déterministe par prompt
+# exact ; on varie donc le PHRASING plutôt que la température pour
+# obtenir plusieurs tirages. Ce ne sont pas des tirages statistiquement
+# indépendants (même modèle, même poids) : uniquement un filtre de
+# cohérence interne, jamais une "source" au sens du plan §5.5.
+SENSE_FR_LLM_DRAWS = 3
+SENSE_FR_LLM_MIN_AGREE = 2  # sur SENSE_FR_LLM_DRAWS, pour retenir un consensus LLM
+
 
 def ensure_out_dir() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_data_dir() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)

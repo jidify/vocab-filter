@@ -43,7 +43,7 @@ from collections import defaultdict
 
 from nltk.corpus import wordnet as nwn
 
-from pipeline import config, lexicon
+from pipeline import config, lexicon, sense_fr
 
 AOA_SIGN = -1.0  # -1 : précoce-mais-rare remonté, tardif pénalisé (position du plan)
                  # à retourner à +1 si l'arbitrage empirique (item 7 du plan) tranche
@@ -172,7 +172,31 @@ def build_records() -> list[dict]:
     return records
 
 
+def resolve_official_fr(sense_fr_store: dict[str, dict], key: str) -> tuple[list[str], str | None, str | None]:
+    """Traduction de référence validée pour une clé du magasin
+    data/sense_fr.jsonl (voir pipeline/sense_fr.py). Seuls `validated`
+    (relu par un humain) et `auto_strong` (concordance automatique
+    stricte) sont utilisés ici — `pending`/`rejected`/`no_equivalent`
+    ne produisent jamais de texte français, quel que soit ce que le
+    magasin contient pour cette clé.
+
+    Renvoie (fr_lemmas, meaning_fr_official, fr_status) :
+    - fr_lemmas alimente fr_opacity_and_faux_ami (liste vide si rien
+      d'officiel n'est disponible — l'appelant retombe alors sur son
+      propre repli, p.ex. fr_hits) ;
+    - meaning_fr_official / fr_status sont exportés tels quels."""
+    entry = sense_fr_store.get(key)
+    if entry is None:
+        return [], None, None
+    if entry["status"] not in ("validated", "auto_strong"):
+        return [], None, entry["status"]
+    fr_lemmas = [entry["fr"]] + (entry.get("fr_alt") or []) if entry.get("fr") else []
+    return fr_lemmas, entry.get("fr"), entry["status"]
+
+
 def aggregate_and_score(records: list[dict]) -> list[dict]:
+    sense_fr_store = sense_fr.load_store()
+
     grouped: dict[tuple, list[dict]] = defaultdict(list)
     for r in records:
         grouped[r["key"]].append(r)
@@ -182,8 +206,14 @@ def aggregate_and_score(records: list[dict]) -> list[dict]:
         lemma, wn_pos, sense_id = key
         first = occs[0]
 
-        fr_lemmas = first["fr_hits"] or []
-        opacity, _ = fr_opacity_and_faux_ami(lemma, fr_lemmas)
+        fr_hits = first["fr_hits"] or []
+        official_fr, meaning_fr_official, fr_status = resolve_official_fr(sense_fr_store, sense_id)
+        # fr_opacity : préfère la traduction officielle validée quand
+        # elle existe (fiable, contrairement à fr_hits — voir le plan).
+        # meaning_fr, lui, reste calculé depuis fr_hits SEUL (voir plus
+        # bas) : les deux colonnes restent complémentaires, pas
+        # concurrentes — meaning_fr_official porte la valeur officielle.
+        opacity, _ = fr_opacity_and_faux_ami(lemma, official_fr or fr_hits)
 
         aoa_resid = aoa_residual(first["surface"], lemma, first["zipf"])
         aoa_component = 0.5
@@ -200,7 +230,9 @@ def aggregate_and_score(records: list[dict]) -> list[dict]:
             "pos": wn_pos,
             "sense_id": sense_id,
             "definition_en": first["definition"],
-            "meaning_fr": ", ".join(fr_lemmas) if fr_lemmas else None,
+            "meaning_fr": ", ".join(fr_hits) if fr_hits else None,
+            "meaning_fr_official": meaning_fr_official,
+            "fr_status": fr_status,
             "occurrences": len(occs),
             "book_count": len(occs),
             "dispersion": len({o["segment_idx"] for o in occs}),
@@ -251,11 +283,16 @@ def build_mwe_units() -> list[dict]:
 
     opacity_by_label = {"idiome": 0.9, "phrasal_verb": 0.7, "semi_fige": 0.5}
 
+    sense_fr_store = sense_fr.load_store()
+
     units = []
     for r in raw:
         mwe_opacity = opacity_by_label.get(r["label"], 0.5)
         book_freq = r["book_count"]
         book_gain = _clip01(math.log1p(book_freq) / math.log1p(20))
+
+        mwe_key = f"mwe:{r['canonical_form']}:{r['label']}"
+        _, meaning_fr_official, fr_status = resolve_official_fr(sense_fr_store, mwe_key)
 
         units.append({
             "canonical_form": r["canonical_form"],
@@ -265,6 +302,8 @@ def build_mwe_units() -> list[dict]:
             "sense_id": r["label"],
             "definition_en": r["definition_en"],
             "meaning_fr": None,
+            "meaning_fr_official": meaning_fr_official,
+            "fr_status": fr_status,
             "occurrences": r["book_count"],
             "book_count": r["book_count"],
             "dispersion": r["dispersion"],
