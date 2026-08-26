@@ -579,19 +579,34 @@ def write_store(store: dict[str, dict]) -> None:
             f.write(json.dumps(store[key], ensure_ascii=False) + "\n")
 
 
-def format_occurrences_en(occurrences: list[dict]) -> str:
+def format_occurrences_en(
+    occurrences: list[dict], limit: int = config.SENSE_FR_FRONTIER_MAX_OCCURRENCES
+) -> str:
     """Formatage ("phrase1 || phrase2") des phrases du livre COURANT sur
     lesquelles une traduction s'appuie — `occurrences` vient TOUJOURS de
-    senses.load_occurrences_by_sense() sur le run en cours, jamais du
-    magasin data/sense_fr.jsonl (qui est le dictionnaire sens->traduction
+    senses.load_occurrences_by_sense() sur le run en cours (TOUTES les
+    occurrences de ce sens dans le livre, potentiellement des dizaines —
+    "beat" apparaît 30 fois dans "The Humans"), jamais du magasin
+    data/sense_fr.jsonl (qui est le dictionnaire sens->traduction
     PERMANENT, réutilisé d'un livre à l'autre : il ne doit jamais porter
     de texte propre à un seul livre — voir la docstring de
-    sense_fr_frontier.build_entry). Même format partout où une traduction
-    est exposée (sense_fr_review.csv, sense_id_suspects.csv,
-    vocab.csv/vocab.jsonl, sense_fr_adjudication.csv), pour que
-    pipeline_out/ (hors cache/) soit auto-suffisant pour l'audit d'une
-    traduction SUR LE LIVRE COURANT."""
-    return " || ".join(o["context"] for o in occurrences)
+    sense_fr_frontier.build_entry).
+
+    `limit` : replafonne ICI, au moment du formatage, via
+    senses.pick_diverse_occurrences — sans ce plafond une cellule CSV
+    peut atteindre plusieurs milliers de caractères (mesuré : 30
+    occurrences de "beat" jointes = ~8000 caractères), illisible et
+    cassant l'affichage Excel. Même plafond que celui montré au modèle
+    au moment de la décision (config.SENSE_FR_FRONTIER_MAX_OCCURRENCES)
+    par défaut, pour que la phrase affichée corresponde à celle
+    réellement vue par le modèle quand cette entrée vient d'être décidée.
+
+    Même format partout où une traduction est exposée (sense_fr_review.csv,
+    sense_id_suspects.csv, vocab.csv/vocab.jsonl, sense_fr_adjudication.csv),
+    pour que pipeline_out/ (hors cache/) soit auto-suffisant pour l'audit
+    d'une traduction SUR LE LIVRE COURANT."""
+    picked = senses.pick_diverse_occurrences(occurrences, limit) if occurrences else []
+    return " || ".join(o["context"] for o in picked)
 
 
 # ============================================================
