@@ -4,6 +4,17 @@ statut des entrées `pending`/`auto_llm` du magasin à partir d'un FAISCEAU
 de signaux, à la place de l'unique corroboration bruitée (omw-fr/WoNeF)
 qui laissait 210 lignes en désaccord (voir pipeline/sense_fr_frontier.py).
 
+Depuis que pipeline/sense_fr_frontier.py est devenu la passe PRIMAIRE et
+CONTEXTUELLE (phrases réelles + candidats mélangés, un seul appel), la
+fidélité du sens (`translation_type`, `sense_fit`) est déjà tranchée EN
+AMONT de ce module — une reformulation ou un sense_id douteux ne
+parviennent jamais jusqu'ici en `pending`/`auto_llm` "corroborable" sans
+avoir déjà été signalés. ex-`context_match` (comparer `fr` à la lecture
+contextuelle d'un second appel) a donc disparu : les deux venaient
+désormais du MÊME appel, la corroboration aurait été tautologique. Les
+signaux comptés ici sont exclusivement des sources HORS LIGNE et
+indépendantes du modèle — cf. le plan §5.5 sur la circularité.
+
 Trois passes, DÉLIBÉRÉMENT séparées car seule la première est utilisable
 sans clé API :
 
@@ -22,9 +33,12 @@ sans clé API :
   de Stage A en `auto_corroborated`, ou re-certifie un `auto_llm` qui
   n'avait alors QUE les tests déterministes.
 - **Stage C** (--with-judge, nécessite une clé API) : juge sur dossier,
-  candidats mélangés et non étiquetés, sur le résidu de A+B. Seul
-  composant du dispositif autorisé à RÉÉCRIRE `fr`/`fr_alt` plutôt que
-  de simplement corroborer ce qui existe déjà.
+  candidats mélangés et non étiquetés, PLUS les phrases réelles du livre
+  courant (recalculées via senses.load_occurrences_by_sense(), jamais
+  lues depuis le magasin — voir sa docstring), sur le résidu de A+B. Seul
+  composant du dispositif autorisé à RÉÉCRIRE `fr`/`fr_alt` plutôt que de
+  simplement corroborer ce qui
+  existe déjà.
 
 Le résultat, quel que soit le stage exécuté, est journalisé ligne à ligne
 dans pipeline_out/sense_fr_adjudication.csv (une colonne par signal) —
@@ -55,7 +69,7 @@ from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
 from wordfreq import zipf_frequency
 
-from pipeline import config, fr_norm, lex_bilingual, sense_fr
+from pipeline import config, fr_norm, lex_bilingual, senses, sense_fr
 
 ADJUDICATION_CSV_PATH = config.OUT_DIR / "sense_fr_adjudication.csv"
 
@@ -84,20 +98,6 @@ def resource_match(entry: dict) -> bool:
     evidence = entry.get("evidence", {})
     resources = list(evidence.get("omw_fr") or []) + list(evidence.get("wonef") or [])
     return fr_norm.any_match(_candidates_of(entry), resources)
-
-
-def context_match(entry: dict) -> tuple[bool, dict | None]:
-    """Corroboration par la passe contextuelle à sens imposé (voir
-    pipeline/sense_fr_context.py) — SEULE une `equivalence_directe`
-    compte : une reformulation ne tranche rien (voir la docstring de ce
-    module)."""
-    ctx = entry.get("context_evidence")
-    if not ctx:
-        return False, None
-    if ctx.get("translation_type") != "equivalence_directe":
-        return False, ctx
-    match = fr_norm.any_match(_candidates_of(entry), [ctx.get("traduction_lexicale", "")])
-    return match, ctx
 
 
 def dbnary_match(entry: dict) -> tuple[bool, list[str] | None, float | None]:
@@ -231,13 +231,14 @@ def polysemy_collision(decided_snapshot: dict[str, dict], entry: dict, candidate
     return None
 
 
-def compute_signals(decided_snapshot: dict[str, dict], entry: dict) -> dict:
+def compute_signals(decided_snapshot: dict[str, dict], entry: dict, occurrences_by_sense: dict[str, list[dict]]) -> dict:
     """Tous les signaux Stage A pour UNE entrée — ne modifie rien,
     utilisé à la fois pour la décision et pour la ligne d'audit.
     `decided_snapshot` : voir polysemy_collision (instantané figé, pas
-    le magasin en cours de mutation)."""
+    le magasin en cours de mutation). `occurrences_by_sense` : phrases du
+    LIVRE COURANT (senses.load_occurrences_by_sense()), jamais lues
+    depuis le magasin — voir sense_fr.format_occurrences_en."""
     res_match = resource_match(entry)
-    ctx_match, ctx = context_match(entry)
     db_match, db_candidates, db_score = dbnary_match(entry)
     ap_match = apertium_match(entry)
     wf_ok = wordfreq_ok(entry.get("fr"))
@@ -248,7 +249,12 @@ def compute_signals(decided_snapshot: dict[str, dict], entry: dict) -> dict:
 
     collision_key = polysemy_collision(decided_snapshot, entry, entry.get("fr"))
 
-    n_signals = sum([res_match, ctx_match, db_match])
+    # Trois signaux comptés, tous hors ligne et indépendants du modèle
+    # (voir la docstring du module — ex-context_match retiré : il
+    # comparait `fr` à un second appel du même modèle sur la même
+    # question, devenu tautologique depuis la fusion dans
+    # sense_fr_frontier.py).
+    n_signals = sum([res_match, db_match, ap_match])
     # `disc_ok` volontairement EXCLU des tests bloquants (voir
     # discrimination_rank) : mesuré à 100% de faux positifs sur un
     # premier échantillon, il resterait dans `deterministic_ok` un
@@ -258,10 +264,16 @@ def compute_signals(decided_snapshot: dict[str, dict], entry: dict) -> dict:
     return {
         "key": entry["key"],
         "resource_match": res_match,
-        "context_translation_lexicale": (ctx or {}).get("traduction_lexicale", ""),
-        "context_sens_contextuel": (ctx or {}).get("sens_contextuel", ""),
-        "context_translation_type": (ctx or {}).get("translation_type", ""),
-        "context_match": ctx_match,
+        # Informatifs seulement (déjà tranchés en amont par
+        # sense_fr_frontier.py, avant même que l'entrée puisse arriver
+        # ici en pending/auto_llm — voir la docstring du module) :
+        "translation_type": entry.get("translation_type") or "",
+        "sense_fit": entry.get("sense_fit") or "",
+        # Mêmes phrases que celles transmises au juge Stage C
+        # (run_stage_c) — journalisées ici pour que
+        # pipeline_out/sense_fr_adjudication.csv soit auto-suffisant à
+        # l'audit sans rouvrir data/sense_fr.jsonl.
+        "contexte_en": sense_fr.format_occurrences_en(occurrences_by_sense.get(entry["key"], [])),
         "dbnary_fr": "; ".join(db_candidates or []),
         "dbnary_score": round(db_score, 3) if db_score is not None else "",
         "dbnary_match": db_match,
@@ -289,8 +301,8 @@ def decide_stage_a(entry: dict, signals: dict) -> tuple[str, str] | None:
     if signals["n_corroborating_signals"] >= 2 and signals["deterministic_ok"]:
         matched = [s for s, ok in (
             ("resource", signals["resource_match"]),
-            ("context", signals["context_match"]),
             ("dbnary", signals["dbnary_match"]),
+            ("apertium", signals["apertium_match"]),
         ) if ok]
         return "auto_corroborated", "stage_a:" + "+".join(matched)
 
@@ -393,10 +405,20 @@ def run_stage_b(store: dict, targets: list[dict], model: str, batch_size: int = 
 # ============================================================
 
 
-def run_stage_c(store: dict, targets: list[dict], audits: dict[str, dict], model: str, batch_size: int = 20) -> dict[str, dict]:
+def run_stage_c(
+    store: dict, targets: list[dict], audits: dict[str, dict], model: str,
+    occurrences_by_sense: dict[str, list[dict]], batch_size: int = 20,
+) -> dict[str, dict]:
     """Juge sur dossier, candidats MÉLANGÉS et NON ÉTIQUETÉS (pas de "le
     modèle a dit", pas de "omw a dit") — seul composant du dispositif
-    autorisé à RÉÉCRIRE fr/fr_alt. Nécessite une clé API LiteLLM."""
+    autorisé à RÉÉCRIRE fr/fr_alt. Nécessite une clé API LiteLLM.
+
+    Reçoit aussi les phrases réelles du LIVRE COURANT
+    (`occurrences_by_sense`, senses.load_occurrences_by_sense() — jamais
+    lues depuis le magasin, voir sense_fr.format_occurrences_en) : sans
+    elles, le juge travaillerait à l'aveugle sur des candidats français
+    hors sol alors qu'il est le dernier recours pour un sens encore en
+    désaccord."""
     import hashlib
     import json as _json
     import random
@@ -418,7 +440,9 @@ def run_stage_c(store: dict, targets: list[dict], audits: dict[str, dict], model
 
     system = (
         "Tu es lexicographe bilingue anglais-français. Pour CHAQUE sens, on te "
-        "donne sa définition WordNet et une liste de candidats de traduction "
+        "donne sa définition WordNet, éventuellement une ou deux phrases RÉELLES "
+        "d'un livre où le mot apparaît dans ce sens (à privilégier — elles "
+        "montrent l'usage réel), et une liste de candidats de traduction "
         "française DÉJÀ PROPOSÉS par différentes sources (mélangés, sans "
         "indiquer leur origine). Choisis le meilleur candidat (ou réécris-en "
         "un meilleur si aucun ne convient vraiment), donne des variantes "
@@ -433,13 +457,17 @@ def run_stage_c(store: dict, targets: list[dict], audits: dict[str, dict], model
         audit = audits.get(entry["key"], {})
         candidates = list({
             entry.get("fr"), *(entry.get("fr_alt") or []),
-            audit.get("context_translation_lexicale") or None,
             *((audit.get("dbnary_fr") or "").split("; ") if audit.get("dbnary_fr") else []),
         } - {None, ""})
         rng.shuffle(candidates)
+        occs = occurrences_by_sense.get(entry["key"]) or []
+        sentences = " || ".join(
+            f'"{o["context"]}" (mot cible : {o["target_surface"]})' for o in occs[:2]
+        )
         system_prompt_lines.append(
             f"- {entry['key']} | {entry.get('pos') or 'mwe'} | {'/'.join(entry.get('lemmas_en', []))} | "
-            f"définition : {entry.get('definition_en') or '?'} | candidats : {' ; '.join(candidates) or '(aucun)'}"
+            f"définition : {entry.get('definition_en') or '?'} | phrase(s) : {sentences or '(aucune)'} | "
+            f"candidats : {' ; '.join(candidates) or '(aucun)'}"
         )
     user = f"Sens à trancher ({len(targets)}) :\n" + "\n".join(system_prompt_lines)
 
@@ -470,8 +498,8 @@ def run_stage_c(store: dict, targets: list[dict], audits: dict[str, dict], model
 
 AUDIT_FIELDS = [
     "key", "status_before", "kind", "lemmas_en", "pos", "suggested_fr", "suggested_fr_alt",
-    "resource_match", "context_translation_lexicale", "context_sens_contextuel",
-    "context_translation_type", "context_match", "dbnary_fr", "dbnary_score", "dbnary_match",
+    "translation_type", "sense_fit", "contexte_en",
+    "resource_match", "dbnary_fr", "dbnary_score", "dbnary_match",
     "apertium_match", "wordfreq_ok", "discrimination_rank", "discrimination_ok",
     "polysemy_collision_with", "n_corroborating_signals", "deterministic_ok",
     "backtranslation_en", "backtranslation_ok", "judge_fr", "judge_confidence", "judge_reason",
@@ -488,6 +516,9 @@ def run(
     judge_model: str = config.SENSE_FR_FRONTIER_MODEL,
 ) -> int:
     store = sense_fr.load_store()
+    # Phrases du LIVRE COURANT, jamais lues depuis le magasin permanent —
+    # voir sense_fr.format_occurrences_en et la docstring de compute_signals.
+    occurrences_by_sense = senses.load_occurrences_by_sense()
     candidates = [e for e in store.values() if e["status"] in ("pending", "auto_llm")]
     if limit is not None:
         candidates = candidates[:limit]
@@ -501,7 +532,7 @@ def run(
     audits: dict[str, dict] = {}
     n_promoted = n_downgraded = 0
     for entry in candidates:
-        signals = compute_signals(decided_snapshot, entry)
+        signals = compute_signals(decided_snapshot, entry, occurrences_by_sense)
         decision = decide_stage_a(entry, signals)
         audit_row = {**signals, "status_before": entry["status"]}
         if decision is not None:
@@ -564,7 +595,7 @@ def run(
 
     if with_judge and residual:
         print(f"Stage C (juge sur dossier) : {len(residual)} candidat(s).")
-        verdicts = run_stage_c(store, residual, audits, judge_model)
+        verdicts = run_stage_c(store, residual, audits, judge_model, occurrences_by_sense)
         for entry in residual:
             verdict = verdicts.get(entry["key"])
             if verdict is None:
@@ -610,7 +641,7 @@ def run(
         return 0
 
     sense_fr.write_store(store)
-    n_pending = sense_fr.write_review_csv(store)
+    n_pending = sense_fr.write_review_csv(store, occurrences_by_sense)
     print(f"{n_pending} entrée(s) encore `pending` -> {config.SENSE_FR_REVIEW_PATH}")
     return 0
 

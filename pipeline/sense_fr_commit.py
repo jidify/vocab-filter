@@ -26,7 +26,7 @@ from __future__ import annotations
 import csv
 from datetime import date
 
-from pipeline import config, sense_fr
+from pipeline import config, senses, sense_fr
 
 VALID_DECISIONS = {"ok", "no", "none"}
 
@@ -95,7 +95,9 @@ def run(reviewer: str = "human") -> int:
         n_committed[decision] += 1
 
     sense_fr.write_store(store)
-    n_pending = sense_fr.write_review_csv(store)
+    # Livre courant uniquement (voir sense_fr.format_occurrences_en) —
+    # jamais lu depuis le magasin.
+    n_pending = sense_fr.write_review_csv(store, senses.load_occurrences_by_sense())
 
     print(f"Validées : {n_committed['ok']} | Rejetées : {n_committed['no']} | "
           f"Sans équivalent : {n_committed['none']} | "

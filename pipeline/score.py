@@ -42,8 +42,9 @@ import math
 from collections import defaultdict
 
 from nltk.corpus import wordnet as nwn
+from wordfreq import zipf_frequency
 
-from pipeline import config, lexicon, sense_fr
+from pipeline import config, fr_norm, lexicon, senses, sense_fr
 
 AOA_SIGN = -1.0  # -1 : précoce-mais-rare remonté, tardif pénalisé (position du plan)
                  # à retourner à +1 si l'arbitrage empirique (item 7 du plan) tranche
@@ -172,6 +173,24 @@ def build_records() -> list[dict]:
     return records
 
 
+def _fr_alt_frequency_key(candidate: str) -> float:
+    """Clé de tri décroissant par fréquence d'usage réelle (wordfreq),
+    filet de sécurité INDÉPENDANT du modèle sur l'ordre de fr_alt (voir
+    le plan §6 : le modèle est déjà chargé de trier par fréquence dans
+    sa réponse, ceci ne fait que corriger un ordre implausible). Pour une
+    expression à plusieurs mots, le mot de contenu le moins fréquent
+    détermine le rang — un candidat n'est "courant" que si tous ses mots
+    le sont."""
+    words = fr_norm.readable_content_words(candidate)
+    if not words:
+        return -zipf_frequency(candidate, "fr")
+    return -min(zipf_frequency(w, "fr") for w in words)
+
+
+def _sort_fr_alt(fr_alt: list[str]) -> list[str]:
+    return sorted(fr_alt, key=_fr_alt_frequency_key)
+
+
 def resolve_official_fr(sense_fr_store: dict[str, dict], key: str) -> tuple[list[str], str | None, str | None]:
     """Traduction de référence validée pour une clé du magasin
     data/sense_fr.jsonl (voir pipeline/sense_fr.py,
@@ -197,12 +216,17 @@ def resolve_official_fr(sense_fr_store: dict[str, dict], key: str) -> tuple[list
         return [], None, None
     if entry["status"] not in ("validated", "auto_strong", "auto_llm", "auto_corroborated", "auto_judged"):
         return [], None, entry["status"]
-    fr_lemmas = [entry["fr"]] + (entry.get("fr_alt") or []) if entry.get("fr") else []
+    fr_lemmas = [entry["fr"]] + _sort_fr_alt(entry.get("fr_alt") or []) if entry.get("fr") else []
     return fr_lemmas, entry.get("fr"), entry["status"]
 
 
 def aggregate_and_score(records: list[dict]) -> list[dict]:
     sense_fr_store = sense_fr.load_store()
+    # Phrases du LIVRE COURANT (jamais lues depuis le magasin permanent,
+    # cross-livres — voir sense_fr.format_occurrences_en) : recalculées
+    # ici, une seule fois pour tout l'appel, pour que vocab.csv/vocab.jsonl
+    # soient auto-suffisants à l'audit sans rouvrir data/sense_fr.jsonl.
+    occurrences_by_sense = senses.load_occurrences_by_sense()
 
     grouped: dict[tuple, list[dict]] = defaultdict(list)
     for r in records:
@@ -215,6 +239,7 @@ def aggregate_and_score(records: list[dict]) -> list[dict]:
 
         fr_hits = first["fr_hits"] or []
         official_fr, meaning_fr_official, fr_status = resolve_official_fr(sense_fr_store, sense_id)
+        contexte_en = sense_fr.format_occurrences_en(occurrences_by_sense.get(sense_id, []))
         # fr_opacity : préfère la traduction officielle validée quand
         # elle existe (fiable, contrairement à fr_hits — voir le plan).
         # meaning_fr, lui, reste calculé depuis fr_hits SEUL (voir plus
@@ -239,6 +264,8 @@ def aggregate_and_score(records: list[dict]) -> list[dict]:
             "definition_en": first["definition"],
             "meaning_fr": ", ".join(fr_hits) if fr_hits else None,
             "meaning_fr_official": meaning_fr_official,
+            "meaning_fr_alt": "/".join(official_fr[1:]) if len(official_fr) > 1 else None,
+            "contexte_en": contexte_en,
             "fr_status": fr_status,
             "occurrences": len(occs),
             "book_count": len(occs),
@@ -291,6 +318,11 @@ def build_mwe_units() -> list[dict]:
     opacity_by_label = {"idiome": 0.9, "phrasal_verb": 0.7, "semi_fige": 0.5}
 
     sense_fr_store = sense_fr.load_store()
+    # Phrases du livre courant — voir aggregate_and_score. Restera vide en
+    # pratique pour les MWE aujourd'hui : senses.load_occurrences_by_sense()
+    # n'indexe que les occurrences "word" de senses.jsonl, pas les MWE —
+    # limitation préexistante, non corrigée ici (voir le plan).
+    occurrences_by_sense = senses.load_occurrences_by_sense()
 
     units = []
     for r in raw:
@@ -299,7 +331,8 @@ def build_mwe_units() -> list[dict]:
         book_gain = _clip01(math.log1p(book_freq) / math.log1p(20))
 
         mwe_key = f"mwe:{r['canonical_form']}:{r['label']}"
-        _, meaning_fr_official, fr_status = resolve_official_fr(sense_fr_store, mwe_key)
+        official_fr, meaning_fr_official, fr_status = resolve_official_fr(sense_fr_store, mwe_key)
+        contexte_en = sense_fr.format_occurrences_en(occurrences_by_sense.get(mwe_key, []))
 
         units.append({
             "canonical_form": r["canonical_form"],
@@ -310,6 +343,8 @@ def build_mwe_units() -> list[dict]:
             "definition_en": r["definition_en"],
             "meaning_fr": None,
             "meaning_fr_official": meaning_fr_official,
+            "meaning_fr_alt": "/".join(official_fr[1:]) if len(official_fr) > 1 else None,
+            "contexte_en": contexte_en,
             "fr_status": fr_status,
             "occurrences": r["book_count"],
             "book_count": r["book_count"],

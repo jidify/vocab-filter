@@ -1,15 +1,12 @@
 """Mesure du dispositif d'arbitrage — étape 7 du plan "Valider / corriger
 suggested_fr et suggested_fr_alt".
 
-PAS une mesure de précision : le signal le plus disponible (traduction
-contextuelle à sens imposé, pipeline/sense_fr_context.py) vient de la
-MÊME famille de modèle que la traduction "de dictionnaire" qu'elle sert à
-arbitrer — les deux ne sont pas des sources indépendantes au sens du
-plan §5.5. Ce que ce rapport mesure est un TAUX D'ACCORD entre deux
-lectures (contextuelle vs dictionnaire), et entre chaque signal et la
-décision finale — utile pour régler des seuils (jaccard, seuil LaBSE,
-nombre de signaux requis) et comparer deux configurations, JAMAIS à
-annoncer comme une précision absolue. Les seuls signaux réellement
+PAS une mesure de précision : `translation_type`/`sense_fit` viennent du
+MÊME appel que `fr` (pipeline/sense_fr_frontier.py, passe primaire et
+contextuelle depuis la fusion de l'ancienne pipeline/sense_fr_context.py)
+— ce ne sont donc pas des sources indépendantes au sens du plan §5.5, tout
+au plus un filtre de cohérence interne déjà appliqué EN AMONT de
+sense_fr_adjudicate.py (voir sa docstring). Les seuls signaux réellement
 indépendants du dispositif sont DBnary et Apertium (écrits par des
 humains, voir pipeline/lex_bilingual.py) — c'est leur taux d'accord avec
 le reste qui se rapproche le plus d'une mesure externe.
@@ -43,7 +40,6 @@ def report_signal_agreement(rows: list[dict]) -> None:
     print("=== Taux d'accord par signal (candidats pending/auto_llm arbitrés) ===")
     for signal, label in (
         ("resource_match", "omw-fr/WoNeF (auto., voir sense_fr_frontier)"),
-        ("context_match", "passe contextuelle — MÊME famille de modèle, pas indépendant"),
         ("dbnary_match", "DBnary (Wiktionnaire, humain, indépendant)"),
         ("apertium_match", "Apertium (dict. humain, indépendant, sens non distingué)"),
     ):
@@ -54,16 +50,21 @@ def report_signal_agreement(rows: list[dict]) -> None:
         print(f"  {signal:16s} {n_true:>4d}/{n:<4d} ({rate:>4.0%})  — {label}")
 
 
-def report_by_translation_type(rows: list[dict]) -> None:
-    print("\n=== Ventilation par translation_type (passe contextuelle, §6) ===")
-    counts = collections.Counter(r["context_translation_type"] for r in rows if r.get("context_translation_type"))
+def report_by_translation_type() -> None:
+    """Contrairement aux autres rapports de ce module, lit directement le
+    magasin plutôt que l'audit : `translation_type` est écrit par
+    sense_fr_frontier.py pour CHAQUE sens (pas seulement le résidu
+    pending/auto_llm arbitré par sense_fr_adjudicate.py)."""
+    store = sense_fr.load_store()
+    print("\n=== Ventilation par translation_type (passe primaire contextuelle) ===")
+    counts = collections.Counter(e.get("translation_type") for e in store.values() if e.get("translation_type"))
     total = sum(counts.values())
     if not total:
-        print("  (aucune donnée — pipeline/sense_fr_context.py n'a pas encore été exécuté "
+        print("  (aucune donnée — pipeline/sense_fr_frontier.py n'a pas encore été exécuté "
               "avec une clé API)")
         return
     for t, c in counts.most_common():
-        marker = " <- seule catégorie qui corrobore" if t == "equivalence_directe" else ""
+        marker = " <- seule catégorie verrouillable automatiquement" if t == "equivalence_directe" else ""
         print(f"  {t:20s} {c:>4d}/{total:<4d} ({c / total:.0%}){marker}")
 
 
@@ -94,8 +95,8 @@ def run() -> int:
               f"pipeline/sense_fr_adjudicate.py.")
     else:
         report_signal_agreement(rows)
-        report_by_translation_type(rows)
         report_decision_breakdown(rows)
+    report_by_translation_type()
     report_store_summary()
     return 0
 

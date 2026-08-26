@@ -623,6 +623,74 @@ def most_frequent_sense_fallback(word: str, wn_pos: str, synsets) -> dict:
     }
 
 
+# ============================================================
+# Relecture de pipeline_out/senses.jsonl par sense_id — utilisé par S6b
+# (pipeline/sense_fr_frontier.py, pipeline/sense_fr.py,
+# pipeline/sense_fr_adjudicate.py, pipeline/score.py) pour retrouver les
+# phrases RÉELLES du livre COURANT associées à un sense_id. Vit ici (pas
+# dans un module S6b) parce que c'est ce module qui écrit senses.jsonl,
+# et parce que sense_fr.py ne peut pas importer sense_fr_frontier.py sans
+# créer un cycle (sense_fr_frontier importe déjà sense_fr).
+#
+# IMPORTANT — ne JAMAIS persister le résultat dans data/sense_fr.jsonl :
+# ce magasin est le dictionnaire sens->traduction PERMANENT, réutilisé
+# d'un livre à l'autre (voir pipeline/sense_fr.py) ; les phrases qu'il
+# renvoie ici sont, elles, propres au livre dont pipeline_out/senses.jsonl
+# est le produit du run COURANT — jamais valables tel quel pour un autre
+# livre. Recalculer à chaque run/à chaque sortie plutôt que de mettre en
+# cache dans une structure partagée entre livres.
+# ============================================================
+
+
+def load_occurrences_by_sense() -> dict[str, list[dict]]:
+    """Index sense_id -> occurrences (context, target_surface, segment_idx)
+    depuis pipeline_out/senses.jsonl (le livre du run courant). Seules les
+    unités "word" (kind "synset") y ont une entrée par occurrence — les
+    MWE (occurrence_segment_idxs de selected_mwe.jsonl) n'y figurent pas
+    avec un mot cible unique par segment, donc restent hors de cette
+    source pour l'instant : elles n'auront simplement aucune occurrence
+    trouvée ici."""
+    by_sense: dict[str, list[dict]] = {}
+    decoder = json.JSONDecoder(strict=False)
+    n_corrupt = 0
+    with config.SENSES_PATH.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                occ = decoder.decode(line)
+            except json.JSONDecodeError:
+                n_corrupt += 1
+                continue
+            best = occ.get("best_sense")
+            context = occ.get("context")
+            target = occ.get("target_surface") or occ.get("word")
+            if not best or best == "aucun_sens_adapte" or not context or not target:
+                continue
+            by_sense.setdefault(best, []).append({
+                "context": context, "target_surface": target,
+                "segment_idx": occ.get("segment_idx", 0),
+            })
+    if n_corrupt:
+        print(f"  ({n_corrupt} ligne(s) corrompue(s) ignorée(s) dans {config.SENSES_PATH})")
+    return by_sense
+
+
+def pick_diverse_occurrences(occurrences: list[dict], k: int) -> list[dict]:
+    """k occurrences réparties dans le livre (pas les k premières —
+    l'ordre de segment_idx couvre le début/milieu/fin) : des contextes
+    différents sont ce qui rend un désaccord entre occurrences informatif
+    plutôt que redondant."""
+    ordered = sorted(occurrences, key=lambda o: o["segment_idx"])
+    n = len(ordered)
+    if n <= k:
+        return ordered
+    step = n / k
+    picked_idx = sorted({int(i * step) for i in range(k)})
+    return [ordered[i] for i in picked_idx]
+
+
 def run(top_k: int | None = None) -> int:
     config.ensure_out_dir()
 

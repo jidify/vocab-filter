@@ -7,6 +7,17 @@ Usage :
 
 Étapes, dans l'ordre d'exécution recommandé par le plan
 (S0+validation -> S1 -> S4 -> S2/S3 -> S5 -> S6b -> S6/S7) :
+
+S6b tourne en deux temps : sense_fr_frontier (passe primaire et
+contextuelle, modèle frontière via LiteLLM — voir sa docstring) puis
+sense_fr_adjudicate (arbitrage hors ligne, Stage A seul par défaut ;
+Stage B/C restent manuels, --with-backtranslation/--with-judge). Le chemin
+ollama local historique (pipeline/sense_fr.py::classify_synset_key) reste
+disponible via `uv run python -m pipeline.sense_fr --retry-pending` mais
+n'est plus dans l'enchaînement par défaut. Les deux étapes S6b sont
+SAUTÉES proprement (pas d'échec du run) si aucune clé API LiteLLM n'est
+disponible (ANTHROPIC_API_KEY/OPENAI_API_KEY, .env ou environnement) —
+export retombe alors sur ce qui est déjà dans data/sense_fr.jsonl.
 """
 
 from __future__ import annotations
@@ -22,9 +33,17 @@ STAGES = [
     ("mwe_judge", "pipeline.mwe_judge"),
     ("select2", "pipeline.select"),  # relancé après mwe_judge pour appliquer les spans réservés
     ("senses", "pipeline.senses"),
-    ("sense_fr", "pipeline.sense_fr"),  # S6b : traduction FR de référence, par sense_id
+    ("sense_fr_frontier", "pipeline.sense_fr_frontier"),   # S6b-1 : passe primaire contextuelle
+    ("sense_fr_adjudicate", "pipeline.sense_fr_adjudicate"),  # S6b-2 : arbitrage hors ligne (Stage A)
     ("export", "pipeline.export"),
 ]
+
+# Sautées proprement (pas d'échec du run) si aucune clé API LiteLLM n'est
+# disponible — utile pour rejouer S0-S5/S7 sans dépendre d'un fournisseur
+# externe. sense_fr_adjudicate tourne par défaut en Stage A seul (aucun
+# appel LLM), donc n'échoue en pratique jamais ici ; inclus quand même par
+# prudence si les valeurs par défaut changent un jour.
+FRONTIER_STAGES = {"sense_fr_frontier", "sense_fr_adjudicate"}
 
 
 def main() -> int:
@@ -53,7 +72,15 @@ def main() -> int:
     for name, module_name in stages:
         print(f"\n=== {name} ({module_name}) ===")
         module = importlib.import_module(module_name)
-        code = module.run()
+        try:
+            code = module.run()
+        except Exception as exc:
+            if name in FRONTIER_STAGES:
+                import litellm
+                if isinstance(exc, litellm.exceptions.AuthenticationError):
+                    print(f"  {name} sautée : aucune clé API LiteLLM disponible ({exc}).")
+                    continue
+            raise
         if code:
             print(f"Étape {name} a échoué (code {code}).")
             return code

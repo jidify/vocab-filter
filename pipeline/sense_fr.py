@@ -579,6 +579,21 @@ def write_store(store: dict[str, dict]) -> None:
             f.write(json.dumps(store[key], ensure_ascii=False) + "\n")
 
 
+def format_occurrences_en(occurrences: list[dict]) -> str:
+    """Formatage ("phrase1 || phrase2") des phrases du livre COURANT sur
+    lesquelles une traduction s'appuie — `occurrences` vient TOUJOURS de
+    senses.load_occurrences_by_sense() sur le run en cours, jamais du
+    magasin data/sense_fr.jsonl (qui est le dictionnaire sens->traduction
+    PERMANENT, réutilisé d'un livre à l'autre : il ne doit jamais porter
+    de texte propre à un seul livre — voir la docstring de
+    sense_fr_frontier.build_entry). Même format partout où une traduction
+    est exposée (sense_fr_review.csv, sense_id_suspects.csv,
+    vocab.csv/vocab.jsonl, sense_fr_adjudication.csv), pour que
+    pipeline_out/ (hors cache/) soit auto-suffisant pour l'audit d'une
+    traduction SUR LE LIVRE COURANT."""
+    return " || ".join(o["context"] for o in occurrences)
+
+
 # ============================================================
 # File de relecture
 # ============================================================
@@ -594,18 +609,29 @@ AGREEMENT_RANK = {
 REVIEW_FIELDS = [
     "key", "kind", "lemmas_en", "pos", "definition_en", "occurrences", "agreement",
     "suggested_fr", "suggested_fr_alt", "omw_fr", "wonef", "frontier_confidence",
+    "contexte_en", "sense_fit", "sense_fit_note",
     "fr_final", "fr_alt_final", "decision", "note",
 ]
 
 
-def write_review_csv(store: dict[str, dict]) -> int:
+def write_review_csv(
+    store: dict[str, dict], occurrences_by_sense: dict[str, list[dict]] | None = None
+) -> int:
     """Régénère la file de relecture à partir de TOUTES les entrées
     `pending` actuellement dans le magasin (pas seulement celles
     ajoutées à ce run) : la relecture peut se faire en plusieurs
     séances. `occurrences` est celui figé au moment où l'entrée a été
     créée (informatif — sert au tri, pas recalculé d'un livre à
-    l'autre)."""
+    l'autre).
+
+    `occurrences_by_sense` : phrases du LIVRE COURANT
+    (senses.load_occurrences_by_sense()), jamais lues depuis le magasin —
+    voir la docstring de format_occurrences_en. Optionnel (défaut : aucune
+    phrase, `contexte_en` reste vide) pour les appelants qui n'ont pas de
+    livre courant en contexte."""
     import csv
+
+    occurrences_by_sense = occurrences_by_sense or {}
 
     pending = [e for e in store.values() if e["status"] == "pending"]
     pending.sort(key=lambda e: (
@@ -630,6 +656,9 @@ def write_review_csv(store: dict[str, dict]) -> int:
                 "omw_fr": "; ".join(ev.get("omw_fr", [])),
                 "wonef": "; ".join(ev.get("wonef", [])),
                 "frontier_confidence": ev.get("frontier_confidence", ""),
+                "contexte_en": format_occurrences_en(occurrences_by_sense.get(e["key"], [])),
+                "sense_fit": e.get("sense_fit") or "",
+                "sense_fit_note": e.get("sense_fit_note") or "",
                 "fr_final": "", "fr_alt_final": "", "decision": "", "note": "",
             })
     return len(pending)
@@ -744,7 +773,11 @@ def run(
             write_store(store)
 
     write_store(store)
-    n_pending = write_review_csv(store)
+    # Livre courant uniquement (voir format_occurrences_en) — ce chemin
+    # ollama historique ne montre jamais de phrase au modèle (glose
+    # seule, cf. docstring du module), mais un humain qui relit
+    # sense_fr_review.csv en profite quand même.
+    n_pending = write_review_csv(store, senses.load_occurrences_by_sense())
 
     n_validated = sum(1 for e in store.values() if e["status"] == "validated")
     n_auto_total = sum(1 for e in store.values() if e["status"] == "auto_strong")
