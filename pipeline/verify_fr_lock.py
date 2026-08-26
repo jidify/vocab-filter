@@ -6,8 +6,10 @@ conditions strictes — voir leurs docstrings), `auto_llm` (modèle
 frontière seul, sur un sens qu'aucune ressource lexicale ne couvre —
 voir sense_fr_frontier.py), `auto_corroborated` (>=2 signaux
 indépendants, dont au moins une source humaine hors-ligne — voir
-sense_fr_adjudicate.py) ou `auto_judged` (juge sur dossier, confiance
-haute, même module). Ces statuts ne sont produits QUE par ces scripts ;
+sense_fr_adjudicate.py), `auto_judged` (juge sur dossier, confiance
+haute, même module) ou `auto_joint` (décision conjointe POS/sense_id sur
+un `pending` structurel, inventaire WordNet ouvert — voir
+sense_fr_reassign.py). Ces statuts ne sont produits QUE par ces scripts ;
 ce verrou détecte toute modification qui ne passerait pas par eux
 (édition manuelle du fichier, bug d'un futur run, etc.).
 
@@ -25,7 +27,9 @@ import json
 
 from pipeline import config, sense_fr
 
-LOCKED_STATUSES = {"validated", "auto_strong", "auto_llm", "auto_corroborated", "auto_judged"}
+LOCKED_STATUSES = {
+    "validated", "auto_strong", "auto_llm", "auto_corroborated", "auto_judged", "auto_joint",
+}
 
 
 def compute_lock(store: dict[str, dict]) -> dict[str, str]:

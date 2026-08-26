@@ -200,8 +200,10 @@ def resolve_official_fr(sense_fr_store: dict[str, dict], key: str) -> tuple[list
     aucune ressource lexicale ne couvrant le sens — voir
     sense_fr_frontier.py), `auto_corroborated` (>=2 signaux indépendants
     dont au moins une source humaine hors-ligne, voir
-    sense_fr_adjudicate.py) et `auto_judged` (juge sur dossier, confiance
-    haute, même module). `pending`/`rejected`/`no_equivalent` ne
+    sense_fr_adjudicate.py), `auto_judged` (juge sur dossier, confiance
+    haute, même module) et `auto_joint` (décision conjointe POS/sense_id
+    sur un `pending` structurel, voir sense_fr_reassign.py).
+    `pending`/`rejected`/`no_equivalent` ne
     produisent jamais de texte français, quel que soit ce que le magasin
     contient pour cette clé.
 
@@ -214,7 +216,9 @@ def resolve_official_fr(sense_fr_store: dict[str, dict], key: str) -> tuple[list
     entry = sense_fr_store.get(key)
     if entry is None:
         return [], None, None
-    if entry["status"] not in ("validated", "auto_strong", "auto_llm", "auto_corroborated", "auto_judged"):
+    if entry["status"] not in (
+        "validated", "auto_strong", "auto_llm", "auto_corroborated", "auto_judged", "auto_joint",
+    ):
         return [], None, entry["status"]
     fr_lemmas = [entry["fr"]] + _sort_fr_alt(entry.get("fr_alt") or []) if entry.get("fr") else []
     return fr_lemmas, entry.get("fr"), entry["status"]

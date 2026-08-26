@@ -131,10 +131,17 @@ WONEF_FSCORE_PATH = ROOT / "wonef-fscore.xml.bz2"
 SENSE_FR_REVIEW_PATH = OUT_DIR / "sense_fr_review.csv"
 
 # sense_id que la passe contextuelle (pipeline/sense_fr_frontier.py) juge
-# suspect ou douteux au vu des phrases réelles du livre — boucle de retour
-# vers S5 (pipeline/senses.py), qui ignore ce fichier pour l'instant : sans
-# lui le même mauvais sense_id reviendrait à l'identique au prochain livre.
+# suspect ou douteux au vu des phrases réelles du livre. Consommé par
+# pipeline/sense_fr_reassign.py (S6c), qui rouvre POS/sense_id à inventaire
+# WordNet OUVERT sur ces entrées précises — voir sa docstring. S5
+# (pipeline/senses.py) continue d'ignorer ce fichier : sans boucle jusque-là,
+# le même mauvais sense_id reviendrait à l'identique au prochain livre.
 SENSE_ID_SUSPECTS_PATH = OUT_DIR / "sense_id_suspects.csv"
+
+# Propositions de réassignation POS/sense_id que S6c n'a pas pu promouvoir
+# automatiquement (changement de POS, ou aucun sense_id WordNet exact) —
+# relecture humaine, voir pipeline/sense_fr_reassign.py.
+SENSE_ID_REASSIGN_PATH = OUT_DIR / "sense_id_reassignments.csv"
 
 # Nombre de formulations de prompt distinctes essayées pour la
 # traduction "de dictionnaire" (sans contexte de livre) d'un sens —
@@ -163,6 +170,41 @@ SENSE_FR_FRONTIER_BATCH_SIZE = 40   # sens par appel — items alourdis par les 
 SENSE_FR_FRONTIER_MAX_WORKERS = 10  # lots traités en parallèle (litellm.batch_completion)
 SENSE_FR_FRONTIER_MAX_OCCURRENCES = 2   # phrases distinctes présentées par sens (463/900 sens
                                          # du magasin actuel n'en ont de toute façon qu'une seule)
+
+# Taille de lot pour S6c (pipeline/sense_fr_reassign.py) — DÉLIBÉRÉMENT
+# distincte de SENSE_FR_FRONTIER_BATCH_SIZE. Un run réel avec batch_size=40
+# (24 entrées envoyées en un seul appel) a produit des réassignations fausses
+# (sense_id valide mais dont la définition ne correspond pas à la traduction
+# produite — ex. beat.n.08 -> beat.n.06 "the sound of stroke or blow" pour
+# fr="petite pause") ; les MÊMES entrées, rejouées seules dans un lot de 6,
+# ont donné les bonnes réponses (dont sense_id=null, correct, pour ce cas
+# précis). Sans temperature=0 possible sur la famille GPT-5 (voir
+# OLLAMA_MODEL plus haut), un lot plus petit — celui réellement validé par
+# eval_frontier_ablation.run_joint (batch_size=10) — est la seule protection
+# mesurée contre cette dégradation.
+SENSE_FR_REASSIGN_BATCH_SIZE = 10
+
+# Liste blanche des modèles autorisés pour un appel frontière/conjoint (S6b
+# pipeline/sense_fr_frontier.py, S6c pipeline/sense_fr_reassign.py). Un seul
+# élément aujourd'hui, volontairement : le but n'est pas de choisir parmi
+# plusieurs modèles interchangeables au moment de l'appel, c'est d'empêcher
+# qu'un --model tapé de travers (ou un défaut qu'on aurait oublié de changer)
+# ne déclenche SILENCIEUSEMENT un modèle plus coûteux que celui budgété.
+# Pour utiliser un autre modèle : l'ajouter ici explicitement — un changement
+# visible dans un diff, jamais un override qui passe inaperçu en ligne de
+# commande. Ne s'applique volontairement PAS au modèle JUGE du benchmark
+# (pipeline/eval_frontier_ablation.py:DEFAULT_JUDGE_MODEL), qui doit rester
+# indépendant du modèle candidat par construction.
+ALLOWED_FRONTIER_MODELS = {SENSE_FR_FRONTIER_MODEL}
+
+
+def require_frontier_model(model: str) -> None:
+    if model not in ALLOWED_FRONTIER_MODELS:
+        raise SystemExit(
+            f"Modèle '{model}' non autorisé pour un appel frontière/conjoint — "
+            f"liste blanche actuelle : {sorted(ALLOWED_FRONTIER_MODELS)}. "
+            f"Pour l'utiliser sciemment, ajoute-le à config.ALLOWED_FRONTIER_MODELS."
+        )
 
 
 def ensure_out_dir() -> None:

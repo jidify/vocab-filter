@@ -341,6 +341,20 @@ def _translate_batches(
 
 SUSPECT_AGREEMENTS = {"sense_id_suspect", "sense_id_douteux"}
 
+# Statuts que cette passe ne doit JAMAIS reproduire ni écraser : `validated`
+# est une décision humaine (sense_fr_commit.py), `auto_joint` une décision
+# conjointe POS/sense_id à inventaire ouvert (sense_fr_reassign.py) que cette
+# passe — qui recopie le sense_id imposé à l'identique, voir SYSTEM_PROMPT —
+# ne peut par construction pas reproduire. Sans cette garde, `run()` réévalue
+# INCONDITIONNELLEMENT toute clé pertinente pour le livre courant (voir la
+# boucle plus bas), y compris celles déjà décidées autrement ; verify_fr_lock
+# ne fait que détecter ce genre d'écrasement après coup, ne le prévient pas.
+PROTECTED_STATUSES = {"validated", "auto_joint"}
+
+
+def is_protected(existing: dict | None) -> bool:
+    return existing is not None and existing.get("status") in PROTECTED_STATUSES
+
 
 def build_entry(target: dict, translation: SenseTranslation | None) -> dict:
     """N'écrit JAMAIS les phrases du livre dans l'entrée renvoyée : cette
@@ -451,6 +465,7 @@ def write_sense_id_suspects_csv(store: dict[str, dict], occurrences_by_sense: di
 
 
 def run(model: str = config.SENSE_FR_FRONTIER_MODEL, limit: int | None = None, dry_run: bool = False) -> int:
+    config.require_frontier_model(model)
     resolved, unresolved = collect_frontier_targets()
     if limit is not None:
         resolved = resolved[:limit]
@@ -502,14 +517,21 @@ def run(model: str = config.SENSE_FR_FRONTIER_MODEL, limit: int | None = None, d
     store = sense_fr.load_store()
     n_by_status: dict[str, int] = {}
     n_suspect = 0
+    n_protected = 0
     for batch, translations in zip(batches, translations_by_batch):
         for target, _occs, _candidates in batch:
+            if is_protected(store.get(target["key"])):
+                n_protected += 1
+                continue
             translation = translations.get(target["key"])
             entry = build_entry(target, translation)
             store[entry["key"]] = entry
             n_by_status[entry["status"]] = n_by_status.get(entry["status"], 0) + 1
             if entry.get("agreement") in SUSPECT_AGREEMENTS:
                 n_suspect += 1
+    if n_protected:
+        print(f"  {n_protected} clé(s) déjà validée(s)/auto_joint laissée(s) intacte(s) "
+              f"(voir PROTECTED_STATUSES).")
 
     for target in unresolved:
         store[target["key"]] = {
@@ -551,10 +573,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model", default=config.SENSE_FR_FRONTIER_MODEL,
-        help="Modèle LiteLLM (préfixé par le fournisseur, p.ex. anthropic/claude-sonnet-5, "
-             "anthropic/claude-haiku-4-5, openai/gpt-5-mini...). Le fournisseur lit ses "
-             "identifiants depuis les variables d'environnement standard "
-             "(ANTHROPIC_API_KEY, OPENAI_API_KEY...).",
+        choices=sorted(config.ALLOWED_FRONTIER_MODELS),
+        help="Modèle LiteLLM — restreint à config.ALLOWED_FRONTIER_MODELS (voir sa docstring : "
+             "empêche un --model tapé de travers de déclencher silencieusement un modèle plus "
+             "coûteux). Pour en utiliser un autre, l'ajouter explicitement à cette liste blanche.",
     )
     parser.add_argument(
         "--limit", type=int, default=None,
