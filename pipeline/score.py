@@ -318,10 +318,10 @@ def build_mwe_units() -> list[dict]:
     opacity_by_label = {"idiome": 0.9, "phrasal_verb": 0.7, "semi_fige": 0.5}
 
     sense_fr_store = sense_fr.load_store()
-    # Phrases du livre courant — voir aggregate_and_score. Restera vide en
-    # pratique pour les MWE aujourd'hui : senses.load_occurrences_by_sense()
-    # n'indexe que les occurrences "word" de senses.jsonl, pas les MWE —
-    # limitation préexistante, non corrigée ici (voir le plan).
+    # Phrases du livre courant — voir aggregate_and_score. Couvre aussi les
+    # clés `mwe:*` : senses.load_occurrences_by_sense() fusionne désormais
+    # senses.jsonl (occurrences "word") ET senses.load_mwe_occurrences_by_key()
+    # (occurrences "mwe", via selected_mwe.jsonl + mwe_confirmed_spans.jsonl).
     occurrences_by_sense = senses.load_occurrences_by_sense()
 
     units = []

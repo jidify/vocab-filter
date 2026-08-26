@@ -460,9 +460,16 @@ def run_stage_c(
             *((audit.get("dbnary_fr") or "").split("; ") if audit.get("dbnary_fr") else []),
         } - {None, ""})
         rng.shuffle(candidates)
-        occs = occurrences_by_sense.get(entry["key"]) or []
+        occs_all = occurrences_by_sense.get(entry["key"]) or []
+        # Mêmes phrases, dans le même ordre, que la colonne contexte_en de
+        # l'audit (voir compute_signals ci-dessus et sense_fr.format_occurrences_en) :
+        # pick_diverse_occurrences, pas les 2 premières dans l'ordre du
+        # fichier — sinon le juge peut voir des phrases différentes de
+        # celles que pipeline_out/sense_fr_adjudication.csv prétend lui
+        # avoir montrées.
+        occs = senses.pick_diverse_occurrences(occs_all, config.SENSE_FR_FRONTIER_MAX_OCCURRENCES) if occs_all else []
         sentences = " || ".join(
-            f'"{o["context"]}" (mot cible : {o["target_surface"]})' for o in occs[:2]
+            f'"{o["context"]}" (mot cible : {o["target_surface"]})' for o in occs
         )
         system_prompt_lines.append(
             f"- {entry['key']} | {entry.get('pos') or 'mwe'} | {'/'.join(entry.get('lemmas_en', []))} | "

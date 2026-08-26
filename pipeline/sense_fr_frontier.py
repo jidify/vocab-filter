@@ -473,12 +473,30 @@ def run(model: str = config.SENSE_FR_FRONTIER_MODEL, limit: int | None = None, d
         items.append((target, occs, candidates))
 
     if n_no_occurrence:
-        print(f"  {n_no_occurrence} cible(s) sans occurrence dans {config.SENSES_PATH} "
-              f"(typiquement des MWE, cf. la limitation notée dans la docstring) — "
-              f"traduites glose seule.")
+        print(f"  {n_no_occurrence} cible(s) sans occurrence exploitable dans "
+              f"{config.SENSES_PATH}/{config.SELECTED_MWE_PATH} — traduites glose seule.")
 
+    # Lots découpés PAR `kind` (synset / mwe), jamais mélangés : le cache
+    # disque est indexé sur le texte exact du prompt d'un lot entier
+    # (_cache_path ci-dessus). Sans ce découpage, ajouter du contexte aux
+    # MWE changerait le texte de TOUT lot qui mélange les deux (il y en a
+    # un seul, à la frontière synset/mwe de collect_targets — les MWE sont
+    # toujours en fin de liste) et forcerait à rejouer ce lot entier,
+    # synsets déjà décidés inclus. En les isolant, tout lot 100% synset de
+    # taille pleine (batch_size) reproduit un lot déjà vu -> cache disque,
+    # gratuit. EXCEPTION inévitable : le lot synset RESTANT (le nombre de
+    # synsets n'est pas un multiple de batch_size) n'a jamais existé seul
+    # dans le cache — il était fondu dans l'ancien lot mixte — donc lui
+    # sera rejoué au modèle comme les lots MWE. verify_fr_lock (voir
+    # data/sense_fr.lock.json) reste le filet de sécurité si ce lot
+    # change la traduction verrouillée d'un synset qu'il contient.
     batch_size = config.SENSE_FR_FRONTIER_BATCH_SIZE
-    batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+    items_by_kind: dict[str, list[tuple[dict, list[dict], list[str]]]] = {}
+    for item in items:
+        items_by_kind.setdefault(item[0]["kind"], []).append(item)
+    batches: list[list[tuple[dict, list[dict], list[str]]]] = []
+    for kind_items in items_by_kind.values():
+        batches.extend(kind_items[i:i + batch_size] for i in range(0, len(kind_items), batch_size))
     translations_by_batch, cost = _translate_batches(batches, model)
 
     store = sense_fr.load_store()

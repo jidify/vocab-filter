@@ -624,12 +624,14 @@ def most_frequent_sense_fallback(word: str, wn_pos: str, synsets) -> dict:
 
 
 # ============================================================
-# Relecture de pipeline_out/senses.jsonl par sense_id — utilisé par S6b
-# (pipeline/sense_fr_frontier.py, pipeline/sense_fr.py,
-# pipeline/sense_fr_adjudicate.py, pipeline/score.py) pour retrouver les
-# phrases RÉELLES du livre COURANT associées à un sense_id. Vit ici (pas
-# dans un module S6b) parce que c'est ce module qui écrit senses.jsonl,
-# et parce que sense_fr.py ne peut pas importer sense_fr_frontier.py sans
+# Relecture de pipeline_out/senses.jsonl (+ selected_mwe.jsonl pour les
+# clés `mwe:*`) par sense_id — utilisé par S6b (pipeline/sense_fr_frontier.py,
+# pipeline/sense_fr.py, pipeline/sense_fr_adjudicate.py, pipeline/score.py)
+# pour retrouver les phrases RÉELLES du livre COURANT associées à un
+# sense_id. Vit ici (pas dans un module S6b) parce que c'est ce module qui
+# écrit senses.jsonl et construit le contexte élargi par segment
+# (build_wide_context_from_segments, réutilisé tel quel pour les MWE), et
+# parce que sense_fr.py ne peut pas importer sense_fr_frontier.py sans
 # créer un cycle (sense_fr_frontier importe déjà sense_fr).
 #
 # IMPORTANT — ne JAMAIS persister le résultat dans data/sense_fr.jsonl :
@@ -638,18 +640,19 @@ def most_frequent_sense_fallback(word: str, wn_pos: str, synsets) -> dict:
 # renvoie ici sont, elles, propres au livre dont pipeline_out/senses.jsonl
 # est le produit du run COURANT — jamais valables tel quel pour un autre
 # livre. Recalculer à chaque run/à chaque sortie plutôt que de mettre en
-# cache dans une structure partagée entre livres.
+# cache dans une structure partagée entre livres — le cache module-level
+# `_mwe_occurrences_cache` ci-dessous ne survit qu'un seul processus (un
+# seul run), même principe que `_segment_index_cache` plus haut.
 # ============================================================
 
 
 def load_occurrences_by_sense() -> dict[str, list[dict]]:
     """Index sense_id -> occurrences (context, target_surface, segment_idx)
-    depuis pipeline_out/senses.jsonl (le livre du run courant). Seules les
-    unités "word" (kind "synset") y ont une entrée par occurrence — les
-    MWE (occurrence_segment_idxs de selected_mwe.jsonl) n'y figurent pas
-    avec un mot cible unique par segment, donc restent hors de cette
-    source pour l'instant : elles n'auront simplement aucune occurrence
-    trouvée ici."""
+    depuis pipeline_out/senses.jsonl (le livre du run courant), fusionné
+    avec load_mwe_occurrences_by_key() ci-dessous pour les clés `mwe:*`
+    (pipeline_out/selected_mwe.jsonl) : les deux sources ont des espaces
+    de clés disjoints par construction (sense_id WordNet vs préfixe
+    `mwe:`), donc la fusion est une simple mise à jour de dict."""
     by_sense: dict[str, list[dict]] = {}
     decoder = json.JSONDecoder(strict=False)
     n_corrupt = 0
@@ -674,7 +677,66 @@ def load_occurrences_by_sense() -> dict[str, list[dict]]:
             })
     if n_corrupt:
         print(f"  ({n_corrupt} ligne(s) corrompue(s) ignorée(s) dans {config.SENSES_PATH})")
+    by_sense.update(load_mwe_occurrences_by_key())
     return by_sense
+
+
+_mwe_occurrences_cache: dict[str, list[dict]] | None = None
+
+
+def load_mwe_occurrences_by_key() -> dict[str, list[dict]]:
+    """Clé `mwe:{canonical_form}:{label}` -> occurrences, MÊME forme que
+    pour les mots ({context, target_surface, segment_idx}) : la fenêtre de
+    contexte est construite par le même build_wide_context_from_segments
+    que pour un mot seul (±config.CONTEXT_WINDOW segments), donc une MWE
+    et un mot montrent au modèle exactement le même genre d'extrait.
+
+    Source : pipeline_out/selected_mwe.jsonl (occurrence_segment_idxs,
+    voir select.py::build_mwe_units) pour la liste des segments, et
+    pipeline_out/mwe_confirmed_spans.jsonl pour la forme fléchie
+    réellement rencontrée dans chaque segment (repli sur canonical_form
+    si le span est introuvable). Renvoie {} si selected_mwe.jsonl
+    n'existe pas encore (même garde que score.build_mwe_units)."""
+    global _mwe_occurrences_cache
+    if _mwe_occurrences_cache is not None:
+        return _mwe_occurrences_cache
+
+    if not config.SELECTED_MWE_PATH.exists():
+        _mwe_occurrences_cache = {}
+        return _mwe_occurrences_cache
+
+    with config.SELECTED_MWE_PATH.open(encoding="utf-8") as f:
+        mwe_units = [json.loads(l) for l in f]
+
+    surface_by_segment: dict[tuple[str, int], str] = {}
+    if config.MWE_SPANS_PATH.exists():
+        with config.MWE_SPANS_PATH.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                for span in row.get("spans", []):
+                    surface_by_segment[(span["idiom"], span["segment_idx"])] = span["surface"]
+
+    segments = load_segments()
+    by_key: dict[str, list[dict]] = {}
+    for u in mwe_units:
+        key = f"mwe:{u['canonical_form']}:{u['label']}"
+        occs = []
+        for seg_idx in u["occurrence_segment_idxs"]:
+            wide = build_wide_context_from_segments(segments, seg_idx)
+            if not wide["text"]:
+                continue
+            surface = surface_by_segment.get((u["canonical_form"], seg_idx), u["canonical_form"])
+            occs.append({
+                "context": wide["text"], "target_surface": surface,
+                "segment_idx": seg_idx,
+            })
+        by_key[key] = occs
+
+    _mwe_occurrences_cache = by_key
+    return by_key
 
 
 def pick_diverse_occurrences(occurrences: list[dict], k: int) -> list[dict]:
