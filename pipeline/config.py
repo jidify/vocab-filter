@@ -109,6 +109,15 @@ CONTEXT_WINDOW = 2  # segments voisins de chaque côté
 
 POS_TO_UPOS = {"n": "NOUN", "v": "VERB", "a": "ADJ", "r": "ADV"}
 POS_TO_WN = {"noun": "n", "verb": "v", "adjective": "a", "adverb": "r"}
+# PROPN -> "n" est délibéré, pas un oubli : dans un texte de théâtre,
+# spaCy mal-tagge en PROPN nombre de noms communs (didascalies et
+# répliques capitalisées) — les exclure ici priverait le pipeline de
+# mots comme "offstage" ou "melee". Le filtrage des VRAIES entités
+# nommées se fait en aval, où l'information est plus fiable :
+# select.py::is_likely_named_entity (au niveau du TYPE, avant S5) et
+# score.py::is_named_entity_sense (au niveau du SENS retenu, via
+# WordNet instance_hypernyms — le signal qui distingue "Scranton" de
+# "melee" ou "offstage", contrairement au tag spaCy seul).
 UPOS_TO_WN = {"NOUN": "n", "VERB": "v", "ADJ": "a", "ADV": "r", "PROPN": "n"}
 
 CEFR_ORDER = {"A1": 1, "A2": 2, "B1": 3, "B2": 4, "C1": 5, "C2": 6}

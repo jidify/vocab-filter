@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 
+from nltk.corpus import wordnet as nwn
+
 from pipeline import config, lexicon
 from pipeline.mwe import get_idiom_definition
 
@@ -90,6 +92,47 @@ def build_types(mwe_spans_by_segment: dict[int, list[dict]] | None = None) -> di
     return types
 
 
+def has_common_synset(lemma: str, wn_pos: str) -> bool:
+    """Au moins un synset NON-instance (donc un nom COMMUN, pas une
+    entité nommée) pour ce lemme/POS. Sert de garde-fou à
+    is_likely_named_entity : un lemme mal-taggé PROPN par spaCy mais
+    qui a un sens commun en WordNet (ex. "offstage", "melee", "acne" —
+    fréquents dans une pièce de théâtre, où les didascalies/répliques
+    capitalisées trompent le tagger) ne doit jamais être écarté ici."""
+
+    wanted = {"a", "s"} if wn_pos == "a" else {wn_pos}
+    return any(
+        synset.pos() in wanted and not synset.instance_hypernyms()
+        for synset in nwn.synsets(lemma)
+    )
+
+
+def is_likely_named_entity(entry: dict, meta: dict) -> bool:
+    """Écarte un type SEULEMENT si les trois conditions sont réunies :
+    toutes ses occurrences sont taggées PROPN par spaCy, il est absent
+    du jeu de données de prévalence (donc pas mesuré comme mot courant
+    du français-anglais partagé), ET aucun synset commun n'existe pour
+    lui. La conjonction est ce qui rend la garde sûre — chacune seule
+    laisserait passer trop de faux positifs (voir has_common_synset).
+
+    Repli conservateur pour le gros du bruit théâtral qu'aucun autre
+    filtre n'attrapait : prénoms/toponymes (aimee, deirdre, brigid —
+    ce dernier consommait à lui seul 105 arbitrages LLM en S5 pour finir
+    'aucun_sens_adapte' 105 fois, WordNet ne connaissant "brigid" que
+    comme sainte irlandaise), bruit OCR, onomatopées (ewww, woooooo),
+    contractions (coulda, shoulda), marques (verizon, klonopin) et
+    formes fléchies mal lemmatisées (mumbled, noticing). Complète, sans
+    le remplacer, le re-filtrage au niveau du SENS fait par
+    score.py::is_named_entity_sense (ex. "queens", "lord", "god" ne
+    sont pas toujours taggés PROPN et passent cette porte-ci)."""
+
+    if meta["prevalence_source"] != "absent":
+        return False
+    if any(occ["upos"] != "PROPN" for occ in entry["occurrences"]):
+        return False
+    return not has_common_synset(entry["lemma"], entry["wn_pos"])
+
+
 def gate(entry: dict) -> tuple[bool, dict]:
     """Retourne (garder, métadonnées) pour un type."""
 
@@ -108,8 +151,9 @@ def gate(entry: dict) -> tuple[bool, dict]:
     if prevalence is None:
         # Absent du jeu de données : gardé, signalé (le plan : "ou
         # absent du jeu de données, gardé + signalé"). Peut être un mot
-        # rare légitime, ou un artefact d'OCR/nom propre — S6 pourra
-        # aussi s'appuyer sur analysis_confidence pour distinguer.
+        # rare légitime — le cas nom propre/artefact d'OCR est écarté
+        # juste en dessous par is_likely_named_entity, avant que S6
+        # n'ait à le voir.
         meta["prevalence_source"] = "absent"
     else:
         meta["pknown"] = prevalence.pknown
@@ -118,9 +162,15 @@ def gate(entry: dict) -> tuple[bool, dict]:
         meta["prevalence_source"] = "found"
 
         if prevalence.nobs >= config.MIN_NOBS and prevalence.pknown < config.MIN_PKNOWN:
+            meta["drop_reason"] = "pknown"
             return False, meta
 
+    if is_likely_named_entity(entry, meta):
+        meta["drop_reason"] = "named_entity"
+        return False, meta
+
     if lexicon.should_exclude_cefr(set(meta["cefr_levels"])):
+        meta["drop_reason"] = "cefr"
         return False, meta
 
     return True, meta
@@ -158,13 +208,13 @@ def run() -> int:
     types = build_types(mwe_spans_by_segment)
 
     kept = 0
-    dropped = 0
+    dropped_by_reason: dict[str, int] = defaultdict(int)
 
     with config.SELECTED_TYPES_PATH.open("w", encoding="utf-8") as f:
         for key, entry in types.items():
             keep, meta = gate(entry)
             if not keep:
-                dropped += 1
+                dropped_by_reason[meta["drop_reason"]] += 1
                 continue
 
             kept += 1
@@ -179,7 +229,11 @@ def run() -> int:
             }
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    print(f"{kept} types (mots) conservés, {dropped} exclus (Pknown/CEFR) -> "
+    dropped = sum(dropped_by_reason.values())
+    print(f"{kept} types (mots) conservés, {dropped} exclus "
+          f"(pknown={dropped_by_reason['pknown']}, "
+          f"entité nommée={dropped_by_reason['named_entity']}, "
+          f"cefr={dropped_by_reason['cefr']}) -> "
           f"{config.SELECTED_TYPES_PATH}")
 
     mwe_units = build_mwe_units(mwe_spans_by_segment)

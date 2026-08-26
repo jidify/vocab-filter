@@ -120,6 +120,28 @@ def sense_surprise(lemma: str, wn_pos: str, sense_id: str) -> float:
     return _clip01(1.0 - counts.get(sense_id, 0) / total)
 
 
+_instance_cache: dict[str, bool] = {}
+
+
+def is_named_entity_sense(sense_id: str) -> bool:
+    """Sens WordNet désignant une ENTITÉ NOMMÉE : il a un
+    instance_hypernym ("est une instance de") plutôt qu'un hypernym
+    ("est une sorte de"). Marqueur propre de WordNet, porté par le sens
+    RETENU et non par le tag spaCy — indispensable ici, le texte étant
+    une pièce dont les didascalies/répliques capitalisées font
+    mal-tagger spaCy en PROPN des noms communs (voir select.py::gate,
+    qui filtre lui aussi mais sur le TYPE, pas le sens). Mesuré sur The
+    Humans : 22 unités de vocab.jsonl/913 avaient un sens d'entité
+    nommée (scranton, detroit, bethlehem, mary, god...)."""
+
+    if sense_id not in _instance_cache:
+        try:
+            _instance_cache[sense_id] = bool(nwn.synset(sense_id).instance_hypernyms())
+        except Exception:
+            _instance_cache[sense_id] = False  # sens illisible : ne pas écarter à l'aveugle
+    return _instance_cache[sense_id]
+
+
 def build_records() -> list[dict]:
     with config.SELECTED_TYPES_PATH.open(encoding="utf-8") as f:
         types_by_key = {
@@ -239,6 +261,14 @@ def aggregate_and_score(records: list[dict]) -> list[dict]:
     units = []
     for key, occs in grouped.items():
         lemma, wn_pos, sense_id = key
+        if is_named_entity_sense(sense_id):
+            # Re-filtrage au niveau du SENS (docstring du module) : le
+            # type a pu passer S4 (select.py::gate ne voit que le tag
+            # spaCy, sur-inclusif par construction), mais le sens
+            # réellement retenu par S5 est celui d'une entité nommée
+            # (ex. scranton.n.01, bethlehem.n.02) — jamais du
+            # vocabulaire à apprendre.
+            continue
         first = occs[0]
 
         fr_hits = first["fr_hits"] or []
