@@ -174,13 +174,17 @@ def build_records() -> list[dict]:
 
 def resolve_official_fr(sense_fr_store: dict[str, dict], key: str) -> tuple[list[str], str | None, str | None]:
     """Traduction de référence validée pour une clé du magasin
-    data/sense_fr.jsonl (voir pipeline/sense_fr.py et
-    pipeline/sense_fr_frontier.py). Seuls `validated` (relu par un
-    humain), `auto_strong` (concordance automatique stricte) et
-    `auto_llm` (modèle frontière seul, aucune ressource lexicale ne
-    couvrant le sens — voir sense_fr_frontier.py) sont utilisés ici —
-    `pending`/`rejected`/`no_equivalent` ne produisent jamais de texte
-    français, quel que soit ce que le magasin contient pour cette clé.
+    data/sense_fr.jsonl (voir pipeline/sense_fr.py,
+    pipeline/sense_fr_frontier.py et pipeline/sense_fr_adjudicate.py).
+    Statuts utilisés ici : `validated` (relu par un humain), `auto_strong`
+    (concordance automatique stricte), `auto_llm` (modèle frontière seul,
+    aucune ressource lexicale ne couvrant le sens — voir
+    sense_fr_frontier.py), `auto_corroborated` (>=2 signaux indépendants
+    dont au moins une source humaine hors-ligne, voir
+    sense_fr_adjudicate.py) et `auto_judged` (juge sur dossier, confiance
+    haute, même module). `pending`/`rejected`/`no_equivalent` ne
+    produisent jamais de texte français, quel que soit ce que le magasin
+    contient pour cette clé.
 
     Renvoie (fr_lemmas, meaning_fr_official, fr_status) :
     - fr_lemmas alimente fr_opacity_and_faux_ami (liste vide si rien
@@ -191,7 +195,7 @@ def resolve_official_fr(sense_fr_store: dict[str, dict], key: str) -> tuple[list
     entry = sense_fr_store.get(key)
     if entry is None:
         return [], None, None
-    if entry["status"] not in ("validated", "auto_strong", "auto_llm"):
+    if entry["status"] not in ("validated", "auto_strong", "auto_llm", "auto_corroborated", "auto_judged"):
         return [], None, entry["status"]
     fr_lemmas = [entry["fr"]] + (entry.get("fr_alt") or []) if entry.get("fr") else []
     return fr_lemmas, entry.get("fr"), entry["status"]

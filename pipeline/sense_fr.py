@@ -593,7 +593,7 @@ AGREEMENT_RANK = {
 
 REVIEW_FIELDS = [
     "key", "kind", "lemmas_en", "pos", "definition_en", "occurrences", "agreement",
-    "suggested_fr", "suggested_fr_alt", "omw_fr", "wonef", "llm_votes", "backtranslation_ok",
+    "suggested_fr", "suggested_fr_alt", "omw_fr", "wonef", "frontier_confidence",
     "fr_final", "fr_alt_final", "decision", "note",
 ]
 
@@ -629,8 +629,7 @@ def write_review_csv(store: dict[str, dict]) -> int:
                 "suggested_fr_alt": "; ".join(e.get("fr_alt") or []),
                 "omw_fr": "; ".join(ev.get("omw_fr", [])),
                 "wonef": "; ".join(ev.get("wonef", [])),
-                "llm_votes": "; ".join(f"{k}:{v}" for k, v in ev.get("llm_votes", {}).items()),
-                "backtranslation_ok": ev.get("backtranslation_ok", ""),
+                "frontier_confidence": ev.get("frontier_confidence", ""),
                 "fr_final": "", "fr_alt_final": "", "decision": "", "note": "",
             })
     return len(pending)

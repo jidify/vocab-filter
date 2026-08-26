@@ -152,6 +152,25 @@ SENSE_FR_FRONTIER_MODEL = "anthropic/claude-opus-5"
 SENSE_FR_FRONTIER_BATCH_SIZE = 90   # sens par appel (~1500-2000 tokens d'entrée/lot)
 SENSE_FR_FRONTIER_MAX_WORKERS = 10  # lots traités en parallèle (litellm.batch_completion)
 
+# ------------------------------------------------------------------
+# Traduction CONTEXTUELLE à sens imposé (pipeline/sense_fr_context.py) —
+# corroboration indépendante de la traduction "de dictionnaire" ci-dessus :
+# même modèle autorisé (un seul fournisseur, cf. le plan), mais tâche
+# différente (phrase réelle + sens déjà tranché par S5, jamais une glose
+# seule) et sortie distincte (traduction_lexicale/sens_contextuel/
+# translation_type, voir vocab-filter-resume.md §6).
+# ------------------------------------------------------------------
+
+SENSE_FR_CONTEXT_MODEL = SENSE_FR_FRONTIER_MODEL
+SENSE_FR_CONTEXT_BATCH_SIZE = 30    # sens par appel (items plus lourds : jusqu'à 5 phrases chacun)
+SENSE_FR_CONTEXT_MAX_WORKERS = 10
+SENSE_FR_CONTEXT_MAX_OCCURRENCES = 5   # phrases distinctes présentées par sens, réparties dans le livre
+# Portée par défaut de la passe groupée par sens (voir le plan) : tous les
+# `pending` et `auto_llm` (ce sont eux qui ont besoin d'une corroboration),
+# plus un échantillon `auto_strong` en groupe témoin — un témoin exhaustif
+# (470) coûterait 4x plus pour la même information de calibrage.
+SENSE_FR_CONTEXT_AUTO_STRONG_SAMPLE = 100
+
 
 def ensure_out_dir() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
