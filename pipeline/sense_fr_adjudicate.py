@@ -101,7 +101,12 @@ def resource_match(entry: dict) -> bool:
 
 
 def dbnary_match(entry: dict) -> tuple[bool, list[str] | None, float | None]:
-    if entry.get("kind") != "synset" or not entry.get("definition_en") or not entry.get("lemmas_en"):
+    # Lot 4 (point 22) : plus de garde `kind != "synset"` — DBnary
+    # contient déjà 136 entrées multi-mots ; `definition_en`/`lemmas_en`
+    # suffisent (une MWE sans glose idioms.yml a `definition_en=None`,
+    # exclue par la condition ci-dessous comme n'importe quelle entrée
+    # "synset" sans glose résolue — pas un cas spécial MWE).
+    if not entry.get("definition_en") or not entry.get("lemmas_en"):
         return False, None, None
     best_candidates: list[str] | None = None
     best_score = 0.0

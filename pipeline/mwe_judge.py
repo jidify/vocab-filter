@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 
+from nltk.corpus import wordnet as nwn
+
 from pipeline import atomic, config, llm, mwe_stores
 
 VALID_LABELS = {"idiome", "phrasal_verb", "semi_fige", "littéral", "incertain"}
@@ -65,9 +67,30 @@ Classe cette expression dans EXACTEMENT une de ces catégories :
 - "littéral" : combinaison libre, chaque mot garde son sens ordinaire, PAS une unité
   à enseigner comme telle (ex: "go to [the store]", "I do [want that]", "know someone")
 - "incertain" : tu ne peux pas trancher avec ce contexte
+"""
 
+# Lot 4 (point G) : ajouté au prompt ci-dessus, jamais un appel LLM séparé,
+# uniquement quand plusieurs synsets WordNet candidats existent pour
+# l'idiome (voir wordnet_synset_candidates) — un seul candidat est utilisé
+# directement sans solliciter le modèle (même court-circuit que
+# senses.py::analyze_occurrence pour GlossBERT). WordNet n'est ici qu'une
+# source de glose : la clé d'identité de l'unité reste toujours
+# `mwe:{canonical_form}:{label}`, jamais un sense_id WordNet.
+WORDNET_SENSE_BLOCK = """
+Cette expression a plusieurs sens WordNet candidats. Si l'un d'eux correspond
+au sens réellement employé dans ces occurrences, indique son identifiant dans
+"wordnet_sense_id" ; sinon indique null.
+{candidates}
+"""
+
+PROMPT_SCHEMA = """
 Réponds en JSON strict avec ce schéma :
-{{"label": "<une des 5 catégories>", "confidence": <0.0-1.0>, "reason": "<1 phrase en français>"}}
+{"label": "<une des 5 catégories>", "confidence": <0.0-1.0>, "reason": "<1 phrase en français>"}
+"""
+
+PROMPT_SCHEMA_WITH_WORDNET = """
+Réponds en JSON strict avec ce schéma :
+{"label": "<une des 5 catégories>", "confidence": <0.0-1.0>, "reason": "<1 phrase en français>", "wordnet_sense_id": "<identifiant du sens WordNet choisi ci-dessus, ou null>"}
 """
 
 
@@ -80,11 +103,39 @@ def format_examples(occurrences: list[dict], segments_by_idx: dict) -> str:
     return "\n".join(lines)
 
 
-def judge_type(idiom: str, occurrences: list[dict], segments_by_idx: dict) -> dict:
+def wordnet_synset_candidates(idiom: str) -> list:
+    """Synsets WordNet dont un lemme correspond exactement à `idiom` (même
+    logique de filtrage que senses.py::get_synsets, mais sans filtre de
+    POS : un idiome confirmé n'a pas de wn_pos assigné en amont — voir
+    plan Lot 4 point G). nltk indexe les MWE avec underscore, jamais
+    espace (nwn.synsets('wake up') == [] mais nwn.synsets('wake_up') ==
+    [awaken.v.01, wake_up.v.02])."""
+    results = []
+    for synset in nwn.synsets(idiom.replace(" ", "_")):
+        for lemma in synset.lemmas():
+            if lemma.name().replace("_", " ").casefold() == idiom.casefold():
+                results.append(synset)
+                break
+    return results
+
+
+def judge_type(
+    idiom: str, occurrences: list[dict], segments_by_idx: dict,
+    wordnet_candidates: list | None = None,
+) -> dict:
     prompt = PROMPT_TEMPLATE.format(
         idiom=idiom,
         examples=format_examples(occurrences, segments_by_idx),
     )
+    if wordnet_candidates:
+        gloss_lines = "\n".join(
+            f"- {s.name()}: {s.definition()}" for s in wordnet_candidates
+        )
+        prompt += WORDNET_SENSE_BLOCK.format(candidates=gloss_lines)
+        prompt += PROMPT_SCHEMA_WITH_WORDNET
+    else:
+        prompt += PROMPT_SCHEMA
+
     try:
         result = llm.call_json(prompt, system=SYSTEM_PROMPT, timeout=120)
     except llm.LLMError as exc:
@@ -95,11 +146,16 @@ def judge_type(idiom: str, occurrences: list[dict], segments_by_idx: dict) -> di
         return {"label": "incertain", "confidence": 0.0,
                 "reason": f"réponse LLM invalide: {result!r}"}
 
-    return {
+    decision = {
         "label": label,
         "confidence": float(result.get("confidence", 0.0)),
         "reason": result.get("reason", ""),
     }
+    if wordnet_candidates:
+        valid_ids = {s.name() for s in wordnet_candidates}
+        selected = result.get("wordnet_sense_id")
+        decision["wordnet_sense_id"] = selected if selected in valid_ids else None
+    return decision
 
 
 # ============================================================
@@ -221,6 +277,13 @@ def select_mwe_spans(decisions: list[dict]) -> dict[int, list[dict]]:
                 "surface": occ["surface"],
                 "n_tokens": occ["n_tokens_span"],
                 "member_char_spans": member_char_spans,
+                # Lot 4 (point G) : décision de TYPE uniquement (jamais
+                # d'occurrence_decision pour le sens WordNet) — propagé
+                # jusqu'à mwe_confirmed_spans.jsonl pour que select.py
+                # puisse s'en servir comme repli de glose quand idioms.yml
+                # n'a rien pour cet idiome (cas de toutes les MWE apportées
+                # par la fusion VPC, ex. "wake up").
+                "wordnet_sense_id": entry.get("wordnet_sense_id"),
             })
 
     by_segment: dict[int, list[dict]] = defaultdict(list)
@@ -292,8 +355,23 @@ def run() -> int:
         if cached is not None:
             decision = {"label": cached["label"], "confidence": cached["confidence"],
                         "reason": cached.get("reason", "")}
+            if "wordnet_sense_id" in cached:
+                decision["wordnet_sense_id"] = cached["wordnet_sense_id"]
         else:
-            decision = judge_type(idiom, entry["occurrences"], segments_by_idx)
+            # Lot 4 (point G) : un seul synset candidat -> utilisé
+            # directement, aucun besoin de le soumettre au modèle (même
+            # court-circuit que le GlossBERT de senses.py). Plusieurs
+            # candidats -> ajoutés au MÊME appel juge que `label` (pas un
+            # second appel LLM) ; zéro candidat -> rien à ajouter.
+            wn_candidates = wordnet_synset_candidates(idiom)
+            if len(wn_candidates) == 1:
+                decision = judge_type(idiom, entry["occurrences"], segments_by_idx)
+                decision["wordnet_sense_id"] = wn_candidates[0].name()
+            else:
+                decision = judge_type(
+                    idiom, entry["occurrences"], segments_by_idx,
+                    wordnet_candidates=wn_candidates or None,
+                )
             n_type_llm_calls += 1
             # Une panne (ollama injoignable, réponse illisible) n'est PAS une
             # décision : ne jamais la figer dans le magasin permanent (voir

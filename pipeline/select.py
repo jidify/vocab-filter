@@ -22,6 +22,7 @@ import json
 from collections import defaultdict
 
 from nltk.corpus import wordnet as nwn
+from nltk.corpus.reader.wordnet import WordNetError
 
 from pipeline import atomic, config, inventory, lexicon
 from pipeline.mwe import get_idiom_definition
@@ -187,10 +188,26 @@ def gate(entry: dict) -> tuple[bool, dict]:
     return True, meta
 
 
+def wordnet_mwe_definition(sense_id: str | None) -> str | None:
+    """Glose WordNet choisie par mwe_judge.py (point G) pour un idiome
+    absent d'idioms.yml (ex. "wake up", apporté par la fusion VPC — voir
+    Lot 3 — jamais présent dans idiomatch). WordNet reste une simple
+    source de glose ici, jamais l'identité de l'unité (toujours
+    `mwe:{canonical_form}:{label}`, cf. mwe_judge.py)."""
+    if not sense_id:
+        return None
+    try:
+        return nwn.synset(sense_id).definition()
+    except (WordNetError, ValueError):
+        return None
+
+
 def build_mwe_units(mwe_spans_by_segment: dict[int, list[dict]]) -> list[dict]:
     """Les expressions confirmées en S3 n'ont pas de plancher Pknown/CEFR
     (ces ressources sont lexicales, pas phraséologiques) : elles sont
-    conservées directement, avec la glose d'idioms.yml comme "sens"."""
+    conservées directement, avec la glose d'idioms.yml comme "sens" —
+    ou, à défaut (idiome absent d'idioms.yml), la glose WordNet
+    sélectionnée par mwe_judge.py (point G)."""
 
     by_idiom: dict[str, list[dict]] = defaultdict(list)
     for seg_idx, spans in mwe_spans_by_segment.items():
@@ -199,11 +216,14 @@ def build_mwe_units(mwe_spans_by_segment: dict[int, list[dict]]) -> list[dict]:
 
     units = []
     for idiom, occs in by_idiom.items():
+        definition = get_idiom_definition(idiom)
+        if definition is None:
+            definition = wordnet_mwe_definition(occs[0].get("wordnet_sense_id"))
         units.append({
             "canonical_form": idiom,
             "label": occs[0]["label"],
             "confidence": occs[0]["confidence"],
-            "definition_en": get_idiom_definition(idiom),
+            "definition_en": definition,
             "surface_forms": sorted({o["surface"] for o in occs}),
             "occurrence_segment_idxs": sorted({o["segment_idx"] for o in occs}),
             "book_count": len(occs),

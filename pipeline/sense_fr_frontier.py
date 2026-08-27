@@ -234,8 +234,12 @@ def _resources_for(target: dict) -> tuple[list[str], list[str]]:
 
 
 def _dbnary_candidates(target: dict) -> list[str]:
-    if target["kind"] == "mwe":
-        return []
+    # Lot 4 (point 22) : plus de garde `kind == "mwe"` ici — DBnary
+    # contient déjà 136 entrées multi-mots (`wake up__Verb__1`…), la
+    # seule chose qui manquait était cet arrêt anticipé. Contrairement à
+    # `_resources_for` (omw-fr/WoNeF ci-dessus), best_dbnary_match ne
+    # dépend pas d'un synset résolu : `definition_en` (glose idioms.yml,
+    # peut être None) et `lemmas_en` (= [canonical_form]) suffisent.
     best_candidates: list[str] | None = None
     best_score = 0.0
     for lemma in target["lemmas_en"]:

@@ -95,7 +95,12 @@ def normalize_pos(pos):
 def get_synsets(word, pos):
     wanted_pos = normalize_pos(pos)
     results = []
-    for synset in nwn.synsets(word):
+    # nltk.corpus.wordnet indexe les MWE avec un underscore ("wake_up"),
+    # jamais un espace : nwn.synsets("wake up") == [] alors que
+    # nwn.synsets("wake_up") == [awaken.v.01, wake_up.v.02] (vérifié).
+    # Sans ce .replace(), aucune expression multi-mots ne trouvait jamais
+    # de synset (plan Lot 4, point G).
+    for synset in nwn.synsets(word.replace(" ", "_")):
         if synset.pos() not in wanted_pos:
             continue
         for lemma in synset.lemmas():

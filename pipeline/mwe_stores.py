@@ -79,7 +79,7 @@ def build_entry(key: str, decision: dict) -> dict:
     -> entrée de magasin, statut `auto` (jamais `validated` — réservé à une
     relecture manuelle qui n'existe pas encore pour les MWE)."""
 
-    return {
+    entry = {
         "key": key,
         "label": decision["label"],
         "confidence": decision["confidence"],
@@ -87,3 +87,6 @@ def build_entry(key: str, decision: dict) -> dict:
         "status": "auto",
         "decided_at": date.today().isoformat(),
     }
+    if "wordnet_sense_id" in decision:
+        entry["wordnet_sense_id"] = decision["wordnet_sense_id"]
+    return entry
