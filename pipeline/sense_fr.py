@@ -621,11 +621,34 @@ AGREEMENT_RANK = {
     "source_unique": 2,
 }
 
+# `reassigner_vers` (colonne optionnelle, remplie à la main comme
+# fr_final/decision/note — normalement produite par pipeline/review_ui.py,
+# une petite page HTML locale qui propose la liste des sense_id WordNet du
+# mot avec leur définition, pour ne jamais avoir à le taper soi-même) :
+# quand `contexte_en` montre que les occurrences de `key` n'appartiennent
+# PAS au sens affiché (ex. "smart-ass" coupé en "ass" seul par la
+# tokenisation, "e-mail" coupé en "mail" seul — voir le plan du 2026-08-27
+# "Correction manuelle smart-ass / e-mail sans re-run complet"), le
+# relecteur écrit ici la VRAIE clé : soit un sense_id WordNet existant
+# ("e-mail.v.01"), soit une clé "mwe:<expression>:<idiome|phrasal_verb|
+# semi_fige>" pour promouvoir une expression composée absente de WordNet
+# (ex. "mwe:smart ass:idiome"). `fr_final`/`decision=ok` restent
+# obligatoires, comme pour une validation normale, mais portent alors sur
+# la NOUVELLE clé — voir pipeline/sense_fr_commit.py, qui écrit
+# data/manual_corrections.jsonl en plus du magasin. Ne s'applique qu'aux
+# entrées `kind == "synset"` (une occurrence de MOT mal groupée par S5) ;
+# sans effet sur une entrée `kind == "mwe"` (rien à re-clé, uniquement une
+# traduction à corriger via fr_final comme d'habitude).
+# `definition_en_perso` (optionnelle, utile seulement avec une clé
+# "mwe:...") : glose anglaise tapée à la main pour une expression toute
+# neuve, jamais vue par pipeline/mwe.py::CUSTOM_IDIOMS — sinon la glose
+# existante de CUSTOM_IDIOMS est reprise automatiquement, voir
+# sense_fr_commit.py::derive_reassignment.
 REVIEW_FIELDS = [
     "key", "kind", "lemmas_en", "pos", "definition_en", "occurrences", "agreement",
     "suggested_fr", "suggested_fr_alt", "omw_fr", "wonef", "frontier_confidence",
     "contexte_en", "sense_fit", "sense_fit_note",
-    "fr_final", "fr_alt_final", "decision", "note",
+    "definition_en_perso", "reassigner_vers", "fr_final", "fr_alt_final", "decision", "note",
 ]
 
 
@@ -674,6 +697,7 @@ def write_review_csv(
                 "contexte_en": format_occurrences_en(occurrences_by_sense.get(e["key"], [])),
                 "sense_fit": e.get("sense_fit") or "",
                 "sense_fit_note": e.get("sense_fit_note") or "",
+                "definition_en_perso": "", "reassigner_vers": "",
                 "fr_final": "", "fr_alt_final": "", "decision": "", "note": "",
             })
     return len(pending)

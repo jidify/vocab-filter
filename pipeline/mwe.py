@@ -30,11 +30,30 @@ _IDIOMS_YML: dict[str, dict] | None = None
 # dynamiquement via add_idioms() (schéma de test_crack_open.py:10-30).
 # "crack open" est confirmé présent dans le texte : "cracks the
 # bathroom door open" et "cracks open another beer".
+#
+# "smart ass" : absent d'idiomatch (vérifié), et le tiret de "smart-ass"
+# est tokenisé comme ponctuation séparée par spaCy — sans cette entrée,
+# S2 ne détecte jamais le composé et S5 désambiguïse "ass" tout seul
+# (a fini sur ass.n.02 "un crétin" — voir le plan du 2026-08-27
+# "Correction manuelle smart-ass / e-mail sans re-run complet", qui
+# corrige *The Humans* sans rejouer S1-S5 via data/manual_corrections.jsonl ;
+# cette entrée-ci ne sert qu'aux PROCHAINS livres). Vérifié empiriquement :
+# add_idioms() avec ce lemme matche bien "smart-ass" malgré le tiret
+# interposé comme token de ponctuation (span "smart - ass", slop=2).
 CUSTOM_IDIOMS = [
     {
         "etymology": None,
         "lemma": "crack open",
         "senses": [{"content": "To cause something to open.", "examples": []}],
+        "source": "custom",
+    },
+    {
+        "etymology": None,
+        "lemma": "smart ass",
+        "senses": [{
+            "content": "A person who makes clever, sarcastic, or impertinent remarks.",
+            "examples": [],
+        }],
         "source": "custom",
     },
 ]

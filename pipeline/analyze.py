@@ -13,17 +13,32 @@ from __future__ import annotations
 import json
 
 import spacy
+from spacy.symbols import ORTH
 
 from pipeline import config
 from pipeline.corpus import Segment, load_segments
 
 _NLP = None
 
+# Sans ça, spaCy coupe "e-mail" en 3 tokens ("e" / "-" ponctuation / "mail")
+# : le "e" (trop court) disparaît et "mail" seul se fait désambiguïser vers
+# mail.v.01 "envoyer par la poste" au lieu du sens email — mesuré sur The
+# Humans (4 occurrences verbales mal rattachées, voir le plan du 2026-08-27
+# "Correction manuelle smart-ass / e-mail sans re-run complet", qui corrige
+# ce livre sans rejouer S1-S5 via data/manual_corrections.jsonl ; ces cas
+# spéciaux ne servent qu'aux PROCHAINS livres). Vérifié empiriquement :
+# gardé en un seul token, spaCy lui assigne tout seul le lemme "e-mail",
+# que WordNet reconnaît nativement (lemme alternatif du synset
+# electronic_mail.n.01 / e-mail.v.01) — pas besoin de forcer le lemme ici.
+EMAIL_SPECIAL_CASES = ["e-mail", "e-mails", "e-mailing", "e-mailed"]
+
 
 def get_nlp():
     global _NLP
     if _NLP is None:
         _NLP = spacy.load("en_core_web_sm")
+        for surface in EMAIL_SPECIAL_CASES:
+            _NLP.tokenizer.add_special_case(surface, [{ORTH: surface}])
     return _NLP
 
 

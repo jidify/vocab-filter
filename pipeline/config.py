@@ -133,11 +133,25 @@ DATA_DIR = ROOT / "data"
 SENSE_FR_STORE_PATH = DATA_DIR / "sense_fr.jsonl"
 SENSE_FR_LOCK_PATH = DATA_DIR / "sense_fr.lock.json"
 
+# Corrections manuelles d'occurrences mal groupées par S5 (bug d'ingestion —
+# tokenisation, MWE non détectée...), appliquées à l'export sans rejouer
+# S1-S5 — voir pipeline/score.py::build_records() et le plan du 2026-08-27
+# "Correction manuelle smart-ass / e-mail sans re-run complet".
+MANUAL_CORRECTIONS_PATH = DATA_DIR / "manual_corrections.jsonl"
+
 # wonef-precision.xml (voir WONEF_PRECISION_PATH ci-dessus) est absent
 # du dépôt : seule la variante f-score, compressée, est présente.
 WONEF_FSCORE_PATH = ROOT / "wonef-fscore.xml.bz2"
 
 SENSE_FR_REVIEW_PATH = OUT_DIR / "sense_fr_review.csv"
+
+# Page HTML autonome (pas de serveur, pas de dépendance externe) générée
+# par pipeline/review_ui.py à partir de SENSE_FR_REVIEW_PATH : liste
+# déroulante des sense_id WordNet par mot (avec définition), pour remplir
+# `reassigner_vers` sans jamais avoir à connaître/taper un code — voir le
+# plan du 2026-08-27 "Une page HTML locale pour choisir le sens WordNet
+# dans une liste".
+REVIEW_UI_PATH = OUT_DIR / "review_ui.html"
 
 # sense_id que la passe contextuelle (pipeline/sense_fr_frontier.py) juge
 # suspect ou douteux au vu des phrases réelles du livre. Consommé par

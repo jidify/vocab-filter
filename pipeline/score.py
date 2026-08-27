@@ -142,11 +142,36 @@ def is_named_entity_sense(sense_id: str) -> bool:
     return _instance_cache[sense_id]
 
 
+def load_manual_corrections() -> dict[tuple[str, str, str], dict]:
+    """Corrections d'occurrences mal groupées par S5 à cause d'un bug
+    d'ingestion (tokenisation qui coupe un composé, MWE non détectée...),
+    appliquées ICI À L'EXPORT plutôt que de rejouer S1-S5 — voir
+    data/manual_corrections.jsonl et le plan du 2026-08-27 "Correction
+    manuelle smart-ass / e-mail sans re-run complet". Clé =
+    (word, pos, wrong_sense_id) tel que S5 l'a réellement produit ;
+    n'affecte donc QUE les occurrences visées, jamais un homographe
+    correctement désambiguïsé sous un autre sense_id (ex. "ass"/n vers
+    buttocks.n.01 reste intact, seul ass.n.02 est corrigé)."""
+
+    if not config.MANUAL_CORRECTIONS_PATH.exists():
+        return {}
+    corrections = {}
+    with config.MANUAL_CORRECTIONS_PATH.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            c = json.loads(line)
+            corrections[(c["word"], c["pos"], c["wrong_sense_id"])] = c
+    return corrections
+
+
 def build_records() -> list[dict]:
     with config.SELECTED_TYPES_PATH.open(encoding="utf-8") as f:
         types_by_key = {
             (r["lemma"], r["wn_pos"]): r for r in (json.loads(l) for l in f)
         }
+    manual_corrections = load_manual_corrections()
 
     records = []
     n_corrupt = 0
@@ -172,14 +197,31 @@ def build_records() -> list[dict]:
             if best is None:
                 continue
 
-            record_key = (occ["word"], occ["pos"], occ["best_sense"])
+            correction = manual_corrections.get((occ["word"], occ["pos"], occ["best_sense"]))
+            surface = occ["target_surface"] or occ["word"]
+            definition = best["definition"]
+            if correction:
+                new_pos = correction.get("new_pos", occ["pos"])
+                record_key = (correction["canonical_form"], new_pos, correction["new_key"])
+                # Reconstruit la vraie forme de surface (ex. "smart-ass",
+                # "e-mailed") quand un surface_prefix a été fourni (écrit à
+                # la main — voir data/manual_corrections.jsonl) ; à défaut
+                # (entrées générées par sense_fr_commit.py depuis
+                # reassigner_vers), repli sur canonical_form seul — moins
+                # précis mais toujours correct, jamais inventé au-delà de
+                # ce que le correcteur a lui-même écrit.
+                prefix = correction.get("surface_prefix")
+                surface = (prefix + surface) if prefix is not None else correction["canonical_form"]
+                definition = correction.get("definition_en") or definition
+            else:
+                record_key = (occ["word"], occ["pos"], occ["best_sense"])
             records.append({
                 "key": record_key,
-                "surface": occ["target_surface"] or occ["word"],
+                "surface": surface,
                 "lemma": occ["word"],
                 "wn_pos": occ["pos"],
                 "sense_id": occ["best_sense"],
-                "definition": best["definition"],
+                "definition": definition,
                 "fr_hits": best["fr_hits"],
                 "zipf": type_meta.get("zipf"),
                 "pknown": type_meta.get("pknown"),
@@ -253,6 +295,14 @@ def aggregate_and_score(records: list[dict]) -> list[dict]:
     # ici, une seule fois pour tout l'appel, pour que vocab.csv/vocab.jsonl
     # soient auto-suffisants à l'audit sans rouvrir data/sense_fr.jsonl.
     occurrences_by_sense = senses.load_occurrences_by_sense()
+    # Ré-indexe aussi sous la clé CORRIGÉE (load_manual_corrections) : sinon
+    # une unité manuellement recorrigée (build_records) se retrouve avec un
+    # contexte_en vide, puisque senses.jsonl porte toujours l'ancien
+    # sense_id — le texte du livre, lui, n'a pas besoin d'être corrigé.
+    for correction in load_manual_corrections().values():
+        occs = occurrences_by_sense.get(correction["wrong_sense_id"])
+        if occs:
+            occurrences_by_sense[correction["new_key"]] = occs
 
     grouped: dict[tuple, list[dict]] = defaultdict(list)
     for r in records:
