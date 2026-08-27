@@ -23,7 +23,7 @@ from collections import defaultdict
 
 from nltk.corpus import wordnet as nwn
 
-from pipeline import atomic, config, lexicon
+from pipeline import atomic, config, inventory, lexicon
 from pipeline.mwe import get_idiom_definition
 
 
@@ -221,6 +221,10 @@ def run() -> int:
     kept = 0
     dropped_by_reason: dict[str, int] = defaultdict(int)
     kept_records = []
+    # Lot 3 (point E) : une ligne par occurrence RETENUE, mot simple ou MWE
+    # — voir pipeline/inventory.py. Alimenté ici (mots) et plus bas (MWE),
+    # jamais par les occurrences exclues par gate()/is_covered().
+    inventory_rows: list[dict] = []
 
     for key, entry in types.items():
         keep, meta = gate(entry)
@@ -238,6 +242,16 @@ def run() -> int:
             "occurrence_segment_idxs": sorted(entry["segments"]),
             **meta,
         })
+        unit_key = f"{entry['lemma']}:{entry['wn_pos']}"
+        for occ in entry["occurrences"]:
+            inventory_rows.append({
+                "occurrence_id": occ["occurrence_id"],
+                "unit_key": unit_key,
+                "segment_idx": occ["segment_idx"],
+                "start_char": occ["start_char"],
+                "end_char": occ["end_char"],
+                "zone_id": None,  # Lot 5, pas encore fait — attendu
+            })
     atomic.atomic_write_jsonl(config.SELECTED_TYPES_PATH, kept_records)
 
     dropped = sum(dropped_by_reason.values())
@@ -250,6 +264,21 @@ def run() -> int:
     mwe_units = build_mwe_units(mwe_spans_by_segment)
     atomic.atomic_write_jsonl(config.SELECTED_MWE_PATH, mwe_units)
     print(f"{len(mwe_units)} expressions multi-mots confirmées -> {config.SELECTED_MWE_PATH}")
+
+    for seg_idx, spans in mwe_spans_by_segment.items():
+        for s in spans:
+            inventory_rows.append({
+                "occurrence_id": s["occurrence_id"],
+                "unit_key": f"mwe:{s['idiom']}:{s['label']}",
+                "segment_idx": seg_idx,
+                "start_char": s["start_char"],
+                "end_char": s["end_char"],
+                "zone_id": None,
+            })
+
+    digest = inventory.write(inventory_rows)
+    print(f"{len(inventory_rows)} occurrences dans l'inventaire figé -> "
+          f"{config.LEXICAL_INVENTORY_PATH} ({digest[:12]}...)")
 
     return 0
 

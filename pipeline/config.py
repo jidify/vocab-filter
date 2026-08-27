@@ -72,13 +72,25 @@ LOCK_STALE_SECONDS = 6 * 3600  # 6h : plus long que le run complet le plus lent 
 
 OCCURRENCES_PATH = OUT_DIR / "occurrences.jsonl"
 # Lot 2 — sorties brutes du détecteur VPC (pipeline/vpc/), rejets inclus.
-# Fusion avec idiomatch (pipeline/mwe.py) : Lot 3, pas encore fait ici.
+# Fusion avec idiomatch (pipeline/mwe.py) : Lot 3 (voir mwe.py::load_vpc_candidates).
 VPC_CANDIDATES_PATH = OUT_DIR / "vpc_candidates.jsonl"
 MWE_CANDIDATES_PATH = OUT_DIR / "mwe_candidates.jsonl"
 MWE_DECISIONS_PATH = OUT_DIR / "mwe_decisions.jsonl"
 MWE_SPANS_PATH = OUT_DIR / "mwe_confirmed_spans.jsonl"
 SELECTED_TYPES_PATH = OUT_DIR / "selected_types.jsonl"
 SELECTED_MWE_PATH = OUT_DIR / "selected_mwe.jsonl"
+# Lot 3 — inventaire lexical figé (plan Partie 2, point E) : une ligne par
+# occurrence RETENUE (mot simple ou MWE), écrite par select.py::run() une
+# fois les spans MWE réservés appliqués. inventory.sha256 en est le hash
+# (pipeline/inventory.py) — toute étape à partir de senses le vérifie au
+# démarrage pour ne jamais mélanger deux inventaires silencieusement.
+LEXICAL_INVENTORY_PATH = OUT_DIR / "lexical_inventory.jsonl"
+INVENTORY_HASH_PATH = OUT_DIR / "inventory.sha256"
+# Sidecar écrit par senses.py à la fin d'un run réussi : quel inventory.sha256
+# a produit CE senses.jsonl. Les étapes avale (sense_fr_frontier,
+# sense_fr_adjudicate, export) le comparent à INVENTORY_HASH_PATH courant
+# avant de faire confiance à senses.jsonl (pipeline/inventory.py::verify_consumer).
+SENSES_INVENTORY_HASH_PATH = OUT_DIR / "senses.inventory.sha256"
 SENSES_PATH = OUT_DIR / "senses.jsonl"
 VOCAB_CSV_PATH = OUT_DIR / "vocab.csv"
 VOCAB_JSONL_PATH = OUT_DIR / "vocab.jsonl"
@@ -153,6 +165,13 @@ MANUAL_CORRECTIONS_PATH = DATA_DIR / "manual_corrections.jsonl"
 # pipeline/custom_lexicon.py et le plan du 2026-08-27 "IHM de correction
 # manuelle : plusieurs workflows, lexique piloté par les données".
 CUSTOM_LEXICON_PATH = DATA_DIR / "custom_lexicon.jsonl"
+
+# Lot 3 — magasin MWE à deux niveaux (plan Partie 2, point C), même modèle
+# que SENSE_FR_STORE_PATH : permanents, versionnés, réutilisés d'un livre à
+# l'autre, jamais écrasés pour une entrée `status: validated`. Voir
+# pipeline/mwe_judge.py.
+MWE_TYPE_STORE_PATH = DATA_DIR / "mwe_type_decisions.jsonl"       # clé = idiome
+MWE_OCCURRENCE_STORE_PATH = DATA_DIR / "mwe_occurrence_decisions.jsonl"  # clé = occurrence_id
 
 # wonef-precision.xml (voir WONEF_PRECISION_PATH ci-dessus) est absent
 # du dépôt : seule la variante f-score, compressée, est présente.

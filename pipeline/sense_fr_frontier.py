@@ -77,7 +77,7 @@ from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
 from pydantic import BaseModel
 
-from pipeline import config, lex_bilingual, sense_fr, senses
+from pipeline import config, inventory, lex_bilingual, sense_fr, senses
 
 # ============================================================
 # Schéma de sortie structurée
@@ -466,6 +466,11 @@ def write_sense_id_suspects_csv(store: dict[str, dict], occurrences_by_sense: di
 
 def run(model: str = config.SENSE_FR_FRONTIER_MODEL, limit: int | None = None, dry_run: bool = False) -> int:
     config.require_frontier_model(model)
+    # Lot 3 (point E) : senses.jsonl doit avoir été calculé contre
+    # l'inventaire COURANT (pipeline/inventory.py) — sinon les occurrences
+    # présentées en contexte au modèle frontière pourraient ne plus
+    # correspondre à ce que select.py a réellement retenu.
+    inventory.verify_consumer(config.SENSES_INVENTORY_HASH_PATH, "sense_fr_frontier")
     resolved, unresolved = collect_frontier_targets()
     if limit is not None:
         resolved = resolved[:limit]

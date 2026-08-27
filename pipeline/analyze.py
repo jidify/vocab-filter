@@ -44,6 +44,28 @@ def get_nlp():
     return _NLP
 
 
+_CHAR_SPAN_PAIR_FIELDS = ("verb_char_span",)
+_CHAR_SPAN_LIST_FIELDS = (
+    "particle_char_spans", "token_char_spans",
+    "normalized_char_spans", "original_char_spans",
+)
+
+
+def _offset_char_spans(record: dict, offset: int) -> None:
+    """Convertit en place les offsets de `record` (un `PhrasalVerbDetection`
+    sérialisé) de "relatif à la phrase" à "absolu dans le segment" — voir le
+    commentaire au point d'appel."""
+
+    for field in _CHAR_SPAN_PAIR_FIELDS:
+        a, b = record[field]
+        record[field] = [a + offset, b + offset]
+    for field in _CHAR_SPAN_LIST_FIELDS:
+        spans = record.get(field)
+        if spans is None:
+            continue
+        record[field] = [[a + offset, b + offset] for a, b in spans]
+
+
 def analyze_segments(segments: list[Segment], vpc_sink: list[dict]):
     nlp = get_nlp()
     # Lot 2 — le détecteur VPC tourne DANS cette même boucle nlp.pipe, sur le
@@ -59,15 +81,31 @@ def analyze_segments(segments: list[Segment], vpc_sink: list[dict]):
     texts = (s.en for s in play_segments)
 
     for seg, doc in zip(play_segments, nlp.pipe(texts, batch_size=64)):
+        # `pipeline.vpc.adapter.sentences_from_doc` rend les offsets de
+        # chaque SyntaxToken relatifs au DÉBUT DE LA PHRASE (`token.idx -
+        # sentence_start`, voir sa docstring) — un choix du contrat
+        # SyntaxSentence/SyntaxToken hérité du projet source, où une phrase
+        # peut être analysée hors de tout document. `mwe.py` (Lot 3) doit
+        # fusionner les candidats VPC avec idiomatch SUR LES SPANS DE
+        # CARACTÈRES, qui eux sont absolus dans le SEGMENT (occurrences.jsonl,
+        # mwe_candidates.jsonl) — donc on convertit ici, une fois, avant
+        # d'écrire vpc_candidates.jsonl : record["*_char_span(s)"] passent de
+        # "relatif à la phrase" à "absolu dans le segment", pour que toute
+        # comparaison de spans en aval soit dans le même référentiel.
+        sentence_starts = {
+            f"seg{seg.idx}:s{i}": s.start_char for i, s in enumerate(doc.sents)
+        }
         for sentence in vpc_adapter.sentences_from_doc(
             doc,
             sentence_id_prefix=f"seg{seg.idx}",
             nlp_engine_version=spacy.__version__,
             nlp_model=nlp_model,
         ):
+            sentence_start = sentence_starts[sentence.sentence_id]
             for detection in detector.analyze(sentence):
                 record = detection.model_dump(mode="json")
                 record["segment_idx"] = seg.idx
+                _offset_char_spans(record, sentence_start)
                 vpc_sink.append(record)
 
         for token in doc:

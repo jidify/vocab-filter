@@ -14,6 +14,7 @@ proposition_1.
 
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 
 from idiomatch import Idiomatcher
@@ -153,7 +154,106 @@ def find_candidates(segments):
                 "n_tokens_lemma": len(m["idiom"].split()),
                 "member_char_spans": member_char_spans,
                 "ambiguous_alignment": alignment.ambiguous,
+                "source": "idiomatch",
+                # Lot 3 (point C) : seuls les candidats VPC signalés par le
+                # garde-fou directionnel du détecteur portent ce flag à True
+                # (voir load_vpc_candidates) — idiomatch n'a pas ce concept,
+                # jamais escaladé à l'occurrence pour cette source.
+                "directional_context_dependent": False,
             }
+
+
+def load_vpc_candidates(segments) -> list[dict]:
+    """Lit `vpc_candidates.jsonl` (Lot 2, écrit par analyze.py) et projette
+    chaque détection VPC non rejetée vers le MÊME schéma que
+    `find_candidates` ci-dessus, pour que `structural_prefilter`/
+    `group_by_type`/`mwe_judge.py`/`select.py` puissent traiter les deux
+    sources uniformément à partir d'ici.
+
+    `member_char_spans` = les spans (verbe + particule(s)) tels
+    qu'`analyze.py` les a déjà convertis en absolu-dans-le-segment (voir son
+    commentaire sur `_offset_char_spans`) — jamais les indices de tokens du
+    Doc idiomatch, incompatibles (pipeline spaCy différent, voir le
+    commentaire sur `occurrence_id` dans `find_candidates`).
+
+    Les rejets (`decision == "rejected_syntax"`) restent dans
+    `vpc_candidates.jsonl` pour audit (point 5 du plan) mais ne deviennent
+    jamais candidats ici — jamais réservables."""
+
+    if not config.VPC_CANDIDATES_PATH.exists():
+        return []
+
+    segments_by_idx = {s.idx: s for s in segments}
+    candidates = []
+    with config.VPC_CANDIDATES_PATH.open(encoding="utf-8") as f:
+        for line in f:
+            rec = json.loads(line)
+            if rec["decision"] == "rejected_syntax":
+                continue
+
+            member_char_spans = sorted(tuple(span) for span in rec["token_char_spans"])
+            start_char = min(a for a, _ in member_char_spans)
+            end_char = max(b for _, b in member_char_spans)
+            seg_idx = rec["segment_idx"]
+            seg = segments_by_idx.get(seg_idx)
+
+            candidates.append({
+                # Même convention d'identité que find_candidates (plan
+                # Partie 2, point F) : c'est PAR CETTE CLÉ, calculée sur les
+                # spans de caractères des deux sources indépendamment, que la
+                # fusion détecte qu'idiomatch et VPC ont vu la même occurrence
+                # (merge_candidate_sources ci-dessous).
+                "occurrence_id": f"m:{seg_idx}:{start_char}:{end_char}",
+                "segment_idx": seg_idx,
+                "kind": seg.kind if seg else None,
+                "idiom": rec["normalized_expression"],
+                "surface": rec["observed_expression"],
+                "start_token": None,
+                "end_token": None,
+                "start_char": start_char,
+                "end_char": end_char,
+                "n_tokens_span": len(member_char_spans),
+                "n_tokens_lemma": len(rec["normalized_expression"].split()),
+                "member_char_spans": [list(s) for s in member_char_spans],
+                "ambiguous_alignment": False,
+                "source": "vpc",
+                # Point 14 du plan : le garde-fou directionnel
+                # (_MOTION_VERBS x _DIRECTIONAL_PARTICLES,
+                # pipeline/vpc/detectors/phrasal_verbs.py) a signalé cette
+                # occurrence comme potentiellement littérale (verbe de
+                # mouvement + particule directionnelle) mais l'a acceptée
+                # quand même à cause d'un frame PARSEME attesté — ce sont
+                # précisément les cas "walk up the stairs" vs "walk up to
+                # someone" dépendants du contexte que mwe_judge.py doit
+                # trancher occurrence par occurrence, pas au niveau du type.
+                "directional_context_dependent": rec["rule_id"].startswith(
+                    "dependency_prt_train_frame_override"
+                ),
+                "vpc_decision": rec["decision"],
+                "vpc_decision_reason": rec["decision_reason"],
+            })
+    return candidates
+
+
+def merge_candidate_sources(idiomatch_candidates: list[dict], vpc_candidates: list[dict]) -> list[dict]:
+    """Fusionne les deux sources SUR occurrence_id (donc sur les spans de
+    caractères de l'enveloppe candidate — jamais les indices de token, les
+    deux pipelines spaCy n'étant pas les mêmes, voir les docstrings
+    ci-dessus). Sur collision (même segment, même enveloppe détectée par les
+    deux sources), l'entrée idiomatch gagne : son alignement de membres a
+    été validé au Lot 1 (rejeu déterministe des motifs slop_N), alors que
+    VPC ne connaît que verbe+particule. Le flag `directional_context_dependent`
+    de VPC, lui, est conservé même quand idiomatch gagne — c'est un signal
+    sur le CONTEXTE de l'occurrence, indépendant de la source qui a fourni
+    les spans exacts."""
+
+    by_occurrence: dict[str, dict] = {c["occurrence_id"]: c for c in vpc_candidates}
+    for c in idiomatch_candidates:
+        existing = by_occurrence.get(c["occurrence_id"])
+        if existing is not None and existing["directional_context_dependent"]:
+            c = {**c, "directional_context_dependent": True}
+        by_occurrence[c["occurrence_id"]] = c
+    return list(by_occurrence.values())
 
 
 def structural_prefilter(candidates: list[dict]) -> list[dict]:
@@ -189,8 +289,16 @@ def run() -> int:
     segments = load_segments()
 
     print("Chargement d'idiomatch (n=2)...")
-    raw = list(find_candidates(segments))
-    print(f"{len(raw)} occurrences brutes.")
+    idiomatch_raw = list(find_candidates(segments))
+    print(f"{len(idiomatch_raw)} occurrences idiomatch brutes.")
+
+    vpc_raw = load_vpc_candidates(segments)
+    print(f"{len(vpc_raw)} occurrences VPC (Lot 2, {config.VPC_CANDIDATES_PATH.name}).")
+
+    raw = merge_candidate_sources(idiomatch_raw, vpc_raw)
+    n_merged = len(idiomatch_raw) + len(vpc_raw) - len(raw)
+    if n_merged:
+        print(f"{n_merged} occurrence(s) détectée(s) par les deux sources (fusionnées).")
 
     filtered = structural_prefilter(raw)
     print(f"{len(filtered)} après pré-filtre structurel.")

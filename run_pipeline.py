@@ -5,8 +5,11 @@ Usage :
     uv run python run_pipeline.py --from select    # reprendre à partir de S4
     uv run python run_pipeline.py --only mwe_judge # une seule étape
 
-Étapes, dans l'ordre d'exécution recommandé par le plan
-(S0+validation -> S1 -> S4 -> S2/S3 -> S5 -> S6b -> S6/S7) :
+Étapes, dans l'ordre d'exécution (S0+validation -> S1 -> S2/S3 -> S4 -> S5 ->
+S6b -> S6/S7). Lot 3 : select (S4) tourne désormais UNE SEULE FOIS, après
+mwe_judge (S3) — le premier passage select avant mwe/mwe_judge était mort
+(voir le plan, point 6) puisqu'il ne pouvait réserver aucun span MWE tant
+que S2/S3 n'avaient pas tourné :
 
 S6b tourne en deux temps : sense_fr_frontier (passe primaire et
 contextuelle, modèle frontière via LiteLLM — voir sa docstring) puis
@@ -30,10 +33,14 @@ from pipeline import atomic
 STAGES = [
     ("corpus", "pipeline.corpus"),
     ("analyze", "pipeline.analyze"),
-    ("select", "pipeline.select"),
     ("mwe", "pipeline.mwe"),
     ("mwe_judge", "pipeline.mwe_judge"),
-    ("select2", "pipeline.select"),  # relancé après mwe_judge pour appliquer les spans réservés
+    # Lot 3 (plan, point 6) : le premier passage select (avant mwe/mwe_judge)
+    # était mort — select.py ignore les spans MWE tant que mwe_judge n'a pas
+    # tourné, donc il ne pouvait rien réserver correctement à ce stade. Un
+    # seul passage désormais, après mwe_judge, qui écrit aussi
+    # lexical_inventory.jsonl + inventory.sha256 (point E).
+    ("select", "pipeline.select"),
     ("senses", "pipeline.senses"),
     ("sense_fr_frontier", "pipeline.sense_fr_frontier"),   # S6b-1 : passe primaire contextuelle
     ("sense_fr_adjudicate", "pipeline.sense_fr_adjudicate"),  # S6b-2 : arbitrage hors ligne (Stage A)

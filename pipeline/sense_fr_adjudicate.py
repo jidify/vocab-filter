@@ -69,7 +69,7 @@ from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
 from wordfreq import zipf_frequency
 
-from pipeline import config, fr_norm, lex_bilingual, senses, sense_fr
+from pipeline import config, fr_norm, inventory, lex_bilingual, senses, sense_fr
 
 ADJUDICATION_CSV_PATH = config.OUT_DIR / "sense_fr_adjudication.csv"
 
@@ -522,6 +522,8 @@ def run(
     backtranslation_model: str = config.SENSE_FR_FRONTIER_MODEL,
     judge_model: str = config.SENSE_FR_FRONTIER_MODEL,
 ) -> int:
+    # Lot 3 (point E) — voir sense_fr_frontier.py::run().
+    inventory.verify_consumer(config.SENSES_INVENTORY_HASH_PATH, "sense_fr_adjudicate")
     store = sense_fr.load_store()
     # Phrases du LIVRE COURANT, jamais lues depuis le magasin permanent —
     # voir sense_fr.format_occurrences_en et la docstring de compute_signals.

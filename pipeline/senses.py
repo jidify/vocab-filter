@@ -37,7 +37,7 @@ import wn
 from nltk.corpus import wordnet as nwn
 from lemminflect import getAllInflections, getAllInflectionsOOV
 
-from pipeline import atomic, config, llm
+from pipeline import atomic, config, inventory, llm
 from pipeline.corpus import Segment, load_segments
 
 MARGIN_THRESHOLD = 0.15
@@ -755,6 +755,10 @@ def pick_diverse_occurrences(occurrences: list[dict], k: int) -> list[dict]:
 
 def run(top_k: int | None = None) -> int:
     config.ensure_out_dir()
+    # Lot 3 (point E) : s'arrête clairement si select.py n'a pas encore figé
+    # d'inventaire (pipeline/inventory.py) plutôt que de désambiguïser contre
+    # un selected_types.jsonl qu'on ne peut pas prouver à jour.
+    digest = inventory.current_hash("senses")
 
     with config.SELECTED_TYPES_PATH.open(encoding="utf-8") as f:
         types = [json.loads(l) for l in f]
@@ -805,6 +809,7 @@ def run(top_k: int | None = None) -> int:
     # atomic.py pour le diagnostic complet). Accumuler en mémoire avant
     # d'écrire est sans risque ici : quelques milliers de records au plus.
     n = atomic.atomic_write_jsonl(config.SENSES_PATH, records)
+    inventory.mark_consumed(config.SENSES_INVENTORY_HASH_PATH, digest)
 
     print(f"{n} occurrences désambiguïsées -> {config.SENSES_PATH} "
           f"({n - n_fallback} via GlossBERT, {n_fallback} en repli sens dominant)")

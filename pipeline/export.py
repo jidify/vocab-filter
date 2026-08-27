@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import csv
 
-from pipeline import atomic, config
+from pipeline import atomic, config, inventory
 from pipeline.score import build_records, aggregate_and_score, build_mwe_units
 
 CSV_FIELDS = [
@@ -91,6 +91,10 @@ def write_report(units: list[dict], path) -> None:
 
 def run() -> int:
     config.ensure_out_dir()
+    # Lot 3 (point E) — voir sense_fr_frontier.py::run(). export lit
+    # senses.jsonl (via build_records) et doit pouvoir prouver qu'il
+    # correspond à l'inventaire courant, comme les autres étapes avale.
+    inventory.verify_consumer(config.SENSES_INVENTORY_HASH_PATH, "export")
     records = build_records()
     units = aggregate_and_score(records)
     units.extend(build_mwe_units())
