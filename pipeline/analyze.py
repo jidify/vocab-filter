@@ -13,7 +13,7 @@ from __future__ import annotations
 import spacy
 from spacy.symbols import ORTH
 
-from pipeline import atomic, config, custom_lexicon
+from pipeline import atomic, config, custom_lexicon, zones
 from pipeline.corpus import Segment, load_segments
 from pipeline.vpc import adapter as vpc_adapter
 from pipeline.vpc import service as vpc_service
@@ -66,18 +66,20 @@ def _offset_char_spans(record: dict, offset: int) -> None:
         record[field] = [[a + offset, b + offset] for a, b in spans]
 
 
-def analyze_segments(segments: list[Segment], vpc_sink: list[dict]):
+def analyze_segments(play_segments: list[Segment], vpc_sink: list[dict], zone_sink: list[int]):
     nlp = get_nlp()
     # Lot 2 — le détecteur VPC tourne DANS cette même boucle nlp.pipe, sur le
     # Doc déjà annoté (pas de second appel spaCy séparé — voir le plan,
     # point 10). `vpc_sink` accumule les décisions (rejets compris) au fil du
-    # parcours ; `run()` les écrit une fois ce générateur épuisé.
+    # parcours ; `run()` les écrit une fois ce générateur épuisé. Lot 5 :
+    # `zone_sink` accumule, dans le même esprit et pour la même raison
+    # (jamais un second passage spaCy), le segment_idx de CHAQUE token
+    # non-espace rencontré — l'unité du layout de zones (point I).
     detector = vpc_service.build_detector()
     nlp_model = f"en_core_web_sm:{nlp.meta.get('version', 'unknown')}"
 
     # nlp.pipe traite chaque segment séparément (un Doc par segment) —
     # c'est le point qui diffère de test_idiomatch_book.py.
-    play_segments = [s for s in segments if s.kind != "hors_oeuvre"]
     texts = (s.en for s in play_segments)
 
     for seg, doc in zip(play_segments, nlp.pipe(texts, batch_size=64)):
@@ -109,7 +111,15 @@ def analyze_segments(segments: list[Segment], vpc_sink: list[dict]):
                 vpc_sink.append(record)
 
         for token in doc:
-            if token.is_space or token.is_punct:
+            if token.is_space:
+                continue
+
+            # Lot 5 (point I) : TOUS les tokens non-espace, ponctuation
+            # comprise — l'unité du layout de zones. Les occurrences
+            # lexicales ci-dessous continuent d'exclure la ponctuation
+            # après ce point, comme avant ce lot.
+            zone_sink.append(seg.idx)
+            if token.is_punct:
                 continue
 
             wn_pos = config.UPOS_TO_WN.get(token.pos_)
@@ -143,15 +153,34 @@ def analyze_segments(segments: list[Segment], vpc_sink: list[dict]):
 def run() -> int:
     config.ensure_out_dir()
     segments = load_segments()
+    play_segments = [s for s in segments if s.kind != "hors_oeuvre"]
 
     vpc_candidates: list[dict] = []
-    n = atomic.atomic_write_jsonl(
-        config.OCCURRENCES_PATH, analyze_segments(segments, vpc_candidates)
-    )
+    zone_token_segments: list[int] = []
+    # Matérialisé (pas streamé directement dans atomic_write_jsonl comme
+    # avant ce lot) : le layout de zones (ci-dessous) a besoin d'avoir vu
+    # TOUS les tokens du livre avant de pouvoir assigner un zone_id à quoi
+    # que ce soit — donc le générateur doit être épuisé d'abord.
+    occurrences = list(analyze_segments(play_segments, vpc_candidates, zone_token_segments))
+
+    # Lot 5 — layout de zones (plan Partie 2 point H/I, Partie 4 Lot 5) :
+    # toujours sur le livre entier, jamais par tranche (Partie 3). Recalculé
+    # à chaque run, pas mis en cache — l'algorithme est rapide (un simple
+    # découpage d'une liste de segment_idx déjà en mémoire).
+    source_text = "\n".join(s.en for s in play_segments)
+    layout = zones.build_layout(zone_token_segments, source_text, config.ZONE_PERCENT)
+    zones.write(layout)
+    seg_zone = zones.segment_zone_map(layout)
+    for occ in occurrences:
+        occ["zone_id"] = seg_zone.get(occ["segment_idx"])
+
+    n = atomic.atomic_write_jsonl(config.OCCURRENCES_PATH, occurrences)
     n_vpc = atomic.atomic_write_jsonl(config.VPC_CANDIDATES_PATH, vpc_candidates)
 
     print(f"{n} occurrences écrites dans {config.OCCURRENCES_PATH}")
     print(f"{n_vpc} candidats VPC (rejets compris) écrits dans {config.VPC_CANDIDATES_PATH}")
+    print(f"{layout['zone_count']} zones ({config.ZONE_PERCENT}%) -> {config.ZONE_LAYOUT_PATH} "
+          f"(layout_id={layout['layout_id'][:19]}...)")
     return 0
 
 

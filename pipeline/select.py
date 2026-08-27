@@ -24,7 +24,7 @@ from collections import defaultdict
 from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
 
-from pipeline import atomic, config, inventory, lexicon
+from pipeline import atomic, config, inventory, lexicon, zones
 from pipeline.mwe import get_idiom_definition
 
 
@@ -37,6 +37,49 @@ def load_confirmed_mwe_spans() -> dict[int, list[dict]]:
             row = json.loads(line)
             spans_by_segment[row["segment_idx"]] = row["spans"]
     return spans_by_segment
+
+
+def load_zone_map() -> dict[int, str]:
+    """Lot 5 (point H) : charge le layout de zones écrit par `analyze.py`
+    à chaque run. `select.py` tourne toujours après `analyze` dans
+    `run_pipeline.py` — un layout absent signifie que `analyze` n'a jamais
+    tourné (ou un `pipeline_out/` d'avant ce lot), pas une course."""
+
+    layout = zones.load()
+    if layout is None:
+        raise SystemExit(
+            f"select : {config.ZONE_LAYOUT_PATH.name} absent — lance `analyze` "
+            f"(S1) avant cette étape pour calculer le layout de zones (Lot 5)."
+        )
+    return zones.segment_zone_map(layout)
+
+
+def annotate_mwe_spans_with_zones(
+    mwe_spans_by_segment: dict[int, list[dict]], seg_zone: dict[int, str]
+) -> dict[int, list[dict]]:
+    """Ajoute `zone_id`/`touched_zone_ids` à chaque span MWE confirmé (point
+    H/I) et réécrit `mwe_confirmed_spans.jsonl` en conséquence :
+    `mwe_judge.py`, qui produit ce fichier, ne connaît pas le layout de
+    zones (seul `select.py` le charge). Un span MWE ne traverse jamais deux
+    segments (une occurrence est toujours prise dans un seul segment_idx —
+    voir mwe_judge.py::select_mwe_spans), donc `touched_zone_ids` n'a
+    aujourd'hui jamais qu'un seul élément ; le champ existe pour la même
+    raison que `dispersion`/`occurrence_segment_idxs` ailleurs dans ce
+    module : homogénéité de schéma, pas une anticipation de spans
+    multi-segments."""
+
+    annotated: dict[int, list[dict]] = {}
+    for seg_idx, spans in mwe_spans_by_segment.items():
+        zone_id = seg_zone.get(seg_idx)
+        annotated[seg_idx] = [
+            {**s, "zone_id": zone_id, "touched_zone_ids": [zone_id] if zone_id else []}
+            for s in spans
+        ]
+    atomic.atomic_write_jsonl(
+        config.MWE_SPANS_PATH,
+        ({"segment_idx": seg_idx, "spans": spans} for seg_idx, spans in annotated.items()),
+    )
+    return annotated
 
 
 def is_covered(occ: dict, spans: list[dict]) -> bool:
@@ -234,7 +277,8 @@ def build_mwe_units(mwe_spans_by_segment: dict[int, list[dict]]) -> list[dict]:
 
 def run() -> int:
     config.ensure_out_dir()
-    mwe_spans_by_segment = load_confirmed_mwe_spans()
+    seg_zone = load_zone_map()
+    mwe_spans_by_segment = annotate_mwe_spans_with_zones(load_confirmed_mwe_spans(), seg_zone)
 
     types = build_types(mwe_spans_by_segment)
 
@@ -264,13 +308,15 @@ def run() -> int:
         })
         unit_key = f"{entry['lemma']}:{entry['wn_pos']}"
         for occ in entry["occurrences"]:
+            zone_id = seg_zone.get(occ["segment_idx"])
             inventory_rows.append({
                 "occurrence_id": occ["occurrence_id"],
                 "unit_key": unit_key,
                 "segment_idx": occ["segment_idx"],
                 "start_char": occ["start_char"],
                 "end_char": occ["end_char"],
-                "zone_id": None,  # Lot 5, pas encore fait — attendu
+                "zone_id": zone_id,
+                "touched_zone_ids": [zone_id] if zone_id else [],
             })
     atomic.atomic_write_jsonl(config.SELECTED_TYPES_PATH, kept_records)
 
@@ -293,7 +339,8 @@ def run() -> int:
                 "segment_idx": seg_idx,
                 "start_char": s["start_char"],
                 "end_char": s["end_char"],
-                "zone_id": None,
+                "zone_id": s["zone_id"],
+                "touched_zone_ids": s["touched_zone_ids"],
             })
 
     digest = inventory.write(inventory_rows)

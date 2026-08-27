@@ -86,6 +86,11 @@ SELECTED_MWE_PATH = OUT_DIR / "selected_mwe.jsonl"
 # démarrage pour ne jamais mélanger deux inventaires silencieusement.
 LEXICAL_INVENTORY_PATH = OUT_DIR / "lexical_inventory.jsonl"
 INVENTORY_HASH_PATH = OUT_DIR / "inventory.sha256"
+# Lot 5 — layout de zones (plan Partie 2, point H) : régénérable, donc sous
+# pipeline_out/ et pas data/. Recalculé à chaque run d'analyze.py, toujours
+# sur le livre entier (voir pipeline/zones.py et Partie 3 du plan).
+ZONE_LAYOUT_PATH = OUT_DIR / "zone_layout.json"
+ZONE_PERCENT = 5.0
 # Sidecar écrit par senses.py à la fin d'un run réussi : quel inventory.sha256
 # a produit CE senses.jsonl. Les étapes avale (sense_fr_frontier,
 # sense_fr_adjudicate, export) le comparent à INVENTORY_HASH_PATH courant
