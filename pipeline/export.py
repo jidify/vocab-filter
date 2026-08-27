@@ -4,9 +4,8 @@ rapport comparant les variantes."""
 from __future__ import annotations
 
 import csv
-import json
 
-from pipeline import config
+from pipeline import atomic, config
 from pipeline.score import build_records, aggregate_and_score, build_mwe_units
 
 CSV_FIELDS = [
@@ -20,7 +19,7 @@ CSV_FIELDS = [
 
 
 def write_csv(units: list[dict], path) -> None:
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
+    with atomic.atomic_open(path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
         writer.writeheader()
         for u in units:
@@ -33,14 +32,12 @@ def write_csv(units: list[dict], path) -> None:
 
 
 def write_jsonl(units: list[dict], path) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        for u in units:
-            f.write(json.dumps(u, ensure_ascii=False) + "\n")
+    atomic.atomic_write_jsonl(path, units)
 
 
 def write_review_queue(units: list[dict], path) -> None:
     reviewable = [u for u in units if u["needs_review"]]
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
+    with atomic.atomic_open(path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
         writer.writeheader()
         for u in reviewable:
@@ -89,7 +86,7 @@ def write_report(units: list[dict], path) -> None:
         lines.append(f"- **{w}** ({u['pos']}, sens={u['sense_id']}) — "
                       f"rang compréhension={rank_comp[w]+1}, rang réutilisabilité={rank_reuse[w]+1}")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic.atomic_write_text(path, "\n".join(lines))
 
 
 def run() -> int:

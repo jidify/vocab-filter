@@ -23,7 +23,7 @@ from collections import defaultdict
 
 from nltk.corpus import wordnet as nwn
 
-from pipeline import config, lexicon
+from pipeline import atomic, config, lexicon
 from pipeline.mwe import get_idiom_definition
 
 
@@ -40,16 +40,27 @@ def load_confirmed_mwe_spans() -> dict[int, list[dict]]:
 
 def is_covered(occ: dict, spans: list[dict]) -> bool:
     """Un token simple est réservé par une expression confirmée s'il
-    tombe entièrement dans un de ses spans (proposition_1 §3.3 :
-    "une expression confirmée réserve ses composants uniquement dans
-    le span concerné" — une autre occurrence autonome du même mot,
-    ailleurs, n'est PAS affectée puisqu'on filtre occurrence par
-    occurrence, pas lemme par lemme)."""
+    tombe entièrement dans un des MEMBRES exacts d'un de ses spans — pas
+    dans son enveloppe (défaut A, plan Partie 2 point D) : "turned the
+    lantern off" ne réserve que "turned"/"off", jamais "lantern" (mesuré :
+    21/259 réservations à tort avant ce correctif, dont "lantern",
+    "belongings", "spotlight", "money"...). Une autre occurrence autonome
+    du même mot, ailleurs, n'est PAS affectée puisqu'on filtre occurrence
+    par occurrence, pas lemme par lemme (proposition_1 §3.3).
 
-    return any(
-        s["start_char"] <= occ["start_char"] and occ["end_char"] <= s["end_char"]
-        for s in spans
-    )
+    Repli sur l'enveloppe (`start_char`/`end_char`) si un span n'a pas de
+    `member_char_spans` — uniquement pour lire un `mwe_confirmed_spans.jsonl`
+    généré avant le Lot 1 ; un run frais n'écrit plus que des spans avec
+    membres exacts (pipeline/mwe_judge.py::select_mwe_spans)."""
+
+    for s in spans:
+        members = s.get("member_char_spans")
+        if members:
+            if any(a <= occ["start_char"] and occ["end_char"] <= b for a, b in members):
+                return True
+        elif s["start_char"] <= occ["start_char"] and occ["end_char"] <= s["end_char"]:
+            return True
+    return False
 
 
 def iter_content_occurrences(mwe_spans_by_segment: dict[int, list[dict]] | None = None):
@@ -209,25 +220,25 @@ def run() -> int:
 
     kept = 0
     dropped_by_reason: dict[str, int] = defaultdict(int)
+    kept_records = []
 
-    with config.SELECTED_TYPES_PATH.open("w", encoding="utf-8") as f:
-        for key, entry in types.items():
-            keep, meta = gate(entry)
-            if not keep:
-                dropped_by_reason[meta["drop_reason"]] += 1
-                continue
+    for key, entry in types.items():
+        keep, meta = gate(entry)
+        if not keep:
+            dropped_by_reason[meta["drop_reason"]] += 1
+            continue
 
-            kept += 1
-            record = {
-                "lemma": entry["lemma"],
-                "wn_pos": entry["wn_pos"],
-                "surface_forms": sorted(entry["surface_forms"]),
-                "book_count": len(entry["occurrences"]),
-                "dispersion": len(entry["segments"]),
-                "occurrence_segment_idxs": sorted(entry["segments"]),
-                **meta,
-            }
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        kept += 1
+        kept_records.append({
+            "lemma": entry["lemma"],
+            "wn_pos": entry["wn_pos"],
+            "surface_forms": sorted(entry["surface_forms"]),
+            "book_count": len(entry["occurrences"]),
+            "dispersion": len(entry["segments"]),
+            "occurrence_segment_idxs": sorted(entry["segments"]),
+            **meta,
+        })
+    atomic.atomic_write_jsonl(config.SELECTED_TYPES_PATH, kept_records)
 
     dropped = sum(dropped_by_reason.values())
     print(f"{kept} types (mots) conservés, {dropped} exclus "
@@ -237,9 +248,7 @@ def run() -> int:
           f"{config.SELECTED_TYPES_PATH}")
 
     mwe_units = build_mwe_units(mwe_spans_by_segment)
-    with config.SELECTED_MWE_PATH.open("w", encoding="utf-8") as f:
-        for u in mwe_units:
-            f.write(json.dumps(u, ensure_ascii=False) + "\n")
+    atomic.atomic_write_jsonl(config.SELECTED_MWE_PATH, mwe_units)
     print(f"{len(mwe_units)} expressions multi-mots confirmées -> {config.SELECTED_MWE_PATH}")
 
     return 0

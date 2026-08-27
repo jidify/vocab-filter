@@ -10,13 +10,13 @@ segment.
 
 from __future__ import annotations
 
-import json
-
 import spacy
 from spacy.symbols import ORTH
 
-from pipeline import config, custom_lexicon
+from pipeline import atomic, config, custom_lexicon
 from pipeline.corpus import Segment, load_segments
+from pipeline.vpc import adapter as vpc_adapter
+from pipeline.vpc import service as vpc_service
 
 _NLP = None
 
@@ -44,8 +44,14 @@ def get_nlp():
     return _NLP
 
 
-def analyze_segments(segments: list[Segment]):
+def analyze_segments(segments: list[Segment], vpc_sink: list[dict]):
     nlp = get_nlp()
+    # Lot 2 — le détecteur VPC tourne DANS cette même boucle nlp.pipe, sur le
+    # Doc déjà annoté (pas de second appel spaCy séparé — voir le plan,
+    # point 10). `vpc_sink` accumule les décisions (rejets compris) au fil du
+    # parcours ; `run()` les écrit une fois ce générateur épuisé.
+    detector = vpc_service.build_detector()
+    nlp_model = f"en_core_web_sm:{nlp.meta.get('version', 'unknown')}"
 
     # nlp.pipe traite chaque segment séparément (un Doc par segment) —
     # c'est le point qui diffère de test_idiomatch_book.py.
@@ -53,6 +59,17 @@ def analyze_segments(segments: list[Segment]):
     texts = (s.en for s in play_segments)
 
     for seg, doc in zip(play_segments, nlp.pipe(texts, batch_size=64)):
+        for sentence in vpc_adapter.sentences_from_doc(
+            doc,
+            sentence_id_prefix=f"seg{seg.idx}",
+            nlp_engine_version=spacy.__version__,
+            nlp_model=nlp_model,
+        ):
+            for detection in detector.analyze(sentence):
+                record = detection.model_dump(mode="json")
+                record["segment_idx"] = seg.idx
+                vpc_sink.append(record)
+
         for token in doc:
             if token.is_space or token.is_punct:
                 continue
@@ -60,6 +77,12 @@ def analyze_segments(segments: list[Segment]):
             wn_pos = config.UPOS_TO_WN.get(token.pos_)
 
             yield {
+                # Lot 0 — identité stable d'occurrence (plan Partie 2,
+                # point F) : remplace la clé fragile (lemma, pos,
+                # segment_idx, surface) utilisée jusqu'ici pour dédupliquer
+                # senses.jsonl. "w:" = word, distingue des occurrence_id
+                # "m:" des expressions multi-mots (voir pipeline/mwe.py).
+                "occurrence_id": f"w:{seg.idx}:{token.i}",
                 "segment_idx": seg.idx,
                 "kind": seg.kind,
                 "speaker": seg.speaker,
@@ -83,13 +106,14 @@ def run() -> int:
     config.ensure_out_dir()
     segments = load_segments()
 
-    n = 0
-    with config.OCCURRENCES_PATH.open("w", encoding="utf-8") as f:
-        for occ in analyze_segments(segments):
-            f.write(json.dumps(occ, ensure_ascii=False) + "\n")
-            n += 1
+    vpc_candidates: list[dict] = []
+    n = atomic.atomic_write_jsonl(
+        config.OCCURRENCES_PATH, analyze_segments(segments, vpc_candidates)
+    )
+    n_vpc = atomic.atomic_write_jsonl(config.VPC_CANDIDATES_PATH, vpc_candidates)
 
     print(f"{n} occurrences écrites dans {config.OCCURRENCES_PATH}")
+    print(f"{n_vpc} candidats VPC (rejets compris) écrits dans {config.VPC_CANDIDATES_PATH}")
     return 0
 
 

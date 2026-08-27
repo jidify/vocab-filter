@@ -37,7 +37,7 @@ import wn
 from nltk.corpus import wordnet as nwn
 from lemminflect import getAllInflections, getAllInflectionsOOV
 
-from pipeline import config, llm
+from pipeline import atomic, config, llm
 from pipeline.corpus import Segment, load_segments
 
 MARGIN_THRESHOLD = 0.15
@@ -766,44 +766,100 @@ def run(top_k: int | None = None) -> int:
 
     import time
     started = time.time()
-    n = 0
     n_fallback = 0
     processed = 0
     types_processed_fully = 0
+    records: list[dict] = []
 
-    with config.SENSES_PATH.open("w", encoding="utf-8") as out:
-        for t in types:
-            use_full = top_k is None or types_processed_fully < top_k
-            types_processed_fully += 1
+    for t in types:
+        use_full = top_k is None or types_processed_fully < top_k
+        types_processed_fully += 1
 
-            for seg_idx in t["occurrence_segment_idxs"]:
-                if use_full:
-                    record = analyze_occurrence(t["lemma"], t["wn_pos"], segments, seg_idx)
+        for seg_idx in t["occurrence_segment_idxs"]:
+            if use_full:
+                record = analyze_occurrence(t["lemma"], t["wn_pos"], segments, seg_idx)
+            else:
+                synsets = get_synsets(t["lemma"], t["wn_pos"])
+                if not synsets:
+                    record = None
                 else:
-                    synsets = get_synsets(t["lemma"], t["wn_pos"])
-                    if not synsets:
-                        record = None
-                    else:
-                        record = most_frequent_sense_fallback(t["lemma"], t["wn_pos"], synsets)
-                        record["segment_idx"] = seg_idx
-                        n_fallback += 1
+                    record = most_frequent_sense_fallback(t["lemma"], t["wn_pos"], synsets)
+                    record["segment_idx"] = seg_idx
+                    n_fallback += 1
 
-                processed += 1
-                if processed % 50 == 0 or processed == total:
-                    elapsed = time.time() - started
-                    rate = processed / elapsed if elapsed > 0 else 0
-                    eta_min = (total - processed) / rate / 60 if rate > 0 else float("inf")
-                    print(f"  {processed}/{total} ({rate:.1f}/s, ETA {eta_min:.0f} min, "
-                          f"{n_fallback} en repli sans GlossBERT)", flush=True)
-                if record is None:
-                    continue
-                out.write(json.dumps(record, ensure_ascii=False) + "\n")
-                n += 1
+            processed += 1
+            if processed % 50 == 0 or processed == total:
+                elapsed = time.time() - started
+                rate = processed / elapsed if elapsed > 0 else 0
+                eta_min = (total - processed) / rate / 60 if rate > 0 else float("inf")
+                print(f"  {processed}/{total} ({rate:.1f}/s, ETA {eta_min:.0f} min, "
+                      f"{n_fallback} en repli sans GlossBERT)", flush=True)
+            if record is None:
+                continue
+            records.append(record)
+
+    # Lot 0 — écriture atomique (pipeline/atomic.py) : le fichier
+    # n'apparaît qu'une fois complet, ce qui élimine la classe de
+    # corruption observée (lignes tronquées/entrelacées par deux runs
+    # concurrents ayant chacun ouvert senses.jsonl en mode "w" — voir
+    # atomic.py pour le diagnostic complet). Accumuler en mémoire avant
+    # d'écrire est sans risque ici : quelques milliers de records au plus.
+    n = atomic.atomic_write_jsonl(config.SENSES_PATH, records)
 
     print(f"{n} occurrences désambiguïsées -> {config.SENSES_PATH} "
           f"({n - n_fallback} via GlossBERT, {n_fallback} en repli sens dominant)")
     return 0
 
 
+def dedupe_senses_file() -> int:
+    """Maintenance ponctuelle : nettoie un `senses.jsonl` déjà corrompu par
+    d'anciens runs concurrents (voir le diagnostic dans pipeline/atomic.py)
+    SANS refaire tourner GlossBERT/l'arbitrage LLM. Ignore les lignes
+    illisibles, déduplique sur la clé (word, pos, segment_idx,
+    target_surface) en gardant le DERNIER enregistrement rencontré (le
+    plus susceptible d'être le résultat d'un run complet plutôt que
+    partiel). Écrit atomiquement. Retourne le nombre de lignes retenues.
+
+    Note : cette clé n'est pas un `occurrence_id` complet (pas de
+    token_i/offset ici) — deux occurrences distinctes du même mot dans le
+    même segment seraient confondues. C'est un cas marginal pour ce livre
+    (non observé) ; la correction structurelle passe par
+    `lexical_inventory.jsonl` (lot 3 du plan), qui portera les offsets
+    exacts jusqu'à cette étape."""
+
+    if not config.SENSES_PATH.exists():
+        print(f"{config.SENSES_PATH} n'existe pas, rien à nettoyer.")
+        return 0
+
+    seen: dict[tuple, dict] = {}
+    n_bad_lines = 0
+    n_lines = 0
+    with config.SENSES_PATH.open(encoding="utf-8") as f:
+        for line in f:
+            n_lines += 1
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                n_bad_lines += 1
+                continue
+            key = (record.get("word"), record.get("pos"), record.get("segment_idx"),
+                   record.get("target_surface"))
+            seen[key] = record  # le dernier gagne
+
+    n = atomic.atomic_write_jsonl(config.SENSES_PATH, seen.values())
+    n_dupes = n_lines - n_bad_lines - n
+    print(f"{n_lines} lignes lues, {n_bad_lines} illisibles écartées, "
+          f"{n_dupes} doublon(s) écarté(s), {n} enregistrement(s) conservé(s) "
+          f"-> {config.SENSES_PATH}")
+    return n
+
+
 if __name__ == "__main__":
+    import sys
+    if "--dedupe" in sys.argv:
+        dedupe_senses_file()
+        raise SystemExit(0)
     raise SystemExit(run())

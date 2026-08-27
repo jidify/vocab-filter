@@ -14,12 +14,11 @@ proposition_1.
 
 from __future__ import annotations
 
-import json
 from collections import Counter, defaultdict
 
 from idiomatch import Idiomatcher
 
-from pipeline import config, custom_lexicon
+from pipeline import atomic, config, custom_lexicon, mwe_alignment
 from pipeline.corpus import load_segments
 
 _MATCHER = None
@@ -114,7 +113,34 @@ def find_candidates(segments):
         for m in matches:
             match_id, start, end = m["meta"]
             span = doc[start:end]
+
+            # Lot 1 — défaut A (plan Partie 2, point D) : dérive les
+            # membres RÉELS du span (pipeline/mwe_alignment.py), pas son
+            # enveloppe entière. Un candidat "ambigu" (motif introuvable,
+            # ou plusieurs alignements distincts possibles) ne reçoit
+            # aucun member_char_spans : il reste visible pour audit dans
+            # cet artefact, mais mwe_judge.py ne le réservera jamais
+            # (abstention, jamais de suppression sur une hypothèse
+            # incertaine).
+            alignment = mwe_alignment.align_members(m["idiom"], list(span), matcher.nlp, matcher.n)
+            if alignment.ambiguous:
+                member_char_spans = []
+            else:
+                member_char_spans = [
+                    [span[i].idx, span[i].idx + len(span[i].text)]
+                    for i in sorted(alignment.member_indices)
+                ]
+
             yield {
+                # Lot 0 — identité stable (plan Partie 2, point F) : "m:"
+                # distingue des occurrence_id "w:" des mots simples
+                # (pipeline/analyze.py). Basé sur les offsets caractères,
+                # pas les indices de tokens : le Doc d'idiomatch (matcher.nlp
+                # ci-dessus) n'est pas le même pipeline spaCy que celui
+                # d'analyze.py (pas les mêmes cas spéciaux de tokenizer),
+                # donc seuls les offsets caractères sont comparables entre
+                # les deux sources — voir la règle de fusion en S3.
+                "occurrence_id": f"m:{seg.idx}:{span.start_char}:{span.end_char}",
                 "segment_idx": seg.idx,
                 "kind": seg.kind,
                 "idiom": m["idiom"],
@@ -125,6 +151,8 @@ def find_candidates(segments):
                 "end_char": span.end_char,
                 "n_tokens_span": end - start,
                 "n_tokens_lemma": len(m["idiom"].split()),
+                "member_char_spans": member_char_spans,
+                "ambiguous_alignment": alignment.ambiguous,
             }
 
 
@@ -170,12 +198,13 @@ def run() -> int:
     by_type = group_by_type(filtered)
     print(f"{len(by_type)} types distincts.")
 
-    with config.MWE_CANDIDATES_PATH.open("w", encoding="utf-8") as f:
-        for idiom, occs in sorted(by_type.items(), key=lambda kv: -len(kv[1])):
-            f.write(json.dumps(
-                {"idiom": idiom, "count": len(occs), "occurrences": occs},
-                ensure_ascii=False,
-            ) + "\n")
+    atomic.atomic_write_jsonl(
+        config.MWE_CANDIDATES_PATH,
+        (
+            {"idiom": idiom, "count": len(occs), "occurrences": occs}
+            for idiom, occs in sorted(by_type.items(), key=lambda kv: -len(kv[1]))
+        ),
+    )
 
     print(f"-> {config.MWE_CANDIDATES_PATH}")
 

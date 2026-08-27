@@ -1,0 +1,25 @@
+{
+  "schema_version": "vocab-filter-vpc-freeze-manifest-1.0",
+  "vendored_from": "book-lexical-analyzer",
+  "vendored_from_commit_note": "extrait via `git show HEAD:<path>` (pas une copie du fichier sur disque) pour éviter la conversion CRLF de core.autocrlf=true côté source — voir data/vpc/.gitattributes (*.json -text) pour empêcher qu'elle se reproduise ici.",
+  "phase": "2.8",
+  "policy_id": "C-support-1-documents-2",
+  "detector_version": "dependency-document-stable-frames-4.0",
+  "files": {
+    "train_lexical_projection": {
+      "path": "data/vpc/parseme-en-1.3-train-vpc-lexicon.json",
+      "source_path": "resources/vpc/parseme-en-1.3-train-vpc-lexicon.json",
+      "sha256": "66335784bfdaada68fd02d584453e465e14f4943fd04cbc6b0ced02f75120c35"
+    },
+    "frozen_frame_selection": {
+      "path": "data/vpc/vpc-frame-policy-selection-phase2.8.json",
+      "source_path": "resources/vpc/vpc-frame-policy-selection-phase2.8.json",
+      "sha256": "59586f4f2f01489cfaf85816378b8c836a5506851bbfce242c77f0c06a5f5863",
+      "frozen_source_bytes_sha256": "9c6fab5d2bc356953f1cebbde5c95c89718a20f90c6e6b96e9ce58ed4310a738",
+      "line_ending_note": "La copie versionnee LF est semantiquement identique a l'artefact source gele CRLF ; les deux empreintes sont conservees (note reprise du manifeste source)."
+    }
+  },
+  "license": "CC-BY-4.0 (voir resources/manifests/vpc-phase2.8.json et parseme-en-1.3.json du projet source book-lexical-analyzer pour l'attribution complete PARSEME)",
+  "network_required": false,
+  "test_data_required_for_detection": false
+}

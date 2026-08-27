@@ -16,6 +16,7 @@ dependencies = [
     "torch",
     "en-core-web-sm",
     "litellm>=1.98.0",
+    "pydantic>=2.13.4",
 ]
 
 [tool.uv.sources]

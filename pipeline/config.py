@@ -64,7 +64,16 @@ EN_LEXICON = "omw-en:2.0"
 OUT_DIR = ROOT / "pipeline_out"
 CACHE_DIR = ROOT / "pipeline_out" / "cache"
 
+# Lot 0 — verrou de run (voir pipeline/atomic.py::run_lock). Un verrou
+# plus vieux que ce délai est considéré abandonné plutôt que bloquant :
+# Windows ne permet pas de vérifier fiablement qu'un PID est encore vivant.
+LOCK_PATH = OUT_DIR / ".lock"
+LOCK_STALE_SECONDS = 6 * 3600  # 6h : plus long que le run complet le plus lent observé (senses)
+
 OCCURRENCES_PATH = OUT_DIR / "occurrences.jsonl"
+# Lot 2 — sorties brutes du détecteur VPC (pipeline/vpc/), rejets inclus.
+# Fusion avec idiomatch (pipeline/mwe.py) : Lot 3, pas encore fait ici.
+VPC_CANDIDATES_PATH = OUT_DIR / "vpc_candidates.jsonl"
 MWE_CANDIDATES_PATH = OUT_DIR / "mwe_candidates.jsonl"
 MWE_DECISIONS_PATH = OUT_DIR / "mwe_decisions.jsonl"
 MWE_SPANS_PATH = OUT_DIR / "mwe_confirmed_spans.jsonl"

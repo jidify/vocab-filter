@@ -25,6 +25,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from pipeline import atomic
+
 STAGES = [
     ("corpus", "pipeline.corpus"),
     ("analyze", "pipeline.analyze"),
@@ -69,21 +71,31 @@ def main() -> int:
             return 1
         stages = STAGES[names.index(args.from_stage):]
 
-    for name, module_name in stages:
-        print(f"\n=== {name} ({module_name}) ===")
-        module = importlib.import_module(module_name)
-        try:
-            code = module.run()
-        except Exception as exc:
-            if name in FRONTIER_STAGES:
-                import litellm
-                if isinstance(exc, litellm.exceptions.AuthenticationError):
-                    print(f"  {name} sautée : aucune clé API LiteLLM disponible ({exc}).")
-                    continue
-            raise
-        if code:
-            print(f"Étape {name} a échoué (code {code}).")
-            return code
+    # Lot 0 — verrou de run (pipeline/atomic.py::run_lock) : empêche un
+    # second run de démarrer pendant qu'un premier écrit encore dans
+    # pipeline_out/ (voir le diagnostic de corruption de senses.jsonl dans
+    # atomic.py). Un verrou plus vieux que LOCK_STALE_SECONDS est considéré
+    # abandonné plutôt que bloquant.
+    try:
+        with atomic.run_lock():
+            for name, module_name in stages:
+                print(f"\n=== {name} ({module_name}) ===")
+                module = importlib.import_module(module_name)
+                try:
+                    code = module.run()
+                except Exception as exc:
+                    if name in FRONTIER_STAGES:
+                        import litellm
+                        if isinstance(exc, litellm.exceptions.AuthenticationError):
+                            print(f"  {name} sautée : aucune clé API LiteLLM disponible ({exc}).")
+                            continue
+                    raise
+                if code:
+                    print(f"Étape {name} a échoué (code {code}).")
+                    return code
+    except atomic.RunLockError as exc:
+        print(str(exc))
+        return 1
 
     return 0
 

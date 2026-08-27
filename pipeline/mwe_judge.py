@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 
-from pipeline import config, llm
+from pipeline import atomic, config, llm
 
 VALID_LABELS = {"idiome", "phrasal_verb", "semi_fige", "littéral", "incertain"}
 
@@ -89,11 +89,22 @@ LEXICALIZED_LABELS = {"idiome", "phrasal_verb", "semi_fige"}
 MIN_CONFIDENCE = 0.5
 
 
+def _spans_overlap(a_spans: list, b_spans: list) -> bool:
+    return any(a0 < b1 and b0 < a1 for a0, a1 in a_spans for b0, b1 in b_spans)
+
+
 def select_mwe_spans(decisions: list[dict]) -> dict[int, list[dict]]:
     """Réserve les spans occurrence par occurrence pour les types
-    confirmés lexicalisés (proposition_1 §3.3) : priorité au match le
-    plus long en cas de chevauchement dans un même segment (ex :
-    "get away with" > "get away"). Retourne {segment_idx: [spans]}."""
+    confirmés lexicalisés (proposition_1 §3.3), sur leurs MEMBRES exacts
+    — jamais leur enveloppe (défaut A, plan Partie 2 point D/17) : dans
+    "turn the radio down", seuls "turn"/"down" sont membres, donc "radio"
+    ne bloque plus aucun autre candidat. Priorité au candidat le plus
+    riche en membres en cas de chevauchement (ex : "put up with" > "put
+    up"). Retourne {segment_idx: [spans]}.
+
+    Un candidat sans `member_char_spans` (absent — vieil artefact avant
+    le Lot 1 — ou vide — alignement ambigu, pipeline/mwe_alignment.py) ne
+    réserve jamais rien : abstention plutôt que suppression incertaine."""
 
     candidates = []
     for entry in decisions:
@@ -102,7 +113,11 @@ def select_mwe_spans(decisions: list[dict]) -> dict[int, list[dict]]:
         if entry["confidence"] < MIN_CONFIDENCE:
             continue
         for occ in entry["occurrences"]:
+            member_char_spans = occ.get("member_char_spans")
+            if occ.get("ambiguous_alignment") or not member_char_spans:
+                continue
             candidates.append({
+                "occurrence_id": occ["occurrence_id"],
                 "idiom": entry["idiom"],
                 "label": entry["label"],
                 "confidence": entry["confidence"],
@@ -111,6 +126,7 @@ def select_mwe_spans(decisions: list[dict]) -> dict[int, list[dict]]:
                 "end_char": occ["end_char"],
                 "surface": occ["surface"],
                 "n_tokens": occ["n_tokens_span"],
+                "member_char_spans": member_char_spans,
             })
 
     by_segment: dict[int, list[dict]] = defaultdict(list)
@@ -119,15 +135,22 @@ def select_mwe_spans(decisions: list[dict]) -> dict[int, list[dict]]:
 
     resolved: dict[int, list[dict]] = {}
     for seg_idx, spans in by_segment.items():
-        # Le plus long d'abord (en tokens, puis en caractères) ; on ne
-        # garde un span que s'il ne chevauche aucun span déjà retenu.
+        # Le plus riche en MEMBRES d'abord (pas l'enveloppe), départagé
+        # par la longueur totale de ces membres puis par occurrence_id
+        # pour un ordre stable ; on ne garde un span que si ses membres
+        # ne chevauchent les membres d'aucun span déjà retenu.
         spans_sorted = sorted(
-            spans, key=lambda s: (-s["n_tokens"], -(s["end_char"] - s["start_char"]))
+            spans,
+            key=lambda s: (
+                -len(s["member_char_spans"]),
+                -sum(b - a for a, b in s["member_char_spans"]),
+                s["occurrence_id"],
+            ),
         )
         kept: list[dict] = []
         for s in spans_sorted:
             overlaps = any(
-                s["start_char"] < k["end_char"] and k["start_char"] < s["end_char"]
+                _spans_overlap(s["member_char_spans"], k["member_char_spans"])
                 for k in kept
             )
             if not overlaps:
@@ -151,15 +174,15 @@ def run() -> int:
     print(f"{len(types)} types à juger via {config.OLLAMA_MODEL}...")
 
     lexicalized = 0
-    with config.MWE_DECISIONS_PATH.open("w", encoding="utf-8") as out:
-        for i, entry in enumerate(types, start=1):
-            decision = judge_type(entry["idiom"], entry["occurrences"], segments_by_idx)
-            if decision["label"] in {"idiome", "phrasal_verb", "semi_fige"}:
-                lexicalized += 1
-            record = {**entry, **decision}
-            out.write(json.dumps(record, ensure_ascii=False) + "\n")
-            if i % 25 == 0 or i == len(types):
-                print(f"  {i}/{len(types)}")
+    records = []
+    for i, entry in enumerate(types, start=1):
+        decision = judge_type(entry["idiom"], entry["occurrences"], segments_by_idx)
+        if decision["label"] in {"idiome", "phrasal_verb", "semi_fige"}:
+            lexicalized += 1
+        records.append({**entry, **decision})
+        if i % 25 == 0 or i == len(types):
+            print(f"  {i}/{len(types)}")
+    atomic.atomic_write_jsonl(config.MWE_DECISIONS_PATH, records)
 
     print(f"{lexicalized}/{len(types)} types jugés lexicalisés (idiome/phrasal_verb/semi_fige).")
     print(f"-> {config.MWE_DECISIONS_PATH}")
@@ -178,9 +201,10 @@ def write_confirmed_spans() -> None:
     resolved = select_mwe_spans(decisions)
 
     n_spans = sum(len(v) for v in resolved.values())
-    with config.MWE_SPANS_PATH.open("w", encoding="utf-8") as f:
-        for seg_idx, spans in resolved.items():
-            f.write(json.dumps({"segment_idx": seg_idx, "spans": spans}, ensure_ascii=False) + "\n")
+    atomic.atomic_write_jsonl(
+        config.MWE_SPANS_PATH,
+        ({"segment_idx": seg_idx, "spans": spans} for seg_idx, spans in resolved.items()),
+    )
 
     print(f"{n_spans} spans MWE confirmés et réservés -> {config.MWE_SPANS_PATH}")
 
