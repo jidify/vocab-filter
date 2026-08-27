@@ -652,6 +652,70 @@ REVIEW_FIELDS = [
 ]
 
 
+def build_review_row(e: dict, occurrences_by_sense: dict[str, list[dict]]) -> dict:
+    """Une entrée du magasin -> une ligne de relecture (REVIEW_FIELDS,
+    colonnes de décision vides — à remplir par le relecteur), + quelques
+    champs informatifs hors REVIEW_FIELDS (`surface_forms`, `status`,
+    `decided_by` — ignorés par write_review_csv, DictWriter
+    extrasaction="ignore", consommés par pipeline/review_ui.py).
+
+    Factorisé pour construire une ligne à partir de N'IMPORTE QUELLE
+    entrée du magasin, pas seulement `pending` — voir pending_review_rows
+    ci-dessous (status == "pending") et pipeline/review_ui.py
+    build_flagged_payload (déjà verrouillée mais `sense_fit == "mismatch"`,
+    voir le plan du 2026-08-27 "Étendre l'IHM aux entrées verrouillées
+    incohérentes")."""
+    ev = e.get("evidence", {})
+    occs = occurrences_by_sense.get(e["key"], [])
+    return {
+        "key": e["key"], "kind": e["kind"],
+        "lemmas_en": "/".join(e["lemmas_en"]), "pos": e.get("pos") or "",
+        "definition_en": e.get("definition_en") or "",
+        "occurrences": e.get("occurrences", ""),
+        "agreement": e["agreement"],
+        "suggested_fr": e.get("fr") or "",
+        "suggested_fr_alt": "; ".join(e.get("fr_alt") or []),
+        "omw_fr": "; ".join(ev.get("omw_fr", [])),
+        "wonef": "; ".join(ev.get("wonef", [])),
+        "frontier_confidence": ev.get("frontier_confidence", ""),
+        "contexte_en": format_occurrences_en(occs),
+        # Forme(s) EXACTES du mot telles qu'elles apparaissent dans LE
+        # LIVRE (occ["target_surface"], voir senses.load_occurrences_by_sense)
+        # — pas les lemmes WordNet du synset (`lemmas_en` ci-dessus, qui
+        # peut lister des synonymes jamais employés par cet auteur, ex.
+        # feeble.s.01 -> "feeble/lame" alors que seul "lame" est dans le
+        # texte). Triées par fréquence d'usage.
+        "surface_forms": [
+            s for s, _ in Counter(o["target_surface"] for o in occs if o.get("target_surface")).most_common(6)
+        ],
+        "sense_fit": e.get("sense_fit") or "",
+        "sense_fit_note": e.get("sense_fit_note") or "",
+        "status": e.get("status"), "decided_by": e.get("decided_by"),
+        "definition_en_perso": "", "reassigner_vers": "",
+        "fr_final": "", "fr_alt_final": "", "decision": "", "note": "",
+    }
+
+
+def pending_review_rows(
+    store: dict[str, dict], occurrences_by_sense: dict[str, list[dict]] | None = None
+) -> list[dict]:
+    """Une ligne par entrée `pending` du magasin, triées comme
+    write_review_csv ci-dessous. Factorisé pour servir DEUX sorties : le
+    CSV par lot (write_review_csv) et l'API du serveur local
+    `GET /api/pending` (pipeline/review_ui.py) — même contenu, même tri,
+    un seul endroit qui les construit.
+
+    `occurrences_by_sense` : voir write_review_csv."""
+    occurrences_by_sense = occurrences_by_sense or {}
+
+    pending = [e for e in store.values() if e["status"] == "pending"]
+    pending.sort(key=lambda e: (
+        AGREEMENT_RANK.get(e["agreement"], 1),
+        -e.get("occurrences", 0),
+    ))
+    return [build_review_row(e, occurrences_by_sense) for e in pending]
+
+
 def write_review_csv(
     store: dict[str, dict], occurrences_by_sense: dict[str, list[dict]] | None = None
 ) -> int:
@@ -669,38 +733,14 @@ def write_review_csv(
     livre courant en contexte."""
     import csv
 
-    occurrences_by_sense = occurrences_by_sense or {}
-
-    pending = [e for e in store.values() if e["status"] == "pending"]
-    pending.sort(key=lambda e: (
-        AGREEMENT_RANK.get(e["agreement"], 1),
-        -e.get("occurrences", 0),
-    ))
+    rows = pending_review_rows(store, occurrences_by_sense)
 
     config.ensure_out_dir()
     with config.SENSE_FR_REVIEW_PATH.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=REVIEW_FIELDS, extrasaction="ignore")
         writer.writeheader()
-        for e in pending:
-            ev = e.get("evidence", {})
-            writer.writerow({
-                "key": e["key"], "kind": e["kind"],
-                "lemmas_en": "/".join(e["lemmas_en"]), "pos": e.get("pos") or "",
-                "definition_en": e.get("definition_en") or "",
-                "occurrences": e.get("occurrences", ""),
-                "agreement": e["agreement"],
-                "suggested_fr": e.get("fr") or "",
-                "suggested_fr_alt": "; ".join(e.get("fr_alt") or []),
-                "omw_fr": "; ".join(ev.get("omw_fr", [])),
-                "wonef": "; ".join(ev.get("wonef", [])),
-                "frontier_confidence": ev.get("frontier_confidence", ""),
-                "contexte_en": format_occurrences_en(occurrences_by_sense.get(e["key"], [])),
-                "sense_fit": e.get("sense_fit") or "",
-                "sense_fit_note": e.get("sense_fit_note") or "",
-                "definition_en_perso": "", "reassigner_vers": "",
-                "fr_final": "", "fr_alt_final": "", "decision": "", "note": "",
-            })
-    return len(pending)
+        writer.writerows(rows)
+    return len(rows)
 
 
 # ============================================================

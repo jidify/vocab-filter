@@ -104,8 +104,56 @@ def open_inventory(lemma: str) -> list[dict]:
     for synset in nwn.synsets(lookup):
         found[synset.name()] = {
             "sense_id": synset.name(), "pos": synset.pos(), "definition": synset.definition(),
+            # Lemmes du synset (ex. ass.n.02 -> ["ass"], arsenic.n.02 ->
+            # ["arsenic", "As", "atomic_number_33"]) : ajout PUR, S6c ne lit
+            # que sense_id/pos/definition ci-dessus, le prompt du modèle
+            # n'est pas affecté. Sert pipeline/review_ui.py à distinguer un
+            # vrai sens du lemme demandé d'un match morphy fortuit (ex.
+            # nwn.synsets("ass") -> "as" -> arsenic.n.02/american_samoa.n.01,
+            # dont AUCUN lemme n'est "ass" — voir le plan du 2026-08-27).
+            "lemmas": [l.name() for l in synset.lemmas()],
         }
     return sorted(found.values(), key=lambda x: (x["pos"], x["sense_id"]))
+
+
+def search(query: str, limit: int = 40) -> list[dict]:
+    """Recherche WordNet libre, TOUT lemme et TOUTE catégorie grammaticale
+    confondus — sert pipeline/review_ui.py workflow C (« la cible n'est pas
+    le même mot que celui affiché », ex. taper "e-mail" depuis la carte de
+    "mail"). Contrairement à open_inventory (un seul lemme, lookup exact
+    WordNet/morphy), ceci accepte une sous-chaîne : `nwn.synsets(q)` seul
+    ne trouverait pas "e-mail" en tapant "mail".
+
+    Balayer les ~117 000 synsets à chaque frappe serait coûteux ; on tente
+    d'abord le lookup exact (rapide, couvre l'usage courant : taper le mot
+    exact), et on ne bascule sur le balayage complet que s'il ne suffit
+    pas — mesuré à environ 1s sur cette machine, acceptable pour une
+    recherche déclenchée par un clic "chercher", pas à chaque frappe."""
+    q = query.strip().lower()
+    if len(q) < 2:
+        return []
+    q_lookup = q.replace(" ", "_")
+    found: dict[str, dict] = {}
+
+    def _add(synset) -> None:
+        found[synset.name()] = {
+            "sense_id": synset.name(), "pos": synset.pos(), "definition": synset.definition(),
+            "lemmas": [l.name() for l in synset.lemmas()],
+        }
+
+    for synset in nwn.synsets(q_lookup):
+        _add(synset)
+
+    if len(found) < limit:
+        for synset in nwn.all_synsets():
+            if synset.name() in found:
+                continue
+            if any(q in l.name().lower().replace("_", " ") for l in synset.lemmas()):
+                _add(synset)
+                if len(found) >= limit:
+                    break
+
+    return sorted(found.values(), key=lambda x: (x["pos"], x["sense_id"]))[:limit]
 
 
 # ============================================================

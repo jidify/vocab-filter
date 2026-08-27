@@ -129,6 +129,121 @@ def append_manual_correction(
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
 
 
+def apply_decision(store: dict[str, dict], row: dict, reviewer: str = "human") -> dict:
+    """Applique UNE ligne de décision (mêmes colonnes que REVIEW_FIELDS,
+    remplies à la main ou par pipeline/review_ui.py) au magasin passé en
+    argument — MUTE `store` en place, n'écrit rien sur disque (à
+    l'appelant de faire `sense_fr.write_store(store)` ensuite).
+
+    Extrait de `run()` ci-dessous pour que pipeline/review_ui.py (le petit
+    serveur local, route POST /api/decision) applique une décision unitaire
+    par le MÊME chemin que le commit par lot — c'est cette unicité de
+    chemin que verify_fr_lock.py protège (voir sa docstring : "Ces statuts
+    ne sont produits QUE par ces scripts"). Aucune logique de validation
+    n'est changée par cette extraction, seul le point d'entrée est nouveau.
+
+    Renvoie {"status": ..., "key": ..., "message": str|None} :
+    - status "skipped" : ligne vide (ni decision ni reassigner_vers).
+    - status "error" : rejetée, `message` explique pourquoi (même cas
+      qu'un `!` dans la sortie CLI de `run()`).
+    - status "ok"/"no"/"none" : validation normale sous `key`.
+    - status "reassigned" : re-clée sous `reassigner_vers` ; `key` du
+      résultat est alors la NOUVELLE clé. `message` porte l'avertissement
+      "cible déjà verrouillée" quand applicable (pas une erreur)."""
+
+    key = row["key"]
+    decision = (row.get("decision") or "").strip().lower()
+    reassign_to = (row.get("reassigner_vers") or "").strip()
+    today = date.today().isoformat()
+
+    if not decision and not reassign_to:
+        return {"status": "skipped", "key": key, "message": None}
+    if decision not in VALID_DECISIONS:
+        return {"status": "error", "key": key,
+                "message": f"decision invalide : {decision!r} (attendu : ok / no / none)"}
+    if key not in store:
+        return {"status": "error", "key": key, "message": "clé absente du magasin"}
+
+    entry = store[key]
+    note = (row.get("note") or "").strip()
+
+    if reassign_to:
+        if entry.get("kind") != "synset":
+            return {"status": "error", "key": key,
+                    "message": f"reassigner_vers ignoré : seules les entrées de type "
+                               f"'synset' peuvent être re-clées (celle-ci est {entry.get('kind')!r})"}
+        if decision != "ok":
+            return {"status": "error", "key": key,
+                    "message": "reassigner_vers rempli mais decision != 'ok'"}
+        fr_final = (row.get("fr_final") or "").strip()
+        if not fr_final:
+            return {"status": "error", "key": key,
+                    "message": "reassigner_vers rempli mais fr_final vide"}
+        derived = derive_reassignment(reassign_to, row.get("definition_en_perso") or "")
+        if derived is None:
+            return {"status": "error", "key": key,
+                    "message": f"reassigner_vers={reassign_to!r} invalide : ni sense_id "
+                               f"WordNet connu, ni clé 'mwe:<expression>:"
+                               f"{{{'/'.join(sorted(VALID_MWE_LABELS))}}}' bien formée"}
+        canonical_form, new_pos, definition_en = derived
+
+        word = (entry.get("lemmas_en") or [None])[0]
+        pos = entry.get("pos")
+        if not word or not pos:
+            return {"status": "error", "key": key,
+                    "message": "lemmas_en/pos manquants dans le magasin, "
+                               "impossible de dériver (word, pos)"}
+
+        new_entry = {
+            "key": reassign_to, "kind": "mwe" if reassign_to.startswith("mwe:") else "synset",
+            "lemmas_en": [canonical_form], "pos": new_pos or "mwe",
+            "definition_en": definition_en,
+            "occurrences": entry.get("occurrences", 0),
+            "fr": fr_final, "fr_alt": parse_alt(row.get("fr_alt_final") or ""),
+            "status": "validated", "agreement": f"reassigne_manuellement_depuis:{key}",
+            "translation_type": "equivalence_directe", "sense_fit": "ok", "sense_fit_note": "",
+            "source": None, "evidence": None,
+            "decided_at": today, "decided_by": reviewer, "note": note,
+        }
+        message = None
+        existing_target = store.get(reassign_to)
+        if existing_target is not None and existing_target.get("status") in (
+            "validated", "auto_strong", "auto_llm", "auto_corroborated", "auto_judged", "auto_joint",
+        ) and existing_target.get("fr") not in (None, fr_final):
+            message = (f"{reassign_to!r} déjà verrouillée avec une autre traduction "
+                       f"({existing_target.get('fr')!r}) — écrasée par la décision humaine "
+                       f"({fr_final!r}), comme le permet ce chemin de validation.")
+        store[reassign_to] = new_entry
+
+        append_manual_correction(
+            word, pos, key, reassign_to, canonical_form, new_pos, definition_en,
+            reason=note or f"reassigné manuellement depuis {key}",
+        )
+        return {"status": "reassigned", "key": reassign_to, "message": message}
+
+    if decision == "ok":
+        fr_final = (row.get("fr_final") or "").strip()
+        if not fr_final:
+            return {"status": "error", "key": key, "message": "decision=ok mais fr_final vide"}
+        entry["fr"] = fr_final
+        entry["fr_alt"] = parse_alt(row.get("fr_alt_final") or "")
+        entry["status"] = "validated"
+    elif decision == "no":
+        entry["fr"] = None
+        entry["fr_alt"] = []
+        entry["status"] = "rejected"
+    else:  # "none"
+        entry["fr"] = None
+        entry["fr_alt"] = []
+        entry["status"] = "no_equivalent"
+
+    entry["decided_at"] = today
+    entry["decided_by"] = reviewer
+    entry["note"] = note
+    store[key] = entry
+    return {"status": decision, "key": key, "message": None}
+
+
 def run(reviewer: str = "human") -> int:
     if not config.SENSE_FR_REVIEW_PATH.exists():
         print(f"Aucun fichier à relire : {config.SENSE_FR_REVIEW_PATH}")
@@ -143,111 +258,21 @@ def run(reviewer: str = "human") -> int:
     n_reassigned = 0
     n_skipped_blank = 0
     n_errors = 0
-    today = date.today().isoformat()
 
     for row in rows:
-        key = row["key"]
-        decision = (row.get("decision") or "").strip().lower()
-        reassign_to = (row.get("reassigner_vers") or "").strip()
-
-        if not decision and not reassign_to:
+        result = apply_decision(store, row, reviewer)
+        status = result["status"]
+        if status == "skipped":
             n_skipped_blank += 1
-            continue
-        if decision not in VALID_DECISIONS:
-            print(f"  ! decision invalide ignorée pour {key!r} : {decision!r} "
-                  f"(attendu : ok / no / none)")
+        elif status == "error":
+            print(f"  ! {result['key']!r} : {result['message']}")
             n_errors += 1
-            continue
-        if key not in store:
-            print(f"  ! clé absente du magasin, ignorée : {key!r}")
-            n_errors += 1
-            continue
-
-        entry = store[key]
-        note = (row.get("note") or "").strip()
-
-        if reassign_to:
-            if entry.get("kind") != "synset":
-                print(f"  ! reassigner_vers ignoré pour {key!r} : seules les entrées "
-                      f"de type 'synset' peuvent être re-clées (celle-ci est {entry.get('kind')!r})")
-                n_errors += 1
-                continue
-            if decision != "ok":
-                print(f"  ! reassigner_vers rempli pour {key!r} mais decision != 'ok' — ignoré")
-                n_errors += 1
-                continue
-            fr_final = (row.get("fr_final") or "").strip()
-            if not fr_final:
-                print(f"  ! reassigner_vers rempli mais fr_final vide pour {key!r} — ignoré")
-                n_errors += 1
-                continue
-            derived = derive_reassignment(reassign_to, row.get("definition_en_perso") or "")
-            if derived is None:
-                print(f"  ! reassigner_vers={reassign_to!r} invalide pour {key!r} : "
-                      f"ni sense_id WordNet connu, ni clé 'mwe:<expression>:"
-                      f"{{{'/'.join(sorted(VALID_MWE_LABELS))}}}' bien formée")
-                n_errors += 1
-                continue
-            canonical_form, new_pos, definition_en = derived
-
-            word = (entry.get("lemmas_en") or [None])[0]
-            pos = entry.get("pos")
-            if not word or not pos:
-                print(f"  ! {key!r} : lemmas_en/pos manquants dans le magasin, "
-                      f"impossible de dériver (word, pos) — ignoré")
-                n_errors += 1
-                continue
-
-            new_entry = {
-                "key": reassign_to, "kind": "mwe" if reassign_to.startswith("mwe:") else "synset",
-                "lemmas_en": [canonical_form], "pos": new_pos or "mwe",
-                "definition_en": definition_en,
-                "occurrences": entry.get("occurrences", 0),
-                "fr": fr_final, "fr_alt": parse_alt(row.get("fr_alt_final") or ""),
-                "status": "validated", "agreement": f"reassigne_manuellement_depuis:{key}",
-                "translation_type": "equivalence_directe", "sense_fit": "ok", "sense_fit_note": "",
-                "source": None, "evidence": None,
-                "decided_at": today, "decided_by": reviewer, "note": note,
-            }
-            existing_target = store.get(reassign_to)
-            if existing_target is not None and existing_target.get("status") in (
-                "validated", "auto_strong", "auto_llm", "auto_corroborated", "auto_judged", "auto_joint",
-            ) and existing_target.get("fr") not in (None, fr_final):
-                print(f"  ! {reassign_to!r} déjà verrouillée avec une autre traduction "
-                      f"({existing_target.get('fr')!r}) — écrasée par la décision humaine "
-                      f"({fr_final!r}), comme le permet ce chemin de validation.")
-            store[reassign_to] = new_entry
-
-            append_manual_correction(
-                word, pos, key, reassign_to, canonical_form, new_pos, definition_en,
-                reason=note or f"reassigné manuellement depuis {key}",
-            )
+        elif status == "reassigned":
+            if result["message"]:
+                print(f"  ! {result['message']}")
             n_reassigned += 1
-            continue
-
-        if decision == "ok":
-            fr_final = (row.get("fr_final") or "").strip()
-            if not fr_final:
-                print(f"  ! decision=ok mais fr_final vide pour {key!r} — ignoré")
-                n_errors += 1
-                continue
-            entry["fr"] = fr_final
-            entry["fr_alt"] = parse_alt(row.get("fr_alt_final") or "")
-            entry["status"] = "validated"
-        elif decision == "no":
-            entry["fr"] = None
-            entry["fr_alt"] = []
-            entry["status"] = "rejected"
-        else:  # "none"
-            entry["fr"] = None
-            entry["fr_alt"] = []
-            entry["status"] = "no_equivalent"
-
-        entry["decided_at"] = today
-        entry["decided_by"] = reviewer
-        entry["note"] = note
-        store[key] = entry
-        n_committed[decision] += 1
+        else:  # "ok" / "no" / "none"
+            n_committed[status] += 1
 
     sense_fr.write_store(store)
     # Livre courant uniquement (voir sense_fr.format_occurrences_en) —

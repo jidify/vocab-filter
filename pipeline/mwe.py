@@ -19,7 +19,7 @@ from collections import Counter, defaultdict
 
 from idiomatch import Idiomatcher
 
-from pipeline import config
+from pipeline import config, custom_lexicon
 from pipeline.corpus import load_segments
 
 _MATCHER = None
@@ -59,6 +59,15 @@ CUSTOM_IDIOMS = [
 ]
 
 
+def _all_custom_idioms() -> list[dict]:
+    """CUSTOM_IDIOMS (socle en dur ci-dessus) + data/custom_lexicon.jsonl
+    (ajouté sans édition de code depuis pipeline/review_ui.py) — lu une
+    fois par processus, comme CUSTOM_IDIOMS lui-même. Une entrée du
+    lexique avec le même `lemma` qu'une entrée en dur la remplace (ordre
+    d'insertion dans le dict de get_idiom_definition/get_matcher)."""
+    return CUSTOM_IDIOMS + custom_lexicon.load_idioms()
+
+
 def get_idiom_definition(idiom: str) -> str | None:
     """Glose anglaise de l'idiome telle qu'écrite dans idioms.yml
     (idiomatch/resources/idioms.yml) — sert directement de "sens" pour
@@ -73,7 +82,7 @@ def get_idiom_definition(idiom: str) -> str | None:
 
         data = yaml.safe_load((RESOURCES_DIR / "idioms.yml").read_text(encoding="utf-8"))
         _IDIOMS_YML = {entry["lemma"]: entry for entry in data}
-        for entry in CUSTOM_IDIOMS:
+        for entry in _all_custom_idioms():
             _IDIOMS_YML[entry["lemma"]] = entry
 
     entry = _IDIOMS_YML.get(idiom)
@@ -86,7 +95,7 @@ def get_matcher():
     global _MATCHER
     if _MATCHER is None:
         _MATCHER = Idiomatcher.from_pretrained(n=2)
-        _MATCHER.add_idioms(CUSTOM_IDIOMS)
+        _MATCHER.add_idioms(_all_custom_idioms())
     return _MATCHER
 
 

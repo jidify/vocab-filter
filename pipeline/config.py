@@ -139,6 +139,12 @@ SENSE_FR_LOCK_PATH = DATA_DIR / "sense_fr.lock.json"
 # "Correction manuelle smart-ass / e-mail sans re-run complet".
 MANUAL_CORRECTIONS_PATH = DATA_DIR / "manual_corrections.jsonl"
 
+# Lexique piloté par les données (expressions + cas de tokenisation ajoutés
+# depuis pipeline/review_ui.py sans éditer de code) — voir
+# pipeline/custom_lexicon.py et le plan du 2026-08-27 "IHM de correction
+# manuelle : plusieurs workflows, lexique piloté par les données".
+CUSTOM_LEXICON_PATH = DATA_DIR / "custom_lexicon.jsonl"
+
 # wonef-precision.xml (voir WONEF_PRECISION_PATH ci-dessus) est absent
 # du dépôt : seule la variante f-score, compressée, est présente.
 WONEF_FSCORE_PATH = ROOT / "wonef-fscore.xml.bz2"
@@ -152,6 +158,10 @@ SENSE_FR_REVIEW_PATH = OUT_DIR / "sense_fr_review.csv"
 # plan du 2026-08-27 "Une page HTML locale pour choisir le sens WordNet
 # dans une liste".
 REVIEW_UI_PATH = OUT_DIR / "review_ui.html"
+
+# Port par défaut du petit serveur local (stdlib, 127.0.0.1 uniquement)
+# lancé par `uv run python -m pipeline.review_ui` — voir sa docstring.
+REVIEW_UI_PORT = 8765
 
 # sense_id que la passe contextuelle (pipeline/sense_fr_frontier.py) juge
 # suspect ou douteux au vu des phrases réelles du livre. Consommé par

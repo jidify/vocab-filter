@@ -15,7 +15,7 @@ import json
 import spacy
 from spacy.symbols import ORTH
 
-from pipeline import config
+from pipeline import config, custom_lexicon
 from pipeline.corpus import Segment, load_segments
 
 _NLP = None
@@ -37,7 +37,9 @@ def get_nlp():
     global _NLP
     if _NLP is None:
         _NLP = spacy.load("en_core_web_sm")
-        for surface in EMAIL_SPECIAL_CASES:
+        # EMAIL_SPECIAL_CASES (socle en dur) + data/custom_lexicon.jsonl
+        # (ajouté sans édition de code depuis pipeline/review_ui.py).
+        for surface in EMAIL_SPECIAL_CASES + custom_lexicon.load_tokenizer_surfaces():
             _NLP.tokenizer.add_special_case(surface, [{ORTH: surface}])
     return _NLP
 
