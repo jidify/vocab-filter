@@ -476,10 +476,25 @@ def run(model: str = config.SENSE_FR_FRONTIER_MODEL, limit: int | None = None, d
     # correspondre à ce que select.py a réellement retenu.
     inventory.verify_consumer(config.SENSES_INVENTORY_HASH_PATH, "sense_fr_frontier")
     resolved, unresolved = collect_frontier_targets()
+
+    # Lot 6 (Partie 3, point 31) : le filtrage des cibles déjà protégées
+    # (`validated`/`auto_joint`) a lieu ICI, AVANT toute construction
+    # d'items/lots — pas après coup (l'ancien point d'insertion, dans la
+    # boucle qui consomme `translations_by_batch` plus bas), qui laissait
+    # ces cibles alourdir les lots ENVOYÉS au modèle (candidats collectés,
+    # occurrences choisies, texte de prompt construit) pour un résultat
+    # jeté à la réception. C'était l'obstacle principal à toute reprise
+    # gratuite d'un run à l'autre : une clé déjà validée à la main
+    # continuait de payer sa part de chaque lot où elle tombait.
+    store = sense_fr.load_store()
+    n_protected = sum(1 for t in resolved if is_protected(store.get(t["key"])))
+    resolved = [t for t in resolved if not is_protected(store.get(t["key"]))]
+
     if limit is not None:
         resolved = resolved[:limit]
     print(f"{len(resolved)} cible(s) à traduire ({len(unresolved)} sense_id non résolu(s) — "
-          f"mis en pending sans appel au modèle), modèle={model}.")
+          f"mis en pending sans appel au modèle ; {n_protected} déjà validée(s)/auto_joint "
+          f"laissée(s) intacte(s), jamais mises en lot), modèle={model}.")
 
     occurrences_by_sense = senses.load_occurrences_by_sense()
     rng = random.Random(42)  # ordre de présentation des candidats déterministe
@@ -523,24 +538,20 @@ def run(model: str = config.SENSE_FR_FRONTIER_MODEL, limit: int | None = None, d
         batches.extend(kind_items[i:i + batch_size] for i in range(0, len(kind_items), batch_size))
     translations_by_batch, cost = _translate_batches(batches, model)
 
-    store = sense_fr.load_store()
+    # `store` a déjà été chargé plus haut pour le filtrage protégé — pas de
+    # second appel à `sense_fr.load_store()` ici (Lot 6). `resolved` ne
+    # contient plus aucune cible protégée à ce point, donc plus besoin de
+    # revérifier `is_protected` dans cette boucle.
     n_by_status: dict[str, int] = {}
     n_suspect = 0
-    n_protected = 0
     for batch, translations in zip(batches, translations_by_batch):
         for target, _occs, _candidates in batch:
-            if is_protected(store.get(target["key"])):
-                n_protected += 1
-                continue
             translation = translations.get(target["key"])
             entry = build_entry(target, translation)
             store[entry["key"]] = entry
             n_by_status[entry["status"]] = n_by_status.get(entry["status"], 0) + 1
             if entry.get("agreement") in SUSPECT_AGREEMENTS:
                 n_suspect += 1
-    if n_protected:
-        print(f"  {n_protected} clé(s) déjà validée(s)/auto_joint laissée(s) intacte(s) "
-              f"(voir PROTECTED_STATUSES).")
 
     for target in unresolved:
         store[target["key"]] = {

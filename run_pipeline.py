@@ -28,7 +28,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from pipeline import atomic
+from pipeline import atomic, config, zones
 
 STAGES = [
     ("corpus", "pipeline.corpus"),
@@ -54,6 +54,44 @@ STAGES = [
 # prudence si les valeurs par défaut changent un jour.
 FRONTIER_STAGES = {"sense_fr_frontier", "sense_fr_adjudicate"}
 
+# Lot 6 (plan, Partie 3) : --tranches ne gouverne QUE ces quatre étapes —
+# corpus/analyze/mwe/mwe_judge/select tournent TOUJOURS sur le livre entier,
+# jamais par tranche (l'inventaire doit être figé une seule fois, voir la
+# Partie 3 et le principe directeur en tête du plan). Mécaniquement, seul
+# `senses.py` a besoin d'un paramètre explicite (`segment_idxs`) : c'est la
+# seule étape qui itère occurrence par occurrence. `sense_fr_frontier`/
+# `sense_fr_adjudicate`/`export` travaillent par sense_id, pas par
+# occurrence — leur périmètre est déjà celui de ce que `senses.jsonl`
+# contient au moment du run (Partie 3 : elles "recalculent depuis l'union de
+# ce que senses.jsonl et sense_fr.jsonl contiennent"), donc aucun paramètre
+# supplémentaire n'est nécessaire pour elles : limiter --tranches à
+# senses.py suffit à limiter le travail de TOUTE la chaîne avale.
+TRANCHE_SEGMENT_PARAM_STAGES = {"senses"}
+
+
+def parse_tranches(spec: str) -> set[int] | None:
+    """'all' (défaut) -> None (pas de filtre). '1-3' -> {1,2,3}.
+    '1,4,7' -> {1,4,7}. Combinable : '1-3,7,10-12'. Les nombres sont des
+    ordinaux de zone 1-indexés (`zone-01`, `zone-02`... — voir
+    pipeline/zones.py, Lot 5), pas des segment_idx."""
+
+    if spec.strip().lower() == "all":
+        return None
+    ordinals: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start, end = int(start_s), int(end_s)
+            if start > end:
+                start, end = end, start
+            ordinals.update(range(start, end + 1))
+        else:
+            ordinals.add(int(part))
+    return ordinals
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -61,6 +99,13 @@ def main() -> int:
                          help="nom de l'étape à partir de laquelle reprendre")
     parser.add_argument("--only", dest="only_stage", default=None,
                          help="ne lancer qu'une seule étape")
+    parser.add_argument(
+        "--tranches", dest="tranches", default="all",
+        help="Limite senses/sense_fr_frontier/sense_fr_adjudicate/export aux "
+             "tranches de zone_layout.json (Lot 5) indiquées : 'all' (défaut), "
+             "'1-10', '1,4,7', combinable '1-3,7'. corpus/analyze/mwe/"
+             "mwe_judge/select tournent toujours sur le livre entier.",
+    )
     args = parser.parse_args()
 
     import importlib
@@ -78,6 +123,29 @@ def main() -> int:
             return 1
         stages = STAGES[names.index(args.from_stage):]
 
+    try:
+        tranche_ordinals = parse_tranches(args.tranches)
+    except ValueError as exc:
+        print(f"--tranches invalide ({args.tranches!r}) : {exc}")
+        return 1
+
+    # Calculé seulement si une étape de `stages` en a réellement besoin —
+    # sinon un `--only mwe_judge --tranches 1-10` échouerait pour rien sur
+    # l'absence de zone_layout.json alors que mwe_judge ne le consomme pas.
+    segment_idxs: set[int] | None = None
+    if tranche_ordinals is not None and any(
+        name in TRANCHE_SEGMENT_PARAM_STAGES for name, _ in stages
+    ):
+        layout = zones.load()
+        if layout is None:
+            print(f"--tranches demande un layout de zones ({config.ZONE_LAYOUT_PATH.name}) "
+                  f"— lance `analyze` au moins une fois avant (Lot 5).")
+            return 1
+        segment_idxs = zones.segment_idxs_for_tranches(layout, tranche_ordinals)
+        if not segment_idxs:
+            print(f"--tranches {args.tranches!r} ne correspond à aucune zone du layout "
+                  f"courant ({layout['zone_count']} zones) — rien à calculer.")
+
     # Lot 0 — verrou de run (pipeline/atomic.py::run_lock) : empêche un
     # second run de démarrer pendant qu'un premier écrit encore dans
     # pipeline_out/ (voir le diagnostic de corruption de senses.jsonl dans
@@ -88,8 +156,11 @@ def main() -> int:
             for name, module_name in stages:
                 print(f"\n=== {name} ({module_name}) ===")
                 module = importlib.import_module(module_name)
+                kwargs = {}
+                if name in TRANCHE_SEGMENT_PARAM_STAGES and segment_idxs is not None:
+                    kwargs["segment_idxs"] = segment_idxs
                 try:
-                    code = module.run()
+                    code = module.run(**kwargs)
                 except Exception as exc:
                     if name in FRONTIER_STAGES:
                         import litellm

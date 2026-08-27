@@ -173,3 +173,18 @@ def load() -> dict | None:
 
 def segment_zone_map(layout: dict) -> dict[int, str]:
     return {int(k): v for k, v in layout["segment_zone_map"].items()}
+
+
+def segment_idxs_for_tranches(layout: dict, ordinals: set[int]) -> set[int]:
+    """Lot 6 — convertit un ensemble d'ordinaux de tranche (1-indexés,
+    correspondant aux `zone_id` `zone-01`, `zone-02`...) en l'ensemble des
+    `segment_idx` qu'ils couvrent, via `segment_zone_map` (Lot 5). C'est le
+    seul point de contact entre `--tranches` et le layout de zones — voir
+    `run_pipeline.py`."""
+
+    wanted_zone_ids = {f"zone-{o:02d}" for o in ordinals}
+    return {
+        int(seg_idx_str)
+        for seg_idx_str, zone_id in layout["segment_zone_map"].items()
+        if zone_id in wanted_zone_ids
+    }

@@ -758,7 +758,118 @@ def pick_diverse_occurrences(occurrences: list[dict], k: int) -> list[dict]:
     return [ordered[i] for i in picked_idx]
 
 
-def run(top_k: int | None = None) -> int:
+def load_word_occurrences_by_unit_key() -> dict[str, list[dict]]:
+    """Une entrée par occurrence MOT (jamais MWE — une expression multi-
+    mots n'a pas de désambiguïsation par occurrence : son sens WordNet est
+    fixé une fois pour toutes au niveau du TYPE par mwe_judge.py, Lot 4
+    point G, jamais recalculé ici). Lit `lexical_inventory.jsonl` (figé par
+    select.py, Lot 3/5) plutôt que `selected_types.jsonl` : donne
+    l'`occurrence_id` exact et le `segment_idx` de CHAQUE occurrence — y
+    compris deux occurrences du même lemme dans le même segment
+    (`selected_types.jsonl::occurrence_segment_idxs` est un ENSEMBLE de
+    segment_idx, donc dédupliquait ce cas). C'était un manque préexistant,
+    invisible tant que `senses.jsonl` était réécrit en entier à chaque run ;
+    la fusion par `occurrence_id` du Lot 6 l'aurait sinon reproduit
+    silencieusement (deux occurrences fusionnées à tort sous un seul
+    segment_idx)."""
+    by_unit_key: dict[str, list[dict]] = {}
+    with config.LEXICAL_INVENTORY_PATH.open(encoding="utf-8") as f:
+        for line in f:
+            row = json.loads(line)
+            if row["unit_key"].startswith("mwe:"):
+                continue
+            by_unit_key.setdefault(row["unit_key"], []).append(row)
+    return by_unit_key
+
+
+def load_existing_senses(current_digest: str) -> dict[str, dict]:
+    """occurrence_id -> enregistrement, pour la fusion incrémentale par
+    tranche (Lot 6, Partie 3) : seuls les enregistrements dont
+    `inventory_digest` correspond à l'inventaire COURANT sont réutilisables
+    tels quels — un enregistrement calculé contre un inventaire différent
+    (types retenus différents, spans MWE différents...) n'est jamais
+    réutilisé, même si son `occurrence_id` existe encore par coïncidence.
+    Un enregistrement d'avant ce lot (pas d'`occurrence_id` du tout, champ
+    absent avant le Lot 6) n'est jamais réutilisable non plus. Dans les deux
+    cas, l'occurrence sera recalculée si elle est dans la tranche demandée
+    ce run, sinon simplement absente du fichier réécrit — couverture
+    partielle honnête (voir export.py), jamais une erreur."""
+    if not config.SENSES_PATH.exists():
+        return {}
+    kept: dict[str, dict] = {}
+    decoder = json.JSONDecoder(strict=False)
+    with config.SENSES_PATH.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = decoder.decode(line)
+            except json.JSONDecodeError:
+                continue
+            occurrence_id = record.get("occurrence_id")
+            if not occurrence_id or record.get("inventory_digest") != current_digest:
+                continue
+            kept[occurrence_id] = record
+    return kept
+
+
+def coverage_report() -> dict:
+    """Couverture ACTUELLE de `senses.jsonl` par rapport à l'inventaire mot
+    figé (`lexical_inventory.jsonl`) — utilisé par `export.py` (Lot 6) pour
+    documenter honnêtement une couverture partielle quand seules certaines
+    tranches ont été traitées (Partie 3 : ce n'est jamais une erreur).
+    Indépendant de tout `--tranches` : ne regarde que ce qui existe
+    réellement sur disque au moment de l'appel, jamais un argument passé
+    par l'appelant.
+
+    Exclut du dénominateur les unités SANS AUCUN synset WordNet (bruit OCR,
+    contractions, noms propres mal lemmatisés — ex. sur *The Humans* :
+    "dunno", "gotcha", "sertrus"...) : `analyze_occurrence` ne produit
+    jamais d'enregistrement pour elles (`get_synsets` vide -> `record is
+    None`, voir `run()`), qu'elles aient été traitées ou non — les compter
+    ferait paraître CHAQUE zone éternellement "manquante" même une fois
+    entièrement traitée, ce qui serait le contraire d'une couverture
+    honnête."""
+    word_occurrences = load_word_occurrences_by_unit_key()
+    all_ids: set[str] = set()
+    zone_by_id: dict[str, str | None] = {}
+    for unit_key, rows in word_occurrences.items():
+        lemma, wn_pos = unit_key.rsplit(":", 1)
+        if not get_synsets(lemma, wn_pos):
+            continue
+        for row in rows:
+            all_ids.add(row["occurrence_id"])
+            zone_by_id[row["occurrence_id"]] = row["zone_id"]
+
+    covered_ids: set[str] = set()
+    if config.SENSES_PATH.exists():
+        decoder = json.JSONDecoder(strict=False)
+        with config.SENSES_PATH.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = decoder.decode(line)
+                except json.JSONDecodeError:
+                    continue
+                occurrence_id = record.get("occurrence_id")
+                if occurrence_id:
+                    covered_ids.add(occurrence_id)
+    covered_ids &= all_ids  # jamais un occurrence_id d'un inventaire périmé
+
+    missing_zones: set[str] = {
+        zone_by_id[oid] for oid in all_ids - covered_ids if zone_by_id[oid] is not None
+    }
+    return {
+        "total": len(all_ids),
+        "covered": len(covered_ids),
+        "missing_zone_ids": sorted(missing_zones),
+    }
+
+
+def run(segment_idxs: set[int] | None = None, top_k: int | None = None) -> int:
     config.ensure_out_dir()
     # Lot 3 (point E) : s'arrête clairement si select.py n'a pas encore figé
     # d'inventaire (pipeline/inventory.py) plutôt que de désambiguïser contre
@@ -770,21 +881,47 @@ def run(top_k: int | None = None) -> int:
 
     types.sort(key=coarse_priority, reverse=True)
 
+    word_occurrences_by_unit_key = load_word_occurrences_by_unit_key()
+    # Lot 6 — fusion par occurrence_id (Partie 3) : un enregistrement déjà
+    # à jour contre l'inventaire courant n'est jamais recalculé, tranche
+    # demandée ou non — c'est ce qui rend un run répété sur le même
+    # inventaire quasi gratuit d'une tranche à l'autre.
+    existing = load_existing_senses(digest)
+
     segments = load_segments()
-    total = sum(len(t["occurrence_segment_idxs"]) for t in types)
+
+    # Occurrences encore à calculer ce run, groupées par type dans l'ordre
+    # de coarse_priority (comme avant ce lot) : déjà-à-jour et hors-tranche
+    # sont exclues ici, une fois pour toutes, avant la boucle de calcul.
+    pending_by_type: list[tuple[dict, list[dict]]] = []
+    for t in types:
+        unit_key = f"{t['lemma']}:{t['wn_pos']}"
+        pending = [
+            occ_row for occ_row in word_occurrences_by_unit_key.get(unit_key, [])
+            if occ_row["occurrence_id"] not in existing
+            and (segment_idxs is None or occ_row["segment_idx"] in segment_idxs)
+        ]
+        if pending:
+            pending_by_type.append((t, pending))
+
+    total = sum(len(occs) for _, occs in pending_by_type)
+    scope = "sur la/les tranche(s) demandée(s)" if segment_idxs is not None else "au total"
+    print(f"{len(existing)} occurrence(s) déjà à jour réutilisée(s) telles quelles, "
+          f"{total} à calculer {scope}.")
 
     import time
     started = time.time()
     n_fallback = 0
     processed = 0
     types_processed_fully = 0
-    records: list[dict] = []
+    kept_records: list[dict] = list(existing.values())
 
-    for t in types:
+    for t, occ_rows in pending_by_type:
         use_full = top_k is None or types_processed_fully < top_k
         types_processed_fully += 1
 
-        for seg_idx in t["occurrence_segment_idxs"]:
+        for occ_row in occ_rows:
+            seg_idx = occ_row["segment_idx"]
             if use_full:
                 record = analyze_occurrence(t["lemma"], t["wn_pos"], segments, seg_idx)
             else:
@@ -805,7 +942,15 @@ def run(top_k: int | None = None) -> int:
                       f"{n_fallback} en repli sans GlossBERT)", flush=True)
             if record is None:
                 continue
-            records.append(record)
+            # Lot 6 (Partie 2 point F / Partie 3) : identité stable pour la
+            # fusion incrémentale, et l'empreinte d'inventaire contre
+            # laquelle CET enregistrement a été calculé — un run ultérieur
+            # avec un inventaire différent ne le réutilisera pas tel quel
+            # (load_existing_senses), même si son occurrence_id existe
+            # toujours.
+            record["occurrence_id"] = occ_row["occurrence_id"]
+            record["inventory_digest"] = digest
+            kept_records.append(record)
 
     # Lot 0 — écriture atomique (pipeline/atomic.py) : le fichier
     # n'apparaît qu'une fois complet, ce qui élimine la classe de
@@ -813,11 +958,12 @@ def run(top_k: int | None = None) -> int:
     # concurrents ayant chacun ouvert senses.jsonl en mode "w" — voir
     # atomic.py pour le diagnostic complet). Accumuler en mémoire avant
     # d'écrire est sans risque ici : quelques milliers de records au plus.
-    n = atomic.atomic_write_jsonl(config.SENSES_PATH, records)
+    n = atomic.atomic_write_jsonl(config.SENSES_PATH, kept_records)
     inventory.mark_consumed(config.SENSES_INVENTORY_HASH_PATH, digest)
 
-    print(f"{n} occurrences désambiguïsées -> {config.SENSES_PATH} "
-          f"({n - n_fallback} via GlossBERT, {n_fallback} en repli sens dominant)")
+    print(f"{n} occurrences dans {config.SENSES_PATH} ({len(existing)} réutilisée(s), "
+          f"{total} calculée(s) ce run : {total - n_fallback} via GlossBERT, "
+          f"{n_fallback} en repli sens dominant)")
     return 0
 
 

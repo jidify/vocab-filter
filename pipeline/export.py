@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import csv
 
-from pipeline import atomic, config, inventory
+from pipeline import atomic, config, inventory, senses
 from pipeline.score import build_records, aggregate_and_score, build_mwe_units
 
 CSV_FIELDS = [
@@ -46,7 +46,7 @@ def write_review_queue(units: list[dict], path) -> None:
             writer.writerow(row)
 
 
-def write_report(units: list[dict], path) -> None:
+def write_report(units: list[dict], path, coverage: dict) -> None:
     by_comprehension = sorted(units, key=lambda u: -u["score_comprehension"])[:100]
     by_reuse = sorted(units, key=lambda u: -u["score_reuse"])[:100]
     by_default = sorted(units, key=lambda u: -u["score_default"])[:100]
@@ -64,6 +64,25 @@ def write_report(units: list[dict], path) -> None:
     lines.append(f"{len(units)} unités (forme, POS, sens) exportées.")
     lines.append(f"{sum(1 for u in units if u['needs_review'])} en file de révision.")
     lines.append("")
+    # Lot 6 (Partie 3) : cet export peut légitimement ne couvrir qu'une
+    # partie du livre si seules certaines tranches ont été traitées par
+    # `senses`/`sense_fr_frontier`/`sense_fr_adjudicate` jusqu'ici — ce n'est
+    # jamais une erreur, mais ça doit être dit explicitement plutôt que de
+    # laisser un lecteur croire que vocab.csv couvre déjà tout le livre.
+    if coverage["total"]:
+        pct = 100.0 * coverage["covered"] / coverage["total"]
+        lines.append(
+            f"**Couverture** : {coverage['covered']}/{coverage['total']} occurrences-mots "
+            f"désambiguïsées ({pct:.0f} %)."
+        )
+        if coverage["missing_zone_ids"]:
+            lines.append(
+                f"Tranches pas encore traitées (reprise par tranches, Lot 6) : "
+                f"{', '.join(coverage['missing_zone_ids'])}."
+            )
+        else:
+            lines.append("Livre entier couvert — aucune tranche manquante.")
+        lines.append("")
     lines.append("## Top 100 — score_default (mélange comprehension/reuse)")
     lines.append("")
     lines.append("| # | forme | POS | sens | FR | zipf_need | aoa | fr_opacity | score |")
@@ -100,16 +119,26 @@ def run() -> int:
     units.extend(build_mwe_units())
     units.sort(key=lambda u: -u["score_default"])
 
+    coverage = senses.coverage_report()
+
     write_csv(units, config.VOCAB_CSV_PATH)
     write_jsonl(units, config.VOCAB_JSONL_PATH)
     write_review_queue(units, config.REVIEW_QUEUE_PATH)
-    write_report(units, config.REPORT_PATH)
+    write_report(units, config.REPORT_PATH, coverage)
 
     print(f"{len(units)} unités exportées.")
     print(f"  {config.VOCAB_CSV_PATH}")
     print(f"  {config.VOCAB_JSONL_PATH}")
     print(f"  {config.REVIEW_QUEUE_PATH}")
     print(f"  {config.REPORT_PATH}")
+    if coverage["total"]:
+        pct = 100.0 * coverage["covered"] / coverage["total"]
+        # Lot 6 (Partie 3) : couverture partielle honnête, pas une erreur —
+        # voir write_report ci-dessus pour le détail par tranche manquante.
+        print(f"Couverture : {coverage['covered']}/{coverage['total']} occurrences-mots "
+              f"désambiguïsées ({pct:.0f} %)"
+              + (f" — tranches manquantes : {', '.join(coverage['missing_zone_ids'])}"
+                 if coverage["missing_zone_ids"] else " — livre entier couvert"))
     return 0
 
 
