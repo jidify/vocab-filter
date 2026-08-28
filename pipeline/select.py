@@ -273,6 +273,9 @@ def build_mwe_units(mwe_spans_by_segment: dict[int, list[dict]]) -> list[dict]:
             "canonical_form": canonical_form,
             "pos": pos,
             "sense_id": sense_id,
+            "unit_key": inventory.make_unit_key(
+                canonical_form, pos, sense_id, kind="mwe"
+            ),
             "sense_id_source": occs[0].get("sense_id_source"),
             "occurrence_ids": sorted(o["occurrence_id"] for o in occs),
             "occurrence_refs": sorted(
@@ -326,12 +329,18 @@ def run() -> int:
             "occurrence_segment_idxs": sorted(entry["segments"]),
             **meta,
         })
-        unit_key = f"{entry['lemma']}:{entry['wn_pos']}"
+        unit_key = inventory.make_unit_key(
+            entry["lemma"], entry["wn_pos"], None, kind="word"
+        )
         for occ in entry["occurrences"]:
             zone_id = seg_zone.get(occ["segment_idx"])
             inventory_rows.append({
                 "occurrence_id": occ["occurrence_id"],
                 "unit_key": unit_key,
+                "unit_kind": "word",
+                "canonical_form": entry["lemma"],
+                "pos": entry["wn_pos"],
+                "sense_id": None,
                 "segment_idx": occ["segment_idx"],
                 "start_char": occ["start_char"],
                 "end_char": occ["end_char"],
@@ -367,7 +376,14 @@ def run() -> int:
         for s in spans:
             inventory_rows.append({
                 "occurrence_id": s["occurrence_id"],
-                "unit_key": f"mwe:{s['sense_id']}",
+                "unit_key": inventory.make_unit_key(
+                    s.get("canonical_form", s["idiom"]), s["pos"],
+                    s["sense_id"], kind="mwe"
+                ),
+                "unit_kind": "mwe",
+                "canonical_form": s.get("canonical_form", s["idiom"]),
+                "pos": s["pos"],
+                "sense_id": s["sense_id"],
                 "segment_idx": seg_idx,
                 "start_char": s["start_char"],
                 "end_char": s["end_char"],

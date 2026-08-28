@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pipeline import config, inventory, mwe, mwe_stores
+from pipeline import config, inventory, mwe, mwe_stores, select
 from pipeline.analyze import _offset_char_spans
 
 
@@ -404,6 +404,45 @@ class LlmFailureNotCachedTests(unittest.TestCase):
 
 
 class InventoryHashTests(unittest.TestCase):
+    def test_semantic_unit_key_contains_canon_pos_and_sense(self):
+        self.assertEqual(
+            inventory.make_unit_key("Burn Out", "VERB", "mwe-custom-v1:human", kind="mwe"),
+            "mwe:burn out:verb:mwe-custom-v1:human",
+        )
+
+    def test_polysemous_mwe_keys_are_distinct(self):
+        human = inventory.make_unit_key("burn out", "VERB", "human", kind="mwe")
+        bulb = inventory.make_unit_key("burn out", "VERB", "bulb", kind="mwe")
+        self.assertNotEqual(human, bulb)
+
+    def test_different_canons_never_collapse_into_come_to(self):
+        keys = {
+            inventory.make_unit_key(canon, "VERB", "sense", kind="mwe")
+            for canon in ("come to", "come back to earth", "come home to", "come talk to")
+        }
+        self.assertEqual(len(keys), 4)
+
+    def test_selected_mwe_surfaces_are_aggregated_per_semantic_tuple(self):
+        def span(occurrence_id, surface, sense_id, paraphrase):
+            return {
+                "occurrence_id": occurrence_id, "idiom": "burn out",
+                "canonical_form": "burn out", "pos": "VERB", "sense_id": sense_id,
+                "sense_id_source": "fixture", "label": "phrasal_verb",
+                "confidence": .9, "surface": surface, "start_char": 0,
+                "end_char": len(surface), "definition_en": paraphrase,
+                "definition_needs_review": False,
+            }
+        units = select.build_mwe_units({
+            1: [span("m:1", "burned out", "human", "become exhausted")],
+            2: [span("m:2", "burnt out", "human", "become exhausted")],
+            3: [span("m:3", "burns out", "bulb", "stop producing light")],
+        })
+        self.assertEqual(len(units), 2)
+        by_sense = {u["sense_id"]: u for u in units}
+        self.assertEqual(by_sense["human"]["surface_forms"], ["burned out", "burnt out"])
+        self.assertEqual(by_sense["bulb"]["surface_forms"], ["burns out"])
+        self.assertNotEqual(by_sense["human"]["unit_key"], by_sense["bulb"]["unit_key"])
+
     def test_hash_is_order_independent(self):
         rows_a = [
             {"occurrence_id": "w:1:0", "unit_key": "walk:v"},

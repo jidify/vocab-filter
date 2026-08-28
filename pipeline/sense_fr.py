@@ -56,7 +56,7 @@ from datetime import date
 from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
 
-from pipeline import config, llm, senses
+from pipeline import config, inventory, llm, senses
 
 # ============================================================
 # Ressources lexicales statiques (omw-fr, WoNeF)
@@ -358,11 +358,13 @@ def collect_targets() -> dict[str, dict]:
         entry["occurrences"] += u["occurrences"]
 
     for u in build_mwe_units():
-        key = f"mwe:{u['canonical_form']}:{u['sense_id']}"
+        key = u.get("unit_key") or inventory.make_unit_key(
+            u["canonical_form"], u["pos"], u["sense_id"], kind="mwe"
+        )
         targets[key] = {
             "key": key, "kind": "mwe", "lemmas_en": [u["canonical_form"]],
             "occurrences": u["occurrences"], "definition_en": u["definition_en"],
-            "mwe_label": u["sense_id"],
+            "mwe_label": u.get("label"),
         }
 
     return targets

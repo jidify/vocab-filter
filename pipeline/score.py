@@ -44,7 +44,7 @@ from collections import defaultdict
 from nltk.corpus import wordnet as nwn
 from wordfreq import zipf_frequency
 
-from pipeline import config, fr_norm, lexicon, senses, sense_fr
+from pipeline import config, fr_norm, inventory, lexicon, senses, sense_fr
 
 AOA_SIGN = -1.0  # -1 : précoce-mais-rare remonté, tardif pénalisé (position du plan)
                  # à retourner à +1 si l'arbitrage empirique (item 7 du plan) tranche
@@ -414,7 +414,9 @@ def build_mwe_units() -> list[dict]:
         book_freq = r["book_count"]
         book_gain = _clip01(math.log1p(book_freq) / math.log1p(20))
 
-        mwe_key = f"mwe:{r['sense_id']}"
+        mwe_key = r.get("unit_key") or inventory.make_unit_key(
+            r["canonical_form"], r["pos"], r["sense_id"], kind="mwe"
+        )
         official_fr, meaning_fr_official, fr_status = resolve_official_fr(sense_fr_store, mwe_key)
         contexte_en = sense_fr.format_occurrences_en(occurrences_by_sense.get(mwe_key, []))
 

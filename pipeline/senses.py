@@ -727,7 +727,9 @@ def load_mwe_occurrences_by_key() -> dict[str, list[dict]]:
     segments = load_segments()
     by_key: dict[str, list[dict]] = {}
     for u in mwe_units:
-        key = f"mwe:{u['sense_id']}"
+        key = u.get("unit_key") or inventory.make_unit_key(
+            u["canonical_form"], u["pos"], u["sense_id"], kind="mwe"
+        )
         occs = []
         refs = u.get("occurrence_refs") or [
             {"occurrence_id": "", "segment_idx": seg_idx}
@@ -781,7 +783,7 @@ def load_word_occurrences_by_unit_key() -> dict[str, list[dict]]:
     with config.LEXICAL_INVENTORY_PATH.open(encoding="utf-8") as f:
         for line in f:
             row = json.loads(line)
-            if row["unit_key"].startswith("mwe:"):
+            if row.get("unit_kind") == "mwe" or row["unit_key"].startswith("mwe:"):
                 continue
             by_unit_key.setdefault(row["unit_key"], []).append(row)
     return by_unit_key
@@ -840,7 +842,11 @@ def coverage_report() -> dict:
     all_ids: set[str] = set()
     zone_by_id: dict[str, str | None] = {}
     for unit_key, rows in word_occurrences.items():
-        lemma, wn_pos = unit_key.rsplit(":", 1)
+        sample = rows[0]
+        lemma = sample.get("canonical_form")
+        wn_pos = sample.get("pos")
+        if lemma is None or wn_pos is None:  # legacy inventory
+            lemma, wn_pos = unit_key.rsplit(":", 1)
         if not get_synsets(lemma, wn_pos):
             continue
         for row in rows:
@@ -900,9 +906,16 @@ def run(segment_idxs: set[int] | None = None, top_k: int | None = None) -> int:
     # sont exclues ici, une fois pour toutes, avant la boucle de calcul.
     pending_by_type: list[tuple[dict, list[dict]]] = []
     for t in types:
-        unit_key = f"{t['lemma']}:{t['wn_pos']}"
+        unit_key = inventory.make_unit_key(
+            t["lemma"], t["wn_pos"], None, kind="word"
+        )
+        # Read inventories produced before the semantic tuple migration.
+        legacy_unit_key = f"{t['lemma']}:{t['wn_pos']}"
         pending = [
-            occ_row for occ_row in word_occurrences_by_unit_key.get(unit_key, [])
+            occ_row for occ_row in (
+                word_occurrences_by_unit_key.get(unit_key)
+                or word_occurrences_by_unit_key.get(legacy_unit_key, [])
+            )
             if occ_row["occurrence_id"] not in existing
             and (segment_idxs is None or occ_row["segment_idx"] in segment_idxs)
         ]

@@ -27,6 +27,24 @@ from pathlib import Path
 from pipeline import atomic, config
 
 
+UNRESOLVED_SENSE_ID = "unresolved"
+
+
+def make_unit_key(canonical_form: str, pos: str, sense_id: str | None, *, kind: str) -> str:
+    """Return the stable S4 semantic-unit key.
+
+    The components also live as explicit columns in ``lexical_inventory``;
+    this readable encoding is an identifier, not a format consumers should
+    parse.  Word senses are deliberately unresolved until S5.
+    """
+    if kind not in {"word", "mwe"}:
+        raise ValueError(f"unknown lexical unit kind: {kind!r}")
+    canonical = " ".join(canonical_form.casefold().split())
+    normalized_pos = pos.casefold()
+    normalized_sense = sense_id or UNRESOLVED_SENSE_ID
+    return f"{kind}:{canonical}:{normalized_pos}:{normalized_sense}"
+
+
 def compute_hash(rows: list[dict]) -> str:
     """Hash déterministe de la liste triée des (occurrence_id, unit_key).
     Ignore volontairement tout autre champ (segment_idx, start_char,
