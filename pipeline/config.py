@@ -86,6 +86,7 @@ RULES_PLUS_CANDIDATES_PATH = OUT_DIR / "rules_plus_candidates.jsonl"
 MWE_CANDIDATES_PATH = OUT_DIR / "mwe_candidates.jsonl"
 MWE_DECISIONS_PATH = OUT_DIR / "mwe_decisions.jsonl"
 MWE_SPANS_PATH = OUT_DIR / "mwe_confirmed_spans.jsonl"
+RESERVATION_REPORT_PATH = OUT_DIR / "reservation_report.json"
 SELECTED_TYPES_PATH = OUT_DIR / "selected_types.jsonl"
 SELECTED_MWE_PATH = OUT_DIR / "selected_mwe.jsonl"
 # Lot 3 — inventaire lexical figé (plan Partie 2, point E) : une ligne par

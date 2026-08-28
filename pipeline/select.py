@@ -92,19 +92,47 @@ def is_covered(occ: dict, spans: list[dict]) -> bool:
     du même mot, ailleurs, n'est PAS affectée puisqu'on filtre occurrence
     par occurrence, pas lemme par lemme (proposition_1 §3.3).
 
-    Repli sur l'enveloppe (`start_char`/`end_char`) si un span n'a pas de
-    `member_char_spans` — uniquement pour lire un `mwe_confirmed_spans.jsonl`
-    généré avant le Lot 1 ; un run frais n'écrit plus que des spans avec
-    membres exacts (pipeline/mwe_judge.py::select_mwe_spans)."""
+    Un ancien span sans `member_char_spans` ne réserve rien. Une enveloppe
+    n'est pas une preuve suffisante pour supprimer ses tokens internes :
+    l'artefact S3 doit être régénéré pour retrouver les membres exacts."""
 
     for s in spans:
         members = s.get("member_char_spans")
         if members:
             if any(a <= occ["start_char"] and occ["end_char"] <= b for a, b in members):
                 return True
-        elif s["start_char"] <= occ["start_char"] and occ["end_char"] <= s["end_char"]:
-            return True
     return False
+
+
+def build_reservation_report(
+    before: list[dict], after: list[dict], mwe_spans_by_segment: dict[int, list[dict]]
+) -> dict:
+    """Bilan comptable S4-2, fondé sur les occurrence_id et non les lemmes."""
+    before_ids = {o["occurrence_id"] for o in before}
+    after_ids = {o["occurrence_id"] for o in after}
+    reserved_ids = before_ids - after_ids
+    confirmed = [s for spans in mwe_spans_by_segment.values() for s in spans]
+    envelope_reserved_ids = {
+        o["occurrence_id"]
+        for o in before
+        if any(
+            s["start_char"] <= o["start_char"] and o["end_char"] <= s["end_char"]
+            for s in mwe_spans_by_segment.get(o["segment_idx"], [])
+        )
+    }
+    return {
+        "word_occurrences_before_reservation": len(before_ids),
+        "word_occurrences_reserved": len(reserved_ids),
+        "word_occurrences_after_reservation": len(after_ids),
+        "confirmed_mwe_occurrences": len(confirmed),
+        "confirmed_member_spans": sum(len(s.get("member_char_spans") or []) for s in confirmed),
+        "legacy_envelope_would_reserve": len(envelope_reserved_ids),
+        "tokens_returned_vs_legacy_envelope": len(envelope_reserved_ids - reserved_ids),
+        "reserved_occurrence_ids": sorted(reserved_ids),
+        "invariant_before_equals_reserved_plus_after": (
+            len(before_ids) == len(reserved_ids) + len(after_ids)
+        ),
+    }
 
 
 def iter_content_occurrences(mwe_spans_by_segment: dict[int, list[dict]] | None = None):
@@ -302,6 +330,23 @@ def run() -> int:
     config.ensure_out_dir()
     seg_zone = load_zone_map()
     mwe_spans_by_segment = annotate_mwe_spans_with_zones(load_confirmed_mwe_spans(), seg_zone)
+
+    before_reservation = list(iter_content_occurrences({}))
+    after_reservation = list(iter_content_occurrences(mwe_spans_by_segment))
+    report = build_reservation_report(
+        before_reservation, after_reservation, mwe_spans_by_segment
+    )
+    atomic.atomic_write_text(
+        config.RESERVATION_REPORT_PATH,
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    print(
+        "Réservation S4-2 : "
+        f"{report['word_occurrences_before_reservation']} avant, "
+        f"{report['word_occurrences_reserved']} réservées, "
+        f"{report['word_occurrences_after_reservation']} après -> "
+        f"{config.RESERVATION_REPORT_PATH}"
+    )
 
     types = build_types(mwe_spans_by_segment)
 
