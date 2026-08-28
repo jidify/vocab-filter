@@ -6,15 +6,11 @@ même verbe+particule). Deux magasins permanents sous data/, sur le MÊME
 modèle que `data/sense_fr.jsonl` (voir `pipeline/sense_fr.py::load_store`/
 `write_store` et `pipeline/sense_fr_frontier.py::PROTECTED_STATUSES`) :
 
-- `data/mwe_type_decisions.jsonl` — clé = idiome (`entry["idiom"]`,
-  `mwe.py::group_by_type`). Couvre la grande majorité des 322 types : la
-  question idiome/phrasal_verb/littéral ne dépend quasiment jamais du
-  contexte précis (voir la docstring de mwe_judge.py).
-- `data/mwe_occurrence_decisions.jsonl` — clé = `occurrence_id`. Réservé
-  aux occurrences que le garde-fou directionnel du détecteur VPC signale
-  comme dépendantes du contexte (`directional_context_dependent`, voir
-  `mwe.py::load_vpc_candidates`), et aux corrections manuelles ponctuelles
-  futures (même clé qu'un review UI y écrirait directement).
+- `data/mwe_type_decisions.jsonl` — ancien magasin de décisions globales,
+  conservé pour compatibilité/audit mais plus utilisé pour réserver un span.
+- `data/mwe_occurrence_decisions.jsonl` — clé = `occurrence_id|canon`. Toutes
+  les sources passent par ce magasin ; le canon dans la clé empêche deux
+  hypothèses lexicales concurrentes sur le même span de s'écraser.
 
 Les deux sont consultés avant tout appel LLM (si une clé existe déjà — quel
 que soit son statut — on ne rejuge pas : c'est ce qui rend la reprise
@@ -89,4 +85,10 @@ def build_entry(key: str, decision: dict) -> dict:
     }
     if "wordnet_sense_id" in decision:
         entry["wordnet_sense_id"] = decision["wordnet_sense_id"]
+    for field in (
+        "verdict", "canonical_form", "pos", "contextual_paraphrase",
+        "model_confidence", "confidence_features", "evidence",
+    ):
+        if field in decision:
+            entry[field] = decision[field]
     return entry

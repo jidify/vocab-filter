@@ -690,7 +690,7 @@ _mwe_occurrences_cache: dict[str, list[dict]] | None = None
 
 
 def load_mwe_occurrences_by_key() -> dict[str, list[dict]]:
-    """Clé `mwe:{canonical_form}:{label}` -> occurrences, MÊME forme que
+    """Clé `mwe:{sense_id}` -> occurrences, MÊME forme que
     pour les mots ({context, target_surface, segment_idx}) : la fenêtre de
     contexte est construite par le même build_wide_context_from_segments
     que pour un mot seul (±config.CONTEXT_WINDOW segments), donc une MWE
@@ -713,7 +713,7 @@ def load_mwe_occurrences_by_key() -> dict[str, list[dict]]:
     with config.SELECTED_MWE_PATH.open(encoding="utf-8") as f:
         mwe_units = [json.loads(l) for l in f]
 
-    surface_by_segment: dict[tuple[str, int], str] = {}
+    surface_by_occurrence: dict[str, str] = {}
     if config.MWE_SPANS_PATH.exists():
         with config.MWE_SPANS_PATH.open(encoding="utf-8") as f:
             for line in f:
@@ -722,18 +722,23 @@ def load_mwe_occurrences_by_key() -> dict[str, list[dict]]:
                     continue
                 row = json.loads(line)
                 for span in row.get("spans", []):
-                    surface_by_segment[(span["idiom"], span["segment_idx"])] = span["surface"]
+                    surface_by_occurrence[span["occurrence_id"]] = span["surface"]
 
     segments = load_segments()
     by_key: dict[str, list[dict]] = {}
     for u in mwe_units:
-        key = f"mwe:{u['canonical_form']}:{u['label']}"
+        key = f"mwe:{u['sense_id']}"
         occs = []
-        for seg_idx in u["occurrence_segment_idxs"]:
+        refs = u.get("occurrence_refs") or [
+            {"occurrence_id": "", "segment_idx": seg_idx}
+            for seg_idx in u["occurrence_segment_idxs"]
+        ]
+        for ref in refs:
+            occurrence_id, seg_idx = ref["occurrence_id"], ref["segment_idx"]
             wide = build_wide_context_from_segments(segments, seg_idx)
             if not wide["text"]:
                 continue
-            surface = surface_by_segment.get((u["canonical_form"], seg_idx), u["canonical_form"])
+            surface = surface_by_occurrence.get(occurrence_id, u["canonical_form"])
             occs.append({
                 "context": wide["text"], "target_surface": surface,
                 "segment_idx": seg_idx,

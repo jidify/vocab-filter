@@ -414,7 +414,7 @@ def build_mwe_units() -> list[dict]:
         book_freq = r["book_count"]
         book_gain = _clip01(math.log1p(book_freq) / math.log1p(20))
 
-        mwe_key = f"mwe:{r['canonical_form']}:{r['label']}"
+        mwe_key = f"mwe:{r['sense_id']}"
         official_fr, meaning_fr_official, fr_status = resolve_official_fr(sense_fr_store, mwe_key)
         contexte_en = sense_fr.format_occurrences_en(occurrences_by_sense.get(mwe_key, []))
 
@@ -422,8 +422,8 @@ def build_mwe_units() -> list[dict]:
             "canonical_form": r["canonical_form"],
             "surface_forms": r["surface_forms"],
             "unit_type": "mwe",
-            "pos": None,
-            "sense_id": r["label"],
+            "pos": r["pos"],
+            "sense_id": r["sense_id"],
             "definition_en": r["definition_en"],
             "meaning_fr": None,
             "meaning_fr_official": meaning_fr_official,
@@ -439,7 +439,7 @@ def build_mwe_units() -> list[dict]:
             "fr_opacity": mwe_opacity,
             "sense_surprise": 0.5,
             "confidence": r["confidence"],
-            "needs_review": r["confidence"] < 0.6,
+            "needs_review": r["confidence"] < 0.6 or r.get("definition_needs_review", False),
         })
 
     for u in units:

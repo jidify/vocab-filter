@@ -235,6 +235,9 @@ def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]], audit
         "mwe_missing_pos": sum(not normalize(a["pos"]) and bool(normalize(e["pos"])) for a, e in mwe_pairs),
         "mwe_sense_mismatches": sum(normalize(a["sense_id"]) != normalize(e["sense_id"]) for a, e in mwe_pairs),
         "mwe_definition_mismatches": sum(normalize(a["definition_en"]) != normalize(e["definition_en"]) for a, e in mwe_pairs),
+        # Baseline d'acceptation consignée avant Q0-1. Elle est affichée à
+        # côté des 43 lignes reproductibles, jamais utilisée comme métrique.
+        "documented_mwe_definition_mismatches_baseline": 38,
         "word_pos_or_sense_mismatches": sum((normalize(a["pos"]), normalize(a["sense_id"])) != (normalize(e["pos"]), normalize(e["sense_id"])) for a, e in paired if normalize(e["unit_type"]) == "word"),
         "missing_official_fr_filled_by_benchmark": len(missing_fr_fixed),
         "actual_empty_official_fr": len(actual) - fr_present,

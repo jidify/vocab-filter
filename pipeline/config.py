@@ -137,6 +137,7 @@ CATGPT_TIMEOUT = float(os.getenv("CATGPT_TIMEOUT", "300"))
 # correctement à `format: "json"` — mistral-small:24b retenu par défaut
 # (bon compromis qualité/vitesse) ; gemma3:27b en repli si besoin.
 LLM_TEMPERATURE = 0.0
+S3_JUDGE_BATCH_SIZE = 50  # validé séparément sur le corpus contrastif S3 ; jamais lancé en arrière-plan
 
 
 def configure_llm(*, backend: str | None = None, base_url: str | None = None,

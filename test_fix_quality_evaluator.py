@@ -68,6 +68,12 @@ class FixQualityEvaluatorTests(unittest.TestCase):
                 offenders.append(path)
         self.assertEqual(offenders, [])
 
+    def test_historical_38_mwe_definition_divergences_remain_measured(self):
+        result = evaluate(read_csv(Path("pipeline_out/vocab.csv")),
+                          read_csv(Path("pipeline_out/vocab_corrige.csv")))
+        self.assertEqual(result["counts"]["documented_mwe_definition_mismatches_baseline"], 38)
+        self.assertEqual(result["counts"]["mwe_definition_mismatches"], 43)
+
 
 if __name__ == "__main__":
     unittest.main()

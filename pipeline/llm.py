@@ -44,7 +44,7 @@ def call_json(
 
     backend = config.LLM_BACKEND
     model = model or config.llm_model()
-    effective_timeout = config.CATGPT_TIMEOUT if backend == "catgpt" and timeout == 60.0 else timeout
+    effective_timeout = max(timeout, config.CATGPT_TIMEOUT) if backend == "catgpt" else timeout
     cache_key = json.dumps(
         {"backend": backend, "model": model, "system": system, "prompt": prompt,
          "temp": config.LLM_TEMPERATURE, "cache_metadata": cache_metadata or {}},
@@ -60,7 +60,8 @@ def call_json(
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         payload = {"model": model, "messages": messages, "stream": False,
-                   "temperature": config.LLM_TEMPERATURE}
+                   "temperature": config.LLM_TEMPERATURE,
+                   "response_format": {"type": "json_object"}}
         url = f"{config.CATGPT_BASE_URL}/chat/completions"
         headers = {"Content-Type": "application/json",
                    "Authorization": f"Bearer {config.CATGPT_API_TOKEN}"}

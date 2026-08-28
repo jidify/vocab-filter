@@ -68,12 +68,12 @@ def _all_custom_idioms() -> list[dict]:
     return CUSTOM_IDIOMS + custom_lexicon.load_idioms()
 
 
-def get_idiom_definition(idiom: str) -> str | None:
-    """Glose anglaise de l'idiome telle qu'écrite dans idioms.yml
-    (idiomatch/resources/idioms.yml) — sert directement de "sens" pour
-    les unités multi-mots en S5/S6 : ces expressions n'ont
-    généralement pas d'entrée WordNet propre, donc GlossBERT/omw-fr
-    n'ont rien à désambiguïser pour elles."""
+def get_idiom_senses(idiom: str) -> list[dict]:
+    """Toutes les définitions idiomatch/custom, sans privilégier la première.
+
+    L'ordre de la ressource est conservé uniquement pour rendre l'inventaire
+    reproductible ; il ne constitue jamais un signal de sélection de sens.
+    """
 
     global _IDIOMS_YML
     if _IDIOMS_YML is None:
@@ -86,9 +86,22 @@ def get_idiom_definition(idiom: str) -> str | None:
             _IDIOMS_YML[entry["lemma"]] = entry
 
     entry = _IDIOMS_YML.get(idiom)
-    if not entry or not entry.get("senses"):
+    return [dict(sense) for sense in (entry or {}).get("senses", []) if sense.get("content")]
+
+
+def get_idiom_definition(idiom: str) -> str | None:
+    """Glose anglaise de l'idiome telle qu'écrite dans idioms.yml
+    (idiomatch/resources/idioms.yml) — sert directement de "sens" pour
+    les unités multi-mots en S5/S6 : ces expressions n'ont
+    généralement pas d'entrée WordNet propre, donc GlossBERT/omw-fr
+    n'ont rien à désambiguïser pour elles."""
+
+    senses = get_idiom_senses(idiom)
+    if len(senses) != 1:
         return None
-    return entry["senses"][0].get("content")
+    # Une glose n'est non ambiguë que lorsque l'inventaire n'en contient
+    # réellement qu'une. Les inventaires polysémiques passent par S3-3.
+    return next(iter(senses))["content"]
 
 
 def get_matcher():

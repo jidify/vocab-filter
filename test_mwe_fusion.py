@@ -175,10 +175,10 @@ class SelectMweSpansOccurrenceOverrideTests(unittest.TestCase):
         base.update(extra)
         return base
 
-    def test_type_level_decision_used_when_no_override(self):
+    def test_type_level_summary_never_substitutes_for_occurrence_decision(self):
         from pipeline import mwe_judge
         resolved = mwe_judge.select_mwe_spans([self._entry(self._occ())])
-        self.assertEqual(len(resolved[1]), 1)
+        self.assertEqual(resolved.get(1, []), [])
 
     def test_occurrence_override_blocks_reservation_despite_lexicalized_type(self):
         from pipeline import mwe_judge
@@ -196,6 +196,180 @@ class SelectMweSpansOccurrenceOverrideTests(unittest.TestCase):
         resolved = mwe_judge.select_mwe_spans([entry])
         self.assertEqual(len(resolved[1]), 1)
         self.assertEqual(resolved[1][0]["label"], "phrasal_verb")
+
+
+class OccurrenceFirstDecisionTests(unittest.TestCase):
+    def _result(self, label, paraphrase, confidence=.9, evidence=None):
+        return {
+            "label": label,
+            "canonical_form": "let go",
+            "pos": "VERB",
+            "contextual_paraphrase": paraphrase,
+            "confidence": confidence,
+            "evidence": evidence or ["contextual substitution changes the meaning"],
+            "reason": "fixture",
+        }
+
+    def test_same_candidate_type_can_receive_distinct_occurrence_verdicts(self):
+        from pipeline import mwe_judge
+        replies = [
+            self._result("idiome", "stop worrying about it"),
+            self._result("phrasal_verb", "release him"),
+            self._result("littéral", "depart now"),
+        ]
+        occurrences = [
+            {"occurrence_id": f"m:{i}:0:8", "segment_idx": i, "surface": surface,
+             "source": "idiomatch"}
+            for i, surface in enumerate(("let it go", "let him go", "let's go"), 1)
+        ]
+        with mock.patch.object(mwe_judge.llm, "call_json", side_effect=replies):
+            decisions = [mwe_judge.judge_occurrence("let go", occ, {}) for occ in occurrences]
+        self.assertEqual([d["label"] for d in decisions], ["idiome", "phrasal_verb", "littéral"])
+        self.assertEqual(len({d["contextual_paraphrase"] for d in decisions}), 3)
+
+    def test_llm_confidence_without_observable_evidence_is_capped(self):
+        from pipeline import mwe_judge
+        occurrence = {"occurrence_id": "m:1:0:15", "segment_idx": 1,
+                      "surface": "could care less", "source": "rules_plus"}
+        reply = self._result("idiome", "could not care less", confidence=1.0, evidence=[])
+        # Explicitly retain an empty list (the helper's default would add evidence).
+        reply["evidence"] = []
+        with mock.patch.object(mwe_judge.llm, "call_json", return_value=reply):
+            decision = mwe_judge.judge_occurrence("could care less", occurrence, {})
+        self.assertEqual(decision["model_confidence"], 1.0)
+        self.assertLess(decision["confidence"], mwe_judge.MIN_CONFIDENCE)
+        self.assertNotIn("observable_evidence_present", decision["confidence_features"])
+
+    def test_cache_key_keeps_competing_hypotheses_distinct(self):
+        from pipeline import mwe_judge
+        self.assertNotEqual(
+            mwe_judge.occurrence_store_key("let go", "m:1:0:9"),
+            mwe_judge.occurrence_store_key("let it go", "m:1:0:9"),
+        )
+
+    def test_cache_key_changes_with_protocol_model_and_context(self):
+        from pipeline import mwe_judge
+        base = mwe_judge.occurrence_store_key(
+            "could care less", "m:1", model="local", context_signature="context-a"
+        )
+        self.assertNotEqual(base, mwe_judge.occurrence_store_key(
+            "could care less", "m:1", model="frontier", context_signature="context-a"
+        ))
+        self.assertNotEqual(base, mwe_judge.occurrence_store_key(
+            "could care less", "m:1", model="local", backend="catgpt",
+            context_signature="context-a"
+        ))
+        self.assertNotEqual(base, mwe_judge.occurrence_store_key(
+            "could care less", "m:1", model="local", context_signature="context-b"
+        ))
+        with mock.patch.object(mwe_judge, "S3_PROMPT_VERSION", "s3-judge-prompt-next"):
+            changed = mwe_judge.occurrence_store_key(
+                "could care less", "m:1", model="local", context_signature="context-a"
+            )
+        self.assertNotEqual(base, changed)
+        self.assertNotEqual(base, "m:1|could care less")
+
+    def test_sense_clustering_separates_polysemy_and_merges_synonyms(self):
+        from pipeline import mwe_judge
+        def occurrence(occurrence_id, paraphrase):
+            return {"occurrence_id": occurrence_id, "occurrence_decision": {
+                "label": "phrasal_verb", "canonical_form": "burn out", "pos": "VERB",
+                "contextual_paraphrase": paraphrase, "wordnet_sense_id": None,
+            }}
+        records = [{"occurrences": [
+            occurrence("m:1", "become completely exhausted"),
+            occurrence("m:2", "become completely exhausted"),
+            occurrence("m:3", "stop producing light"),
+        ]}]
+        mwe_judge.assign_sense_ids(records)
+        decisions = [o["occurrence_decision"] for o in records[0]["occurrences"]]
+        self.assertEqual(decisions[0]["sense_id"], decisions[1]["sense_id"])
+        self.assertNotEqual(decisions[0]["sense_id"], decisions[2]["sense_id"])
+        self.assertTrue(all(d["pos"] == "VERB" for d in decisions))
+        self.assertTrue(all(d["sense_id"].startswith("mwe-custom-v1:") for d in decisions))
+        self.assertFalse({"idiome", "phrasal_verb", "semi_fige"} &
+                         {d["sense_id"] for d in decisions})
+
+    def test_custom_sense_id_is_stable_and_versioned(self):
+        from pipeline import mwe_judge
+        first = mwe_judge.custom_sense_id("come back to earth", "VERB", "return to reality")
+        second = mwe_judge.custom_sense_id("Come Back To Earth", "verb", "To return to the reality")
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("mwe-custom-v1:"))
+
+
+class ContextualMweDefinitionTests(unittest.TestCase):
+    def _occurrences(self):
+        return [{"occurrence_id": "m:10", "segment_idx": 10,
+                 "occurrence_decision": {"contextual_paraphrase": "stop operating"}}]
+
+    def test_exact_competing_sense_is_selected_after_all_are_presented(self):
+        from pipeline import mwe_judge
+        candidates = [
+            {"candidate_id": "give-out-announce", "definition": "announce publicly", "source": "idiomatch"},
+            {"candidate_id": "fail.v.04", "definition": "stop operating or functioning", "source": "wordnet"},
+        ]
+        reply = {"candidate_id": "fail.v.04", "custom_definition": "",
+                 "occurrence_checks": [{"occurrence_id": "m:10", "contradicts": False}]}
+        with mock.patch.object(mwe_judge, "definition_candidates", return_value=candidates), \
+             mock.patch.object(mwe_judge.llm, "call_json", return_value=reply) as call:
+            selected = mwe_judge.choose_cluster_definition("give out", "VERB", self._occurrences(), {})
+        prompt = call.call_args.args[0]
+        self.assertIn("announce publicly", prompt)
+        self.assertIn("stop operating or functioning", prompt)
+        self.assertEqual(selected["definition_en"], "stop operating or functioning")
+        self.assertFalse(selected["definition_needs_review"])
+
+    def test_custom_definition_is_allowed_when_no_candidate_is_exact(self):
+        from pipeline import mwe_judge
+        reply = {"candidate_id": None,
+                 "custom_definition": "To contact someone briefly for an update.",
+                 "occurrence_checks": [{"occurrence_id": "m:10", "contradicts": False}]}
+        with mock.patch.object(mwe_judge, "definition_candidates", return_value=[
+            {"candidate_id": "hotel", "definition": "announce arrival at a hotel", "source": "wordnet"}
+        ]), mock.patch.object(mwe_judge.llm, "call_json", return_value=reply):
+            selected = mwe_judge.choose_cluster_definition("check in", "VERB", self._occurrences(), {})
+        self.assertEqual(selected["definition_source"], "custom")
+        self.assertEqual(selected["definition_en"], reply["custom_definition"])
+
+    def test_missing_or_contradictory_occurrence_check_forces_review(self):
+        from pipeline import mwe_judge
+        reply = {"candidate_id": "wrong", "custom_definition": "announce publicly",
+                 "occurrence_checks": [{"occurrence_id": "m:10", "contradicts": True}]}
+        with mock.patch.object(mwe_judge, "definition_candidates", return_value=[]), \
+             mock.patch.object(mwe_judge.llm, "call_json", return_value=reply):
+            selected = mwe_judge.choose_cluster_definition("give out", "VERB", self._occurrences(), {})
+        self.assertTrue(selected["definition_needs_review"])
+        self.assertEqual(selected["definition_en"], "stop operating")
+
+    def test_book_cases_choose_contextual_sense_over_competing_first_sense(self):
+        from pipeline import mwe_judge
+        expected = {
+            "break up": "To end a romantic relationship.",
+            "bring up": "To mention or introduce a subject for discussion.",
+            "check in": "To contact someone briefly to ask how things are going or to exchange an update.",
+            "get a grip": "To regain self-control and composure.",
+            "give out": "To stop working or fail after use, especially a machine or appliance.",
+            "keep up": "To prevent someone from sleeping.",
+            "look after": "To take care of or attend to someone or something.",
+            "turn off": "To switch off a light, device, or electrical appliance.",
+            "work out": "To solve, arrange, or find a way through a problem or situation.",
+        }
+        for canonical, definition in expected.items():
+            with self.subTest(canonical=canonical):
+                candidates = [
+                    {"candidate_id": "wrong-first", "definition": "an incompatible competing sense",
+                     "source": "idiomatch"},
+                    {"candidate_id": "book-sense", "definition": definition, "source": "fixture"},
+                ]
+                reply = {"candidate_id": "book-sense", "custom_definition": "",
+                         "occurrence_checks": [{"occurrence_id": "m:10", "contradicts": False}]}
+                with mock.patch.object(mwe_judge, "definition_candidates", return_value=candidates), \
+                     mock.patch.object(mwe_judge.llm, "call_json", return_value=reply):
+                    selected = mwe_judge.choose_cluster_definition(
+                        canonical, "VERB", self._occurrences(), {}
+                    )
+                self.assertEqual(selected["definition_en"], definition)
 
 
 class LlmFailureNotCachedTests(unittest.TestCase):

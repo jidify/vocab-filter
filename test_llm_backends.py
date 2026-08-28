@@ -32,6 +32,7 @@ class LLMBackendTests(unittest.TestCase):
                 {"role": "user", "content": "question"},
             ])
             self.assertFalse(payload["stream"])
+            self.assertEqual(payload["response_format"], {"type": "json_object"})
 
     def test_ollama_protocol_is_preserved(self):
         with patch.multiple(config, LLM_BACKEND="ollama", OLLAMA_URL="http://ollama",

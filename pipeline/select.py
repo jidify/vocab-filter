@@ -235,8 +235,7 @@ def wordnet_mwe_definition(sense_id: str | None) -> str | None:
     """Glose WordNet choisie par mwe_judge.py (point G) pour un idiome
     absent d'idioms.yml (ex. "wake up", apporté par la fusion VPC — voir
     Lot 3 — jamais présent dans idiomatch). WordNet reste une simple
-    source de glose ici, jamais l'identité de l'unité (toujours
-    `mwe:{canonical_form}:{label}`, cf. mwe_judge.py)."""
+    source de glose ici ; l'identité est désormais le `sense_id` S3-2."""
     if not sense_id:
         return None
     try:
@@ -252,21 +251,42 @@ def build_mwe_units(mwe_spans_by_segment: dict[int, list[dict]]) -> list[dict]:
     ou, à défaut (idiome absent d'idioms.yml), la glose WordNet
     sélectionnée par mwe_judge.py (point G)."""
 
-    by_idiom: dict[str, list[dict]] = defaultdict(list)
+    by_sense: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for seg_idx, spans in mwe_spans_by_segment.items():
         for s in spans:
-            by_idiom[s["idiom"]].append({**s, "segment_idx": seg_idx})
+            key = (s.get("canonical_form", s["idiom"]), s["pos"], s["sense_id"])
+            by_sense[key].append({**s, "segment_idx": seg_idx})
 
     units = []
-    for idiom, occs in by_idiom.items():
-        definition = get_idiom_definition(idiom)
-        if definition is None:
-            definition = wordnet_mwe_definition(occs[0].get("wordnet_sense_id"))
+    for (canonical_form, pos, sense_id), occs in by_sense.items():
+        definitions = {o.get("definition_en") for o in occs if o.get("definition_en")}
+        definitions_conflict = len(definitions) > 1
+        if len(definitions) == 1:
+            definition = next(iter(definitions))
+        else:
+            # Données anciennes ou cluster incohérent : ne jamais réintroduire
+            # implicitement le premier sens d'idioms.yml.
+            definition = wordnet_mwe_definition(sense_id)
+            if definition is None:
+                definition = occs[0].get("contextual_paraphrase")
         units.append({
-            "canonical_form": idiom,
+            "canonical_form": canonical_form,
+            "pos": pos,
+            "sense_id": sense_id,
+            "sense_id_source": occs[0].get("sense_id_source"),
+            "occurrence_ids": sorted(o["occurrence_id"] for o in occs),
+            "occurrence_refs": sorted(
+                ({"occurrence_id": o["occurrence_id"], "segment_idx": o["segment_idx"]} for o in occs),
+                key=lambda r: (r["segment_idx"], r["occurrence_id"]),
+            ),
             "label": occs[0]["label"],
             "confidence": occs[0]["confidence"],
             "definition_en": definition,
+            "definition_source": occs[0].get("definition_source"),
+            "definition_candidate_id": occs[0].get("definition_candidate_id"),
+            "definition_needs_review": definitions_conflict or any(
+                o.get("definition_needs_review", True) for o in occs
+            ),
             "surface_forms": sorted({o["surface"] for o in occs}),
             "occurrence_segment_idxs": sorted({o["segment_idx"] for o in occs}),
             "book_count": len(occs),
@@ -347,7 +367,7 @@ def run() -> int:
         for s in spans:
             inventory_rows.append({
                 "occurrence_id": s["occurrence_id"],
-                "unit_key": f"mwe:{s['idiom']}:{s['label']}",
+                "unit_key": f"mwe:{s['sense_id']}",
                 "segment_idx": seg_idx,
                 "start_char": s["start_char"],
                 "end_char": s["end_char"],
