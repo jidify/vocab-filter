@@ -317,6 +317,15 @@ def run() -> int:
                 "end_char": occ["end_char"],
                 "zone_id": zone_id,
                 "touched_zone_ids": [zone_id] if zone_id else [],
+                # Copie auto-suffisante pour la future ouverture d'inventaire
+                # S5 : aucun second parcours du livre ni de spaCy necessaire.
+                "analysis_version": occ.get("analysis_version"),
+                "analysis": occ.get("analysis", {
+                    "version": "legacy",
+                    "primary": {"lemma": occ["lemma"], "upos": occ["upos"],
+                                "wn_pos": occ["wn_pos"], "source": "legacy"},
+                    "alternatives": [],
+                }),
             })
     atomic.atomic_write_jsonl(config.SELECTED_TYPES_PATH, kept_records)
 

@@ -34,10 +34,23 @@ def compute_hash(rows: list[dict]) -> str:
     retenues définissent "le même inventaire" — pas les détails de mise en
     page, qui peuvent changer sans que l'inventaire lui-même ait bougé."""
 
-    pairs = sorted((r["occurrence_id"], r["unit_key"]) for r in rows)
+    # Le format historique sans analyse garde exactement son ancien digest.
+    # Pour le nouveau schema, l'analyse canonique serialisee fait partie de
+    # l'identite : changer les alternatives invalide correctement S5 et ses
+    # consommateurs, meme si unit_key n'a pas encore change.
+    import json
+    pairs = sorted(
+        (r["occurrence_id"], r["unit_key"],
+         json.dumps(r.get("analysis"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+         if "analysis" in r else None)
+        for r in rows
+    )
     digest = hashlib.sha256()
-    for occurrence_id, unit_key in pairs:
-        digest.update(f"{occurrence_id}\t{unit_key}\n".encode("utf-8"))
+    for occurrence_id, unit_key, analysis in pairs:
+        line = f"{occurrence_id}\t{unit_key}"
+        if analysis is not None:
+            line += f"\t{analysis}"
+        digest.update((line + "\n").encode("utf-8"))
     return digest.hexdigest()
 
 

@@ -12,13 +12,128 @@ from __future__ import annotations
 
 import spacy
 from spacy.symbols import ORTH
+from functools import lru_cache
 
 from pipeline import atomic, config, custom_lexicon, zones
 from pipeline.corpus import Segment, load_segments
 from pipeline.vpc import adapter as vpc_adapter
 from pipeline.vpc import service as vpc_service
+from nltk.corpus import wordnet as nwn
 
 _NLP = None
+
+# Version du contrat d'analyse morphosyntaxique stocke dans chaque occurrence.
+# Elle est volontairement independante de la version du schema JSONL : toute
+# modification des hypotheses produites doit invalider les digests aval.
+ANALYSIS_VERSION = "s1-morphosyntax-v1"
+
+
+@lru_cache(maxsize=8192)
+def _wordnet_sense_ids(lemma: str, wn_pos: str | None) -> tuple[str, ...]:
+    return tuple(sorted({s.name() for s in nwn.synsets(lemma, pos=wn_pos)})) if wn_pos else ()
+
+
+def _candidate(lemma: str, upos: str, wn_pos: str | None, source: str) -> dict:
+    normalized = lemma.casefold()
+    sense_ids = list(_wordnet_sense_ids(normalized, wn_pos))
+    return {"lemma": normalized, "upos": upos, "wn_pos": wn_pos, "source": source,
+            "wordnet_sense_ids": sense_ids}
+
+
+@lru_cache(maxsize=1)
+def _deprefix_verbs_by_radical() -> dict[str, tuple[str, ...]]:
+    found: dict[str, set[str]] = {}
+    for synset in nwn.all_synsets(pos=nwn.VERB):
+        for item in synset.lemmas():
+            name = item.name().casefold()
+            if name.startswith("de_") and len(name) > 3:
+                found.setdefault(name[3:], set()).add(name)
+            elif name.startswith("de") and len(name) > 2:
+                found.setdefault(name[2:], set()).add(name)
+    return {radical: tuple(sorted(names)) for radical, names in found.items()}
+
+
+def morphosyntactic_analysis(token) -> dict:
+    """Construit une analyse principale et des hypotheses morphologiques.
+
+    Les hypotheses sont des ouvertures d'inventaire, pas des decisions de
+    sens. Elles reposent sur des alternances productives et, quand possible,
+    sur l'inventaire WordNet local ; aucun contexte ni resultat du benchmark
+    n'est encode ici. S5 reste donc strictement inchange.
+    """
+
+    surface = token.text.casefold()
+    lemma = (token.lemma_ or token.text).casefold()
+    upos = token.pos_ or "X"
+    wn_pos = config.UPOS_TO_WN.get(upos)
+    tag = token.tag_ or ""
+    alternatives: list[dict] = []
+
+    def add(candidate_lemma: str, candidate_upos: str, candidate_pos: str | None, source: str):
+        candidate = _candidate(candidate_lemma, candidate_upos, candidate_pos, source)
+        if (candidate["lemma"], candidate["wn_pos"]) == (lemma, wn_pos):
+            return
+        if not any((a["lemma"], a["wn_pos"]) == (candidate["lemma"], candidate["wn_pos"])
+                   for a in alternatives):
+            alternatives.append(candidate)
+
+    # Un VBG peut etre verbal, adjectival ("creeping horror") ou un nom
+    # lexicalise ("frosting"). Garder les trois lectures ne les departage pas.
+    if tag == "VBG" or surface.endswith("ing"):
+        add(surface, "ADJ", "a", "present_participle_adjective")
+        if nwn.synsets(surface, pos=nwn.NOUN):
+            add(surface, "NOUN", "n", "lexicalized_gerund_noun")
+
+    # Certains pluriels ont une entree lexicale propre (p. ex. un pluriel
+    # tantum). Le lemme spaCy singulier reste bien l'analyse principale.
+    if tag in {"NNS", "NNPS"} or (surface.endswith("s") and surface != lemma):
+        add(surface, "NOUN", "n", "surface_plural_lexeme")
+
+    # Ouvre les variantes derivationnelles WordNet dont le radical est le
+    # lemme principal (de-stress/de_stress, etc.). C'est une regle generale
+    # d'inventaire, bornee aux verbes effectivement attestes dans WordNet.
+    if wn_pos == "v":
+        for name in _deprefix_verbs_by_radical().get(lemma, ()):
+            add(name, "VERB", "v", "wordnet_deprefix_derivation")
+
+    # Une forme non flechie peut etre homographe entre categories (bitch,
+    # stress...). On conserve seulement les POS attestes dans WordNet.
+    for candidate_upos, candidate_pos in (("NOUN", "n"), ("VERB", "v"),
+                                           ("ADJ", "a"), ("ADV", "r")):
+        if nwn.synsets(surface, pos=candidate_pos):
+            add(surface, candidate_upos, candidate_pos, "wordnet_surface_homograph")
+
+    return {
+        "version": ANALYSIS_VERSION,
+        "primary": _candidate(lemma, upos, wn_pos, "spacy"),
+        "alternatives": alternatives,
+        "morphology": {
+            "is_inflected": surface != lemma,
+            "is_participle": tag in {"VBG", "VBN"},
+            "is_plural": tag in {"NNS", "NNPS"},
+            "is_nominalization_candidate": any(a["wn_pos"] == "n" for a in alternatives),
+        },
+    }
+
+
+def validate_occurrence_schema(occurrences: list[dict], segments: list[Segment]) -> None:
+    """Bloque l'ecriture si un span ou le nouveau contrat S1 est invalide."""
+    source_by_idx = {segment.idx: segment.en for segment in segments}
+    for occ in occurrences:
+        source = source_by_idx[occ["segment_idx"]]
+        if source[occ["start_char"]:occ["end_char"]] != occ["surface"]:
+            raise ValueError(f"offsets invalides pour {occ['occurrence_id']}")
+        analysis = occ.get("analysis")
+        if occ.get("analysis_version") != ANALYSIS_VERSION or not isinstance(analysis, dict):
+            raise ValueError(f"schema d'analyse invalide pour {occ['occurrence_id']}")
+        if analysis.get("version") != ANALYSIS_VERSION:
+            raise ValueError(f"version d'analyse invalide pour {occ['occurrence_id']}")
+        primary = analysis.get("primary", {})
+        if (primary.get("lemma"), primary.get("upos"), primary.get("wn_pos")) != (
+                occ["lemma"], occ["upos"], occ["wn_pos"]):
+            raise ValueError(f"analyse principale incoherente pour {occ['occurrence_id']}")
+        if not isinstance(analysis.get("alternatives"), list):
+            raise ValueError(f"alternatives invalides pour {occ['occurrence_id']}")
 
 # Sans ça, spaCy coupe "e-mail" en 3 tokens ("e" / "-" ponctuation / "mail")
 # : le "e" (trop court) disparaît et "mail" seul se fait désambiguïser vers
@@ -123,6 +238,7 @@ def analyze_segments(play_segments: list[Segment], vpc_sink: list[dict], zone_si
                 continue
 
             wn_pos = config.UPOS_TO_WN.get(token.pos_)
+            analysis = morphosyntactic_analysis(token)
 
             yield {
                 # Lot 0 — identité stable d'occurrence (plan Partie 2,
@@ -147,6 +263,8 @@ def analyze_segments(play_segments: list[Segment], vpc_sink: list[dict], zone_si
                 "is_stop": token.is_stop,
                 "start_char": token.idx,
                 "end_char": token.idx + len(token.text),
+                "analysis_version": ANALYSIS_VERSION,
+                "analysis": analysis,
             }
 
 
@@ -162,6 +280,7 @@ def run() -> int:
     # TOUS les tokens du livre avant de pouvoir assigner un zone_id à quoi
     # que ce soit — donc le générateur doit être épuisé d'abord.
     occurrences = list(analyze_segments(play_segments, vpc_candidates, zone_token_segments))
+    validate_occurrence_schema(occurrences, play_segments)
 
     # Lot 5 — layout de zones (plan Partie 2 point H/I, Partie 4 Lot 5) :
     # toujours sur le livre entier, jamais par tranche (Partie 3). Recalculé
