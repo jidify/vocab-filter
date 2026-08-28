@@ -71,9 +71,17 @@ LOCK_PATH = OUT_DIR / ".lock"
 LOCK_STALE_SECONDS = 6 * 3600  # 6h : plus long que le run complet le plus lent observé (senses)
 
 OCCURRENCES_PATH = OUT_DIR / "occurrences.jsonl"
+MULTI_TOKEN_CANDIDATES_PATH = OUT_DIR / "multi_token_candidates.jsonl"
 # Lot 2 — sorties brutes du détecteur VPC (pipeline/vpc/), rejets inclus.
 # Fusion avec idiomatch (pipeline/mwe.py) : Lot 3 (voir mwe.py::load_vpc_candidates).
 VPC_CANDIDATES_PATH = OUT_DIR / "vpc_candidates.jsonl"
+# Candidats "rules_plus" (Q0-3 Phase 6 — voir fix_pipeline/detection_benchmark/
+# phase6_decision.md) : scanner phrasal verb PARSEME+WordNet, rejeu du
+# lexique custom, composés nominaux WordNet — écrits par analyze.py dans la
+# même boucle nlp.pipe que VPC, fusionnés par mwe.py::load_rules_plus_candidates.
+# Jamais de rejet (contrairement à VPC_CANDIDATES_PATH) : rules_plus ne
+# produit que des candidats, aucune décision "rejected_*".
+RULES_PLUS_CANDIDATES_PATH = OUT_DIR / "rules_plus_candidates.jsonl"
 MWE_CANDIDATES_PATH = OUT_DIR / "mwe_candidates.jsonl"
 MWE_DECISIONS_PATH = OUT_DIR / "mwe_decisions.jsonl"
 MWE_SPANS_PATH = OUT_DIR / "mwe_confirmed_spans.jsonl"

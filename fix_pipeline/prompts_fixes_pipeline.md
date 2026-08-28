@@ -10,7 +10,8 @@ Règles communes à tous les prompts :
 
 - travailler dans `C:\DOCS\_perso\vocab-filter` ;
 - respecter les changements déjà présents et ne pas annuler le travail utilisateur ;
-- considérer `pipeline_out/vocab_corrige.csv` comme benchmark en lecture seule, jamais comme entrée de production ;
+- considérer `pipeline_out/vocab_corrige.csv` comme benchmark en lecture seule, jamais comme entrée de production ; ce benchmark corrige le périmètre de `vocab.csv` initial et n'est pas un inventaire exhaustif du livre ;
+- ne jamais considérer automatiquement une unité absente du benchmark comme un faux positif : conserver tout véritable idiome, phrasal verb ou mot simple lexicalement, contextuellement et pédagogiquement validé ; classer ces unités comme améliorations hors périmètre, avec `latch` comme cas témoin obligatoire ;
 - ne pas coder d'exception spécifique à *The Humans* ou à une ligne du benchmark ;
 - commencer par des tests reproduisant le défaut, puis implémenter et mesurer avant/après ;
 - ne pas annoncer la correction terminée si les résultats/vérifications de la section du plan ne sont pas tous satisfaits ;
@@ -21,11 +22,11 @@ Règles communes à tous les prompts :
 
 ## Prompt Q0-1 — évaluateur de référence
 
-Lis intégralement `./fix_pipeline/plan_action_fix_pipeline.md`, en particulier **§0, Correction Q0-1** et **§8**. Implémente l'évaluateur reproductible comparant `pipeline_out/vocab.csv` à `pipeline_out/vocab_corrige.csv`. Il doit gérer les homonymes et produire `pipeline_out/fix_quality_metrics.json` et `pipeline_out/fix_quality_report.md` avec métriques par dimension et cas nommés. Le benchmark doit rester strictement en lecture seule et ne doit être importé par aucun module de production. Ajoute des tests du comparateur, exécute-le, explique tout écart avec la baseline documentée et ne poursuis pas vers Q0-2.
+Lis intégralement `./fix_pipeline/plan_action_fix_pipeline.md`, en particulier **§0, la Politique d'évaluation des écarts hors benchmark, Correction Q0-1** et **§8**. Implémente l'évaluateur reproductible comparant `pipeline_out/vocab.csv` à `pipeline_out/vocab_corrige.csv`. Il doit gérer les homonymes et produire `pipeline_out/fix_quality_metrics.json` et `pipeline_out/fix_quality_report.md` avec métriques par dimension et cas nommés. Le benchmark ayant été construit depuis le périmètre initial de `vocab.csv`, classe séparément correspondances, variantes acceptables, améliorations hors périmètre, révisions et vrais faux positifs ; ne pénalise jamais automatiquement une absence du benchmark. `latch` doit être reconnu comme récupération attendue. Le benchmark doit rester strictement en lecture seule et ne doit être importé par aucun module de production. Ajoute des tests du comparateur, exécute-le, explique tout écart avec la baseline documentée et ne poursuis pas vers Q0-2.
 
 ## Prompt Q0-2 — corpus de régression stratifié
 
-Lis le plan global, surtout **§0, Correction Q0-2**, la baseline Q0-1 et **§8**. Construis le corpus/tests de régression stratifié couvrant MWE fusionnées/manquées/polysémiques, POS/lemme, sens WordNet, composés/entités, `aucun_sens_adapte`, transparence et pending. Les tests LLM ordinaires doivent être déterministes hors réseau ; sépare clairement l'évaluation réelle. Prouve que chaque défaut connu échoue actuellement pour la raison attendue, sans implémenter encore les corrections S1.
+Lis le plan global, surtout **§0, la Politique d'évaluation des écarts hors benchmark, Correction Q0-2**, la baseline Q0-1 et **§8**. Construis le corpus/tests de régression stratifié couvrant MWE fusionnées/manquées/polysémiques, POS/lemme, sens WordNet, composés/entités, `aucun_sens_adapte`, transparence, pending et améliorations valides hors périmètre. Inclue `latch` et au moins un véritable idiome/phrasal verb supplémentaire. Les tests LLM ordinaires doivent être déterministes hors réseau ; sépare clairement l'évaluation réelle. Prouve que chaque défaut connu échoue actuellement pour la raison attendue, sans implémenter encore les corrections S1.
 
 ## Prompt S1-1 — alternatives de lemme et POS
 
@@ -45,7 +46,7 @@ Lis le plan global, surtout **§2, Correction S2-1**, les sorties S1 et **§8**.
 
 ## Prompt S2-2 — rappel des MWE
 
-Lis le plan global, surtout **§2, Correction S2-2**, S2-1 et **§8**. Augmente le rappel par sources complémentaires et patrons généralisables. Fais apparaître comme candidats exacts les familles `let it go`, `come back to earth`, `get worked up`, `at ease`, `burn out`, `put to rest`, `steer clear of`, `could care less`, `tighten one's belt`. Chaque ajout doit avoir provenance, offsets, test positif et contre-exemple. Mesure le gain de rappel et la variation de précision avant de conclure.
+Lis le plan global, surtout **§0 Politique d'évaluation des écarts hors benchmark**, **§2, Correction S2-2**, S2-1 et **§8**. Augmente le rappel par sources complémentaires et patrons généralisables. Fais apparaître comme candidats exacts les familles `let it go`, `come back to earth`, `get worked up`, `at ease`, `burn out`, `put to rest`, `steer clear of`, `could care less`, `tighten one's belt`. Chaque ajout doit avoir provenance, offsets, test positif et contre-exemple. Autorise et conserve les véritables MWE supplémentaires absentes du benchmark ; rapporte-les comme améliorations hors périmètre après validation indépendante. Mesure le gain de rappel et la variation de précision avant de conclure.
 
 ## Prompt S2-3 — schéma d'hypothèses MWE
 
@@ -109,7 +110,7 @@ Lis le plan global, surtout **§6, Correction S6-3**, Q0-1 et **§8**. Ajoute l'
 
 ## Prompt S7-1 — filtre pédagogique par sens
 
-Lis le plan global, surtout **§7, Correction S7-1**, les métriques Q0 et **§8**. Implémente une porte finale combinant transparence, faux amis, fréquence/CEFR, surprise du sens et intérêt MWE. Utilise `affection`, `intelligible`, `sensible` et les 53 identités exactes comme fixtures contrastives. Chaque exclusion doit avoir une raison ; mesure précision/rappel pédagogique contre le benchmark.
+Lis le plan global, surtout **§0 Politique d'évaluation des écarts hors benchmark**, **§7, Correction S7-1**, les métriques Q0 et **§8**. Implémente une porte finale combinant transparence, faux amis, fréquence/CEFR, surprise du sens et intérêt MWE. Utilise `affection`, `intelligible`, `sensible`, `latch` et les 53 identités exactes comme fixtures contrastives. L'absence du benchmark ne doit jouer aucun rôle dans la décision de production : conserve les ajouts authentiques et rapporte-les comme améliorations hors périmètre. Chaque exclusion doit avoir une raison ; mesure précision/rappel pédagogique sur le périmètre couvert et précision auditée des ajouts.
 
 ## Prompt S7-2 — export cohérent
 
@@ -121,4 +122,4 @@ Lis le plan global, surtout **§7, Correction S7-3**, toutes les branches d'ince
 
 ## Prompt S7-4 — validation finale
 
-Lis intégralement le plan global, surtout **§7, Correction S7-4**, la liste complète des gates et **§8**. Exécute le pipeline de bout en bout, tous les tests, l'évaluateur Q0-1 et une non-régression sur un autre texte. Ne masque aucun écart par une exception livre-spécifique. Fournis le rapport final : métriques contre `vocab_corrige.csv`, validation de chaque gate nommé, variantes acceptables, résidu humain et preuve qu'il n'existe plus de défaut critique connu.
+Lis intégralement le plan global, surtout **§0 Politique d'évaluation des écarts hors benchmark**, **§7, Correction S7-4**, la liste complète des gates et **§8**. Exécute le pipeline de bout en bout, tous les tests, l'évaluateur Q0-1 et une non-régression sur un autre texte. Ne masque aucun écart par une exception livre-spécifique et ne force pas le résultat à rester dans le périmètre incomplet du benchmark. Fournis le rapport final : métriques sur le périmètre de `vocab_corrige.csv`, liste et précision auditée des améliorations hors périmètre (idiomes, phrasal verbs et mots simples comme `latch`), validation de chaque gate nommé, variantes acceptables, résidu humain et preuve qu'il n'existe plus de défaut critique connu.

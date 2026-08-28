@@ -14,7 +14,7 @@ import spacy
 from spacy.symbols import ORTH
 from functools import lru_cache
 
-from pipeline import atomic, config, custom_lexicon, zones
+from pipeline import atomic, config, custom_lexicon, multi_token, rules_plus, zones
 from pipeline.corpus import Segment, load_segments
 from pipeline.vpc import adapter as vpc_adapter
 from pipeline.vpc import service as vpc_service
@@ -159,6 +159,18 @@ def get_nlp():
     return _NLP
 
 
+@lru_cache(maxsize=1)
+def _rules_plus_custom_idiom_sequences():
+    """Q0-3 Phase 6 — import différé de ``pipeline.mwe.CUSTOM_IDIOMS`` (pas
+    au niveau module : ``pipeline.rules_plus`` ne doit jamais dépendre de
+    ``pipeline.mwe`` pour éviter un import circulaire, voir sa docstring —
+    c'est ``analyze.py`` qui fait le pont, dans le sens S2 -> S1 dont
+    dépend déjà indirectement ce module ailleurs)."""
+    from pipeline.mwe import CUSTOM_IDIOMS
+
+    return rules_plus.custom_idiom_sequences(CUSTOM_IDIOMS + custom_lexicon.load_idioms())
+
+
 _CHAR_SPAN_PAIR_FIELDS = ("verb_char_span",)
 _CHAR_SPAN_LIST_FIELDS = (
     "particle_char_spans", "token_char_spans",
@@ -181,7 +193,11 @@ def _offset_char_spans(record: dict, offset: int) -> None:
         record[field] = [[a + offset, b + offset] for a, b in spans]
 
 
-def analyze_segments(play_segments: list[Segment], vpc_sink: list[dict], zone_sink: list[int]):
+def analyze_segments(play_segments: list[Segment], vpc_sink: list[dict],
+                     zone_sink: list[int], multi_token_sink: list[dict] | None = None,
+                     rules_plus_sink: list[dict] | None = None):
+    multi_token_sink = multi_token_sink if multi_token_sink is not None else []
+    rules_plus_sink = rules_plus_sink if rules_plus_sink is not None else []
     nlp = get_nlp()
     # Lot 2 — le détecteur VPC tourne DANS cette même boucle nlp.pipe, sur le
     # Doc déjà annoté (pas de second appel spaCy séparé — voir le plan,
@@ -193,11 +209,34 @@ def analyze_segments(play_segments: list[Segment], vpc_sink: list[dict], zone_si
     detector = vpc_service.build_detector()
     nlp_model = f"en_core_web_sm:{nlp.meta.get('version', 'unknown')}"
 
+    # Q0-3 Phase 6 — mêmes principes que VPC ci-dessus : les scanners
+    # "rules_plus" Groupe B (phrasal verb PARSEME+WordNet, rejeu du
+    # lexique custom, composés nominaux WordNet — voir
+    # pipeline/rules_plus.py) tournent DANS cette même boucle, sur le
+    # même `doc` déjà annoté, jamais un second passage spaCy séparé.
+    # Groupe A (trait d'union/possessif) est géré à l'intérieur de
+    # `multi_token.detect()` lui-même, pas ici.
+    rules_plus_pv_lexicon = rules_plus.merged_phrasal_verb_lexicon()
+    rules_plus_nominal_lexicon = rules_plus.wordnet_nominal_lexicon()
+    rules_plus_custom_sequences = _rules_plus_custom_idiom_sequences()
+
     # nlp.pipe traite chaque segment séparément (un Doc par segment) —
     # c'est le point qui diffère de test_idiomatch_book.py.
     texts = (s.en for s in play_segments)
 
     for seg, doc in zip(play_segments, nlp.pipe(texts, batch_size=64)):
+        segment_multi_tokens = multi_token.detect(doc, seg.idx)
+        multi_token_sink.extend(segment_multi_tokens)
+
+        rules_plus_sink.extend(
+            rules_plus.scan_phrasal_verb_candidates(doc, seg.idx, seg.kind, rules_plus_pv_lexicon)
+        )
+        rules_plus_sink.extend(
+            rules_plus.scan_custom_idiom_candidates(doc, seg.idx, seg.kind, rules_plus_custom_sequences)
+        )
+        rules_plus_sink.extend(
+            rules_plus.scan_wordnet_nominal_candidates(doc, seg.idx, seg.kind, rules_plus_nominal_lexicon)
+        )
         # `pipeline.vpc.adapter.sentences_from_doc` rend les offsets de
         # chaque SyntaxToken relatifs au DÉBUT DE LA PHRASE (`token.idx -
         # sentence_start`, voir sa docstring) — un choix du contrat
@@ -240,7 +279,7 @@ def analyze_segments(play_segments: list[Segment], vpc_sink: list[dict], zone_si
             wn_pos = config.UPOS_TO_WN.get(token.pos_)
             analysis = morphosyntactic_analysis(token)
 
-            yield {
+            occurrence = {
                 # Lot 0 — identité stable d'occurrence (plan Partie 2,
                 # point F) : remplace la clé fragile (lemma, pos,
                 # segment_idx, surface) utilisée jusqu'ici pour dédupliquer
@@ -266,6 +305,16 @@ def analyze_segments(play_segments: list[Segment], vpc_sink: list[dict], zone_si
                 "analysis_version": ANALYSIS_VERSION,
                 "analysis": analysis,
             }
+            # Projection informative pour les consommateurs aval. Ce champ
+            # n'est consulté ni par is_covered ni par une porte de suppression.
+            occurrence["multi_token_candidates"] = [
+                {"candidate_id": row["candidate_id"], "surface": row["surface"],
+                 "start_char": row["start_char"], "end_char": row["end_char"],
+                 "candidate_types": row["candidate_types"], "score": row["score"],
+                 "provenance": row["provenance"]}
+                for row in multi_token.covering(occurrence, segment_multi_tokens)
+            ]
+            yield occurrence
 
 
 def run() -> int:
@@ -274,13 +323,19 @@ def run() -> int:
     play_segments = [s for s in segments if s.kind != "hors_oeuvre"]
 
     vpc_candidates: list[dict] = []
+    multi_token_candidates: list[dict] = []
     zone_token_segments: list[int] = []
+    rules_plus_candidates: list[dict] = []
     # Matérialisé (pas streamé directement dans atomic_write_jsonl comme
     # avant ce lot) : le layout de zones (ci-dessous) a besoin d'avoir vu
     # TOUS les tokens du livre avant de pouvoir assigner un zone_id à quoi
     # que ce soit — donc le générateur doit être épuisé d'abord.
-    occurrences = list(analyze_segments(play_segments, vpc_candidates, zone_token_segments))
+    occurrences = list(analyze_segments(
+        play_segments, vpc_candidates, zone_token_segments, multi_token_candidates,
+        rules_plus_candidates,
+    ))
     validate_occurrence_schema(occurrences, play_segments)
+    multi_token.validate(multi_token_candidates, {s.idx: s.en for s in play_segments})
 
     # Lot 5 — layout de zones (plan Partie 2 point H/I, Partie 4 Lot 5) :
     # toujours sur le livre entier, jamais par tranche (Partie 3). Recalculé
@@ -294,10 +349,19 @@ def run() -> int:
         occ["zone_id"] = seg_zone.get(occ["segment_idx"])
 
     n = atomic.atomic_write_jsonl(config.OCCURRENCES_PATH, occurrences)
+    n_multi = atomic.atomic_write_jsonl(
+        config.MULTI_TOKEN_CANDIDATES_PATH, multi_token_candidates
+    )
     n_vpc = atomic.atomic_write_jsonl(config.VPC_CANDIDATES_PATH, vpc_candidates)
+    n_rules_plus = atomic.atomic_write_jsonl(
+        config.RULES_PLUS_CANDIDATES_PATH, rules_plus_candidates
+    )
 
     print(f"{n} occurrences écrites dans {config.OCCURRENCES_PATH}")
+    print(f"{n_multi} hypothèses multi-tokens écrites dans "
+          f"{config.MULTI_TOKEN_CANDIDATES_PATH}")
     print(f"{n_vpc} candidats VPC (rejets compris) écrits dans {config.VPC_CANDIDATES_PATH}")
+    print(f"{n_rules_plus} candidats rules_plus écrits dans {config.RULES_PLUS_CANDIDATES_PATH}")
     print(f"{layout['zone_count']} zones ({config.ZONE_PERCENT}%) -> {config.ZONE_LAYOUT_PATH} "
           f"(layout_id={layout['layout_id'][:19]}...)")
     return 0

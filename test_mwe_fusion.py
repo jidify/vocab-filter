@@ -103,6 +103,27 @@ class MergeCandidateSourcesTests(unittest.TestCase):
         merged = mwe.merge_candidate_sources([], [_vpc_candidate("m:1:0:10", "wake up", directional=True)])
         self.assertTrue(merged[0]["directional_context_dependent"])
 
+    def test_rules_plus_fills_gaps_but_never_wins_a_collision(self):
+        """Q0-3 Phase 6 : rules_plus n'a jamais de pouvoir de rejet NI de
+        priorité — il ne comble que ce qu'idiomatch et VPC ont raté."""
+        idiomatch = [_idiomatch_candidate("m:1:0:10", "turn off")]
+        vpc = [_vpc_candidate("m:1:20:30", "wake up")]
+        rules_plus_only = _idiomatch_candidate("m:1:40:50", "figure out")
+        rules_plus_only["source"] = "rules_plus_phrasal_verb_scan"
+        collision_with_vpc = _idiomatch_candidate("m:1:20:30", "wake up")
+        collision_with_vpc["source"] = "rules_plus_phrasal_verb_scan"
+        collision_with_vpc["surface"] = "should never win"
+
+        merged = mwe.merge_candidate_sources(
+            idiomatch, vpc, [rules_plus_only, collision_with_vpc]
+        )
+        by_id = {c["occurrence_id"]: c for c in merged}
+        self.assertEqual(
+            {c["occurrence_id"] for c in merged}, {"m:1:0:10", "m:1:20:30", "m:1:40:50"}
+        )
+        self.assertEqual(by_id["m:1:40:50"]["source"], "rules_plus_phrasal_verb_scan")
+        self.assertEqual(by_id["m:1:20:30"]["source"], "vpc")
+
 
 class MweStoresProtectionTests(unittest.TestCase):
     def test_is_protected_only_for_validated_status(self):

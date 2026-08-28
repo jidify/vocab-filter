@@ -326,6 +326,9 @@ def run() -> int:
                                 "wn_pos": occ["wn_pos"], "source": "legacy"},
                     "alternatives": [],
                 }),
+                # Hypothèses S1-2 transmises à S5 pour examen futur. Leur
+                # présence seule ne réserve et ne supprime aucun token.
+                "multi_token_candidates": occ.get("multi_token_candidates", []),
             })
     atomic.atomic_write_jsonl(config.SELECTED_TYPES_PATH, kept_records)
 

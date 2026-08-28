@@ -235,19 +235,51 @@ def load_vpc_candidates(segments) -> list[dict]:
     return candidates
 
 
-def merge_candidate_sources(idiomatch_candidates: list[dict], vpc_candidates: list[dict]) -> list[dict]:
-    """Fusionne les deux sources SUR occurrence_id (donc sur les spans de
-    caractères de l'enveloppe candidate — jamais les indices de token, les
-    deux pipelines spaCy n'étant pas les mêmes, voir les docstrings
-    ci-dessus). Sur collision (même segment, même enveloppe détectée par les
-    deux sources), l'entrée idiomatch gagne : son alignement de membres a
-    été validé au Lot 1 (rejeu déterministe des motifs slop_N), alors que
-    VPC ne connaît que verbe+particule. Le flag `directional_context_dependent`
-    de VPC, lui, est conservé même quand idiomatch gagne — c'est un signal
-    sur le CONTEXTE de l'occurrence, indépendant de la source qui a fourni
-    les spans exacts."""
+def load_rules_plus_candidates(segments) -> list[dict]:
+    """Lit `rules_plus_candidates.jsonl` (Q0-3 Phase 6, écrit par
+    analyze.py dans la même boucle nlp.pipe que VPC — voir
+    pipeline/rules_plus.py) : déjà au schéma commun (`find_candidates`/
+    `load_vpc_candidates`), aucune projection nécessaire ici.
 
-    by_occurrence: dict[str, dict] = {c["occurrence_id"]: c for c in vpc_candidates}
+    Contrairement à `load_vpc_candidates`, aucun filtre de rejet : les
+    scanners `rules_plus` ne rejettent jamais rien par construction (union
+    avec spaCy sans pouvoir de rejet, voir
+    fix_pipeline/detection_benchmark/phase3_rules_plus_report.md)."""
+
+    if not config.RULES_PLUS_CANDIDATES_PATH.exists():
+        return []
+    with config.RULES_PLUS_CANDIDATES_PATH.open(encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
+
+
+def merge_candidate_sources(
+    idiomatch_candidates: list[dict],
+    vpc_candidates: list[dict],
+    rules_plus_candidates: list[dict] = (),
+) -> list[dict]:
+    """Fusionne les sources SUR occurrence_id (donc sur les spans de
+    caractères de l'enveloppe candidate — jamais les indices de token, les
+    pipelines spaCy internes n'étant pas les mêmes, voir les docstrings
+    ci-dessus). Ordre de priorité sur collision (même segment, même
+    enveloppe détectée par plusieurs sources), du plus fort au plus
+    faible : idiomatch > VPC > rules_plus.
+
+    - idiomatch gagne sur VPC : son alignement de membres a été validé au
+      Lot 1 (rejeu déterministe des motifs slop_N), alors que VPC ne
+      connaît que verbe+particule.
+    - `rules_plus` (Q0-3 Phase 6) ne gagne JAMAIS une collision — voir sa
+      propre conclusion ("union avec spaCy sans pouvoir de rejet") : il ne
+      comble que les occurrences qu'AUCUNE des deux autres sources n'a
+      trouvées.
+    - Le flag `directional_context_dependent` de VPC est conservé même
+      quand idiomatch gagne — c'est un signal sur le CONTEXTE de
+      l'occurrence, indépendant de la source qui a fourni les spans
+      exacts. `rules_plus` ne porte jamais ce flag (toujours False), donc
+      rien à préserver de sa part sur ce point."""
+
+    by_occurrence: dict[str, dict] = {c["occurrence_id"]: c for c in rules_plus_candidates}
+    for c in vpc_candidates:
+        by_occurrence[c["occurrence_id"]] = c
     for c in idiomatch_candidates:
         existing = by_occurrence.get(c["occurrence_id"])
         if existing is not None and existing["directional_context_dependent"]:
@@ -295,8 +327,12 @@ def run() -> int:
     vpc_raw = load_vpc_candidates(segments)
     print(f"{len(vpc_raw)} occurrences VPC (Lot 2, {config.VPC_CANDIDATES_PATH.name}).")
 
-    raw = merge_candidate_sources(idiomatch_raw, vpc_raw)
-    n_merged = len(idiomatch_raw) + len(vpc_raw) - len(raw)
+    rules_plus_raw = load_rules_plus_candidates(segments)
+    print(f"{len(rules_plus_raw)} occurrences rules_plus (Q0-3 Phase 6, "
+          f"{config.RULES_PLUS_CANDIDATES_PATH.name}).")
+
+    raw = merge_candidate_sources(idiomatch_raw, vpc_raw, rules_plus_raw)
+    n_merged = len(idiomatch_raw) + len(vpc_raw) + len(rules_plus_raw) - len(raw)
     if n_merged:
         print(f"{n_merged} occurrence(s) détectée(s) par les deux sources (fusionnées).")
 
