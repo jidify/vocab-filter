@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "provenance": "Minimal observations extracted from existing pipeline_out artifacts; no benchmark answers.",
+  "cases": [
+    {"id": "come_to_mixed_spans", "stratum": "mwe_fusionnees", "artifact": "selected_mwe.jsonl", "canonical_form": "come to", "observed_surfaces": ["come back to", "come home to", "come talk to", "comes to", "coming to"]},
+    {"id": "let_go_heterogeneous", "stratum": "mwe_occurrences_heterogenes", "artifact": "mwe_decisions.jsonl", "canonical_form": "let someone go", "observed_surfaces": ["Let it go", "Let's go", "let him go", "let me go"]},
+    {"id": "missing_mwe_families", "stratum": "mwe_manquees", "artifact": "mwe_candidates.jsonl", "observed_surfaces": ["come back to earth", "could care less", "burn out"]},
+    {"id": "burn_out_contexts", "stratum": "mwe_polysemiques", "artifact": "mwe_candidates.jsonl", "canonical_form": "burn out", "observed_surfaces": ["burn out", "burns out", "burning out"]},
+    {"id": "morphology_alternatives", "stratum": "pos_lemme", "artifact": "occurrences.jsonl", "observed_surfaces": ["frosting", "creeping", "facilities", "stressing", "bitch"]},
+    {"id": "wordnet_context", "stratum": "sens_wordnet", "artifact": "senses.jsonl", "observed_surfaces": ["facility", "plowed", "haggard", "spa"]},
+    {"id": "compound_fragments", "stratum": "composes_entites", "artifact": "senses.jsonl", "observed_surfaces": ["New York", "Virgin Mary", "ranch dip", "observation deck", "nursing home", "crystal ball"]},
+    {"id": "latch_disappearance", "stratum": "aucun_sens_adapte", "artifact": "senses.jsonl", "canonical_form": "latch", "observed_surfaces": ["latch", "latches"]},
+    {"id": "transparent_cognates", "stratum": "transparence", "artifact": "vocab.csv", "observed_surfaces": ["affection", "intelligible"]},
+    {"id": "pending_translation", "stratum": "pending", "artifact": "vocab.csv", "observed_surfaces": ["flush", "watering", "settle", "sound"]},
+    {"id": "outside_scope_idiom", "stratum": "ameliorations_hors_perimetre", "artifact": "vocab.csv", "canonical_form": "on one's feet", "observed_surfaces": ["shaky on her feet"]},
+    {"id": "outside_scope_literal_control", "stratum": "ameliorations_hors_perimetre", "artifact": "offline_fixture", "observed_surfaces": ["She put shoes on her feet"]}
+  ]
+}

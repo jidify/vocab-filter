@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "canonical_form": "york",
+      "unit_type": "word",
+      "sense_id": "york.n.01",
+      "status": "false_positive",
+      "reason": "Fragment de l'entité New York dans l'occurrence observée ; le sens Maison d'York est contextuellement faux."
+    }
+  ],
+  "expected_recoveries": [
+    {
+      "canonical_form": "latch",
+      "unit_type": "word",
+      "status": "validated_improvement",
+      "reason": "Cas témoin imposé par Q0-1 : récupération attendue hors du périmètre initial."
+    }
+  ]
+}

@@ -135,7 +135,33 @@ def _soft_fr_equal(a: str, b: str) -> bool:
     return bool(va & vb)
 
 
-def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]]) -> dict:
+OUT_OF_SCOPE_STATUSES = {"acceptable_variant", "validated_improvement", "needs_review", "false_positive"}
+
+
+def _audit_key(row: dict[str, str]) -> tuple[str, str, str]:
+    return normalize(row.get("canonical_form")), normalize(row.get("unit_type")), normalize(row.get("sense_id"))
+
+
+def read_audit(path: Path | None) -> dict[tuple[str, str, str], dict]:
+    """Read optional human adjudications for produced units outside the benchmark."""
+    if path is None or not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    entries = data.get("entries", data) if isinstance(data, dict) else data
+    result = {}
+    for entry in entries:
+        status = entry.get("status", "")
+        if status not in OUT_OF_SCOPE_STATUSES:
+            raise ValueError(f"{path}: invalid out-of-scope status {status!r}")
+        key = _audit_key(entry)
+        if not key[0] or not key[1] or key in result:
+            raise ValueError(f"{path}: invalid or duplicate audit identity {key!r}")
+        result[key] = dict(entry)
+    return result
+
+
+def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]], audit: dict[tuple[str, str, str], dict] | None = None) -> dict:
+    audit = audit or {}
     pairs, only_a, only_e = match_rows(actual, expected)
     paired = [(actual[p.actual_index], expected[p.expected_index]) for p in pairs]
     mwe_pairs = [(a, e) for a, e in paired if normalize(e["unit_type"]) == "mwe"]
@@ -162,16 +188,27 @@ def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]]) -> di
     def summary(row: dict[str, str]) -> dict[str, str]:
         return {k: row.get(k, "") for k in ("canonical_form", "surface_forms", "unit_type", "pos", "sense_id", "meaning_fr_official", "definition_en", "needs_review")}
 
+    out_of_scope = []
+    for i in only_a:
+        item = summary(actual[i])
+        annotation = audit.get(_audit_key(actual[i]))
+        item.update({"classification": annotation["status"] if annotation else "needs_review", "audit_reason": (annotation or {}).get("reason", "Absence du benchmark : adjudication requise.")})
+        out_of_scope.append(item)
+    class_counts = {status: sum(x["classification"] == status for x in out_of_scope) for status in OUT_OF_SCOPE_STATUSES}
+    precision_denominator = len(pairs) + class_counts["false_positive"]
+    audited_additions = class_counts["validated_improvement"] + class_counts["false_positive"]
+
     differences = []
     for a, e in paired:
         fields = [f for f in ("surface_forms", "pos", "sense_id", "definition_en", "meaning_fr_official", "needs_review") if normalize(a[f]) != normalize(e[f])]
         if fields:
             differences.append({"canonical_form": e["canonical_form"], "unit_type": e["unit_type"], "fields": fields, "actual": summary(a), "expected": summary(e)})
+    matched_exact_count = len(pairs) - len(differences)
 
     metrics = {
-        "unit_precision": _ratio(len(pairs), len(actual)),
+        "unit_precision": _ratio(len(pairs), precision_denominator),
         "unit_recall": _ratio(len(pairs), len(expected)),
-        "mwe_precision": _ratio(matched_mwe, current_mwe),
+        "mwe_precision": _ratio(matched_mwe, matched_mwe + sum(x["classification"] == "false_positive" and normalize(x["unit_type"]) == "mwe" for x in out_of_scope)),
         "mwe_recall": _ratio(matched_mwe, expected_mwe),
         "surface_accuracy": _ratio(exact_surfaces, len(paired)),
         "pos_accuracy": _ratio(exact_pos, len(paired)),
@@ -182,10 +219,11 @@ def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]]) -> di
         "sense_definition_fr_coherence": _ratio(coherent, non_reviewed),
         # With a positive-only benchmark, inventory precision is the measurable
         # pedagogical selection precision; exclusions have no rows to pair.
-        "pedagogical_selection_precision": _ratio(len(pairs), len(actual)),
+        "pedagogical_selection_precision": _ratio(len(pairs), precision_denominator),
         "review_decision_accuracy": _ratio(exact_decision, len(paired)),
         "review_queue_size": sum(_truthy(r["needs_review"]) for r in actual),
         "review_rate": _ratio(sum(_truthy(r["needs_review"]) for r in actual), len(actual)),
+        "audited_out_of_scope_precision": _ratio(class_counts["validated_improvement"], audited_additions),
     }
     counts = {
         "actual_rows": len(actual), "benchmark_rows": len(expected), "matched_rows": len(pairs),
@@ -201,6 +239,12 @@ def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]]) -> di
         "missing_official_fr_filled_by_benchmark": len(missing_fr_fixed),
         "actual_empty_official_fr": len(actual) - fr_present,
         "canonical_equals_official_fr": sum(normalize(r["canonical_form"]) == normalize(r["meaning_fr_official"]) and bool(normalize(r["canonical_form"])) for r in actual),
+        "acceptable_variants": class_counts["acceptable_variant"],
+        "validated_out_of_scope_improvements": class_counts["validated_improvement"],
+        "out_of_scope_needs_review": class_counts["needs_review"],
+        "true_false_positives": class_counts["false_positive"],
+        "correspondences": matched_exact_count,
+        "matched_revisions": len(differences),
     }
     exact_named = []
     for a, e in paired:
@@ -215,8 +259,23 @@ def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]]) -> di
         "matching": "normalized (canonical_form, unit_type) multiset; deterministic homonym assignment by surfaces then semantic fields",
         "metrics": metrics,
         "counts": counts,
-        "actual_only": [summary(actual[i]) for i in only_a],
+        "actual_only": out_of_scope,
         "benchmark_only": [summary(expected[i]) for i in only_e],
+        "out_of_scope_policy": "An absence from the benchmark defaults to needs_review and never to false_positive.",
+        "classifications": {
+            "correspondences": matched_exact_count,
+            "acceptable_variants": class_counts["acceptable_variant"],
+            "validated_improvements": class_counts["validated_improvement"],
+            "revisions": len(differences) + class_counts["needs_review"] + len(only_e),
+            "true_false_positives": class_counts["false_positive"],
+        },
+        "named_gates": {
+            "latch": {
+                "status": "expected_recovery",
+                "present_in_actual": any(normalize(r["canonical_form"]) == "latch" for r in actual),
+                "policy": "Expected out-of-scope recovery; never a false positive solely because it is absent from the benchmark.",
+            }
+        },
         "differences": differences,
         "missing_official_fr_filled": [
             {**summary(a), "benchmark_meaning_fr_official": e["meaning_fr_official"], "benchmark_sense_id": e["sense_id"]}
@@ -259,6 +318,13 @@ def render_report(result: dict, actual_path: Path, expected_path: Path) -> str:
               f"- Mots appariés avec POS ou sens divergent : {c['word_pos_or_sense_mismatches']}.",
               f"- Traductions officielles vides remplies dans le benchmark : {c['missing_official_fr_filled_by_benchmark']} (vides au total dans le résultat : {c['actual_empty_official_fr']}).", "",
               f"- Formes canoniques identiques à leur traduction officielle : {c['canonical_equals_official_fr']}.", "",
+              "## Écarts hors benchmark", "",
+              "Une absence du benchmark n'est jamais une erreur automatique. Sans adjudication indépendante explicite, elle est classée en révision.", "",
+              f"- Variantes acceptables : {c['acceptable_variants']}.",
+              f"- Améliorations hors périmètre validées : {c['validated_out_of_scope_improvements']}.",
+              f"- Révisions nécessaires : {c['out_of_scope_needs_review']}.",
+              f"- Vrais faux positifs audités : {c['true_false_positives']}.",
+              f"- Précision auditée des ajouts : {('n/a' if m['audited_out_of_scope_precision']['value'] is None else format(100 * m['audited_out_of_scope_precision']['value'], '.2f') + ' %')}.", "",
               "### Explication des écarts avec les nombres documentés", "",
               "Le plan annonce 43 *unités* seulement dans le résultat (34 MWE, 9 mots). Ce chiffre est retrouvé si l'on transforme les clés en ensemble, mais cette opération écrase les homonymes. Le multiensemble trouve 50 *lignes* (34 MWE, 16 mots), soit 7 lignes homonymes supplémentaires.",
               "Ces 7 appariements expliquent exactement tous les autres écarts : 100 POS MWE manquants au lieu de 98 (+2), 131 sens MWE divergents au lieu de 126 (+5), 43 définitions MWE au lieu de 38 (+5), 16 mots POS/sens au lieu de 14 (+2), et 106 traductions remplies au lieu de 99 (+7). Les nombres documentés correspondent donc au comparateur grossier indexé par clé unique que Q0-1 devait précisément remplacer.", "",
@@ -279,7 +345,7 @@ def render_report(result: dict, actual_path: Path, expected_path: Path) -> str:
                 if "fields" in hit:
                     kinds.append("champs divergents : " + ", ".join(hit["fields"]))
                 elif hit in result["actual_only"]:
-                    kinds.append("seulement dans le résultat courant")
+                    kinds.append("seulement dans le résultat courant — " + hit["classification"])
                 else:
                     kinds.append("seulement dans le benchmark")
             lines.append(f"- **{name}** — {' ; '.join(kinds)}.")
@@ -288,7 +354,8 @@ def render_report(result: dict, actual_path: Path, expected_path: Path) -> str:
             if exact:
                 lines.append(f"- **{name}** — présent à l'identique dans les deux fichiers ; le benchmark fourni ne matérialise donc pas l'exclusion annoncée par le plan.")
             else:
-                lines.append(f"- **{name}** — absent des deux inventaires sous ce canon exact (disparition silencieuse visible dans les deux artefacts).")
+                suffix = " ; récupération/amélioration attendue, jamais faux positif" if name == "latch" else ""
+                lines.append(f"- **{name}** — absent des deux inventaires sous ce canon exact (disparition silencieuse visible dans les deux artefacts){suffix}.")
     lines += ["", "## Traductions officielles manquantes", "",
               f"{c['missing_official_fr_filled_by_benchmark']} lignes appariées ont une traduction vide dans le résultat et renseignée dans le benchmark.", ""]
     for row in result["missing_official_fr_filled"]:
@@ -298,8 +365,8 @@ def render_report(result: dict, actual_path: Path, expected_path: Path) -> str:
     return "\n".join(lines)
 
 
-def run(actual_path: Path, expected_path: Path, json_path: Path, report_path: Path) -> dict:
-    result = evaluate(read_csv(actual_path), read_csv(expected_path))
+def run(actual_path: Path, expected_path: Path, json_path: Path, report_path: Path, audit_path: Path | None = None) -> dict:
+    result = evaluate(read_csv(actual_path), read_csv(expected_path), read_audit(audit_path))
     # Outputs are separate from both inputs; the benchmark is never opened for writing.
     json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     report_path.write_text(render_report(result, actual_path, expected_path), encoding="utf-8")
@@ -312,10 +379,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--benchmark", type=Path, default=Path("pipeline_out/vocab_corrige.csv"))
     parser.add_argument("--json", type=Path, default=Path("pipeline_out/fix_quality_metrics.json"))
     parser.add_argument("--report", type=Path, default=Path("pipeline_out/fix_quality_report.md"))
+    parser.add_argument("--audit", type=Path, default=Path("fix_pipeline/q0_1_out_of_scope_audit.json"))
     args = parser.parse_args(argv)
     if args.benchmark.resolve() in {args.json.resolve(), args.report.resolve()}:
         parser.error("output paths must not overwrite the benchmark")
-    run(args.actual, args.benchmark, args.json, args.report)
+    run(args.actual, args.benchmark, args.json, args.report, args.audit)
     return 0
 
 

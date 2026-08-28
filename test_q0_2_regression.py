@@ -19,6 +19,7 @@ from unittest import mock
 from fix_pipeline.evaluate_fix_quality import evaluate, normalize, read_csv
 
 OUT = Path("pipeline_out")
+CORPUS_PATH = Path("fix_pipeline/q0_2_stratified_corpus.json")
 
 
 def jsonl(name):
@@ -34,6 +35,10 @@ def csv_rows(name):
 def vocab_rows(canon=None):
     rows = csv_rows("vocab.csv")
     return rows if canon is None else [r for r in rows if normalize(r["canonical_form"]) == normalize(canon)]
+
+
+def corpus_cases():
+    return json.loads(CORPUS_PATH.read_text(encoding="utf-8"))["cases"]
 
 
 def check_mwe_merged_boundaries():
@@ -116,6 +121,12 @@ def check_pending_accounting():
     assert not lost, f"S6/S7 pending translations exported empty and absent from review ({len(lost)}): {lost[:8]}"
 
 
+def check_valid_out_of_scope_idiom_is_conserved():
+    rows = vocab_rows("on one's feet")
+    valid = [r for r in rows if normalize(r["unit_type"]) == "mwe" and normalize(r["meaning_fr_official"])]
+    assert valid, "S7 out-of-scope policy failure: genuine idiom 'on one's feet' was not conserved as a complete translated MWE"
+
+
 def check_end_to_end_gate():
     result = evaluate(read_csv(OUT / "vocab.csv"), read_csv(OUT / "vocab_corrige.csv"))
     thresholds = {"unit_precision": .97, "unit_recall": .97, "pos_accuracy": .99, "sense_identity_accuracy": .97, "definition_accuracy": .98, "official_fr_coverage": 1.0, "official_fr_soft_accuracy": .98, "sense_definition_fr_coherence": 1.0}
@@ -134,7 +145,23 @@ STRATIFIED_CHECKS = {
     "aucun_sens_adapte": check_no_sense_disappearance,
     "transparence": check_transparent_selection,
     "pending": check_pending_accounting,
+    "ameliorations_hors_perimetre": check_valid_out_of_scope_idiom_is_conserved,
     "end_to_end": check_end_to_end_gate,
+}
+
+EXPECTED_CURRENT_OUTCOMES = {
+    "mwe_fusionnees": ("known_failure", "S2 boundary failure"),
+    "mwe_occurrences_heterogenes": ("known_failure", "S3 occurrence judgment missing"),
+    "mwe_manquees": ("known_failure", "S2/S3 MWE recall failure"),
+    "mwe_polysemiques": ("known_failure", "S3 sense clustering failure"),
+    "pos_lemme": ("known_failure", "S1/S5 POS-lemma alternatives lost"),
+    "sens_wordnet": ("known_failure", "S5 WordNet context selection failure"),
+    "composes_entites": ("known_failure", "S1/S5 compound/entity fragments"),
+    "aucun_sens_adapte": ("known_failure", "S5/S7 silent disappearance"),
+    "transparence": ("known_failure", "S7 transparent cognates retained"),
+    "pending": ("known_failure", "S6/S7 pending translations"),
+    "ameliorations_hors_perimetre": ("passes", "invariant satisfied"),
+    "end_to_end": ("known_failure", "Q0-1 final thresholds not met"),
 }
 
 KNOWN_CASE_COVERAGE = {
@@ -143,13 +170,34 @@ KNOWN_CASE_COVERAGE = {
     "affection": "transparence", "intelligible": "transparence",
     "facility": "sens_wordnet", "frosting": "pos_lemme", "York": "composes_entites",
     "traductions officielles manquantes": "pending",
+    "on one's feet (ajout valide)": "ameliorations_hors_perimetre",
 }
 
 
 class Q02CorpusContractTests(unittest.TestCase):
     def test_every_q01_named_anomaly_has_a_stratum(self):
-        self.assertEqual(len(KNOWN_CASE_COVERAGE), 10)
+        self.assertEqual(len(KNOWN_CASE_COVERAGE), 11)
         self.assertTrue(set(KNOWN_CASE_COVERAGE.values()) <= set(STRATIFIED_CHECKS))
+
+    def test_corpus_is_minimal_observation_only_and_covers_every_stratum(self):
+        cases = corpus_cases()
+        self.assertEqual(len({case["id"] for case in cases}), len(cases))
+        forbidden = {"expected", "benchmark", "target_sense", "target_translation", "answer"}
+        self.assertFalse([(c["id"], forbidden & set(c)) for c in cases if forbidden & set(c)])
+        self.assertTrue(set(STRATIFIED_CHECKS) - {"end_to_end"} <= {c["stratum"] for c in cases})
+
+    def test_every_current_defect_fails_for_its_expected_stage_reason(self):
+        observed = {}
+        for name, check in STRATIFIED_CHECKS.items():
+            try:
+                check()
+            except AssertionError as exc:
+                observed[name] = ("known_failure", str(exc))
+            else:
+                observed[name] = ("passes", "invariant satisfied")
+        for name, (status, reason_prefix) in EXPECTED_CURRENT_OUTCOMES.items():
+            self.assertEqual(observed[name][0], status, name)
+            self.assertTrue(observed[name][1].startswith(reason_prefix), (name, observed[name][1]))
 
     def test_llm_fixture_is_frozen_and_offline(self):
         # mwe_judge only needs nltk for optional WordNet lookup.  Supply a
@@ -161,26 +209,28 @@ class Q02CorpusContractTests(unittest.TestCase):
         nltk.corpus = corpus
         with mock.patch.dict(sys.modules, {"nltk": nltk, "nltk.corpus": corpus}):
             from pipeline import mwe_judge
-        frozen = {"label": "phrasal_verb", "confidence": 0.91, "reason": "fixture figée"}
-        occurrences = [{"segment_idx": 1, "surface": "worked up"}]
-        with mock.patch.object(mwe_judge.llm, "call_json", side_effect=lambda *a, **k: dict(frozen)) as call:
-            first = mwe_judge.judge_type("work up", occurrences, {}, wordnet_candidates=[])
-            second = mwe_judge.judge_type("work up", occurrences, {}, wordnet_candidates=[])
+        frozen = {"label": "idiome", "confidence": 0.91, "reason": "fixture figée"}
+        occurrences = [{"segment_idx": 1, "surface": "on her feet"}]
+        with mock.patch.object(mwe_judge.llm, "call_json", side_effect=lambda *a, **k: dict(frozen)) as call, mock.patch("urllib.request.urlopen", side_effect=AssertionError("network forbidden")):
+            first = mwe_judge.judge_type("on one's feet", occurrences, {}, wordnet_candidates=[])
+            second = mwe_judge.judge_type("on one's feet", occurrences, {}, wordnet_candidates=[])
         self.assertEqual(first, second)
         self.assertEqual(call.call_count, 2)
 
 
-def _add_expected_failure(name, check):
-    @unittest.expectedFailure
+def _add_characterization(name, check):
+    is_failure = EXPECTED_CURRENT_OUTCOMES[name][0] == "known_failure"
+    decorator = unittest.expectedFailure if is_failure else (lambda f: f)
+    @decorator
     def test(self):
         check()
-    test.__name__ = f"test_known_failure_{name}"
-    test.__doc__ = f"Caractérise la strate {name}; doit échouer avant sa correction propriétaire."
+    test.__name__ = f"test_{'known_failure' if is_failure else 'preserved_invariant'}_{name}"
+    test.__doc__ = f"Caractérise la strate {name} avec son état Q0-2 attendu."
     setattr(Q02CorpusContractTests, test.__name__, test)
 
 
 for _name, _check in STRATIFIED_CHECKS.items():
-    _add_expected_failure(_name, _check)
+    _add_characterization(_name, _check)
 
 
 if __name__ == "__main__":

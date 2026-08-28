@@ -31,7 +31,24 @@ class FixQualityEvaluatorTests(unittest.TestCase):
         result = evaluate(actual, expected)
         self.assertEqual(result["counts"]["matched_rows"], 1)
         self.assertEqual(result["counts"]["actual_only_rows"], 1)
-        self.assertEqual(result["metrics"]["unit_precision"]["value"], 0.5)
+        self.assertEqual(result["metrics"]["unit_precision"]["value"], 1.0)
+        self.assertEqual(result["counts"]["out_of_scope_needs_review"], 1)
+
+    def test_absence_from_benchmark_is_not_automatically_false_positive(self):
+        result = evaluate([row("latch", "latch", "latch.n.01", "a fastening")], [])
+        self.assertEqual(result["actual_only"][0]["classification"], "needs_review")
+        self.assertEqual(result["counts"]["true_false_positives"], 0)
+
+    def test_audited_out_of_scope_categories_are_separate(self):
+        actual = [row("extra", "extra", "extra.n.01", "extra"), row("noise", "noise", "noise.n.01", "noise")]
+        audit = {
+            ("extra", "word", "extra.n.01"): {"status": "validated_improvement", "reason": "independent evidence"},
+            ("noise", "word", "noise.n.01"): {"status": "false_positive", "reason": "wrong span"},
+        }
+        result = evaluate(actual, [], audit)
+        self.assertEqual(result["counts"]["validated_out_of_scope_improvements"], 1)
+        self.assertEqual(result["counts"]["true_false_positives"], 1)
+        self.assertEqual(result["metrics"]["audited_out_of_scope_precision"]["value"], 0.5)
 
     def test_run_is_reproducible_and_benchmark_read_only(self):
         benchmark_path = Path("pipeline_out/vocab_corrige.csv")
