@@ -783,7 +783,9 @@ def run(
     config.ensure_out_dir()
 
     if not llm_is_available():
-        print(f"  (LLM local injoignable à {config.OLLAMA_URL} : les acceptations "
+        llm_url = (config.CATGPT_BASE_URL if config.LLM_BACKEND == "catgpt"
+                   else config.OLLAMA_URL)
+        print(f"  (LLM {config.LLM_BACKEND} injoignable à {llm_url} : les acceptations "
               f"automatiques nécessitant un consensus LLM seront sautées ; "
               f"les concordances omw-fr/WoNeF pures restent possibles.)")
 

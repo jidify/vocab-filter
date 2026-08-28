@@ -106,7 +106,17 @@ def main() -> int:
              "'1-10', '1,4,7', combinable '1-3,7'. corpus/analyze/mwe/"
              "mwe_judge/select tournent toujours sur le livre entier.",
     )
+    parser.add_argument("--llm-backend", choices=["ollama", "catgpt"], default=None)
+    parser.add_argument("--llm-base-url", default=None,
+                        help="URL Ollama ou URL /v1 de CatGPT-Gateway")
+    parser.add_argument("--llm-model", default=None)
+    parser.add_argument("--catgpt-api-token", default=None)
+    parser.add_argument("--catgpt-timeout", type=float, default=None)
     args = parser.parse_args()
+
+    config.configure_llm(backend=args.llm_backend, base_url=args.llm_base_url,
+                         api_token=args.catgpt_api_token, model=args.llm_model,
+                         timeout=args.catgpt_timeout)
 
     import importlib
 

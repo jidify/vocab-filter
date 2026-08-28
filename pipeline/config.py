@@ -5,6 +5,7 @@ ce module doit pouvoir être importé instantanément par n'importe quel script,
 y compris des utilitaires de validation rapide.
 """
 
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -119,11 +120,16 @@ MIN_NOBS = 50           # échantillon Pknown jugé suffisant
 EXCLUDED_CEFR = {"A1", "A2"}
 
 # ------------------------------------------------------------------
-# LLM local (ollama)
+# LLM (Ollama local ou CatGPT-Gateway)
 # ------------------------------------------------------------------
 
-OLLAMA_URL = "http://192.168.1.28:11434"
-OLLAMA_MODEL = "mistral-small:24b"
+LLM_BACKEND = os.getenv("VOCAB_LLM_BACKEND", "ollama").strip().lower()
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://192.168.1.28:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral-small:24b")
+CATGPT_BASE_URL = os.getenv("CATGPT_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+CATGPT_API_TOKEN = os.getenv("CATGPT_API_TOKEN", "dummy123")
+CATGPT_MODEL = os.getenv("CATGPT_MODEL", "catgpt-browser")
+CATGPT_TIMEOUT = float(os.getenv("CATGPT_TIMEOUT", "300"))
 # Vérifié le 2026-08-25 sur l'hôte (`ollama list`) : avec format="json",
 # qwen3:14b et gpt-oss:20b renvoient un JSON vide ou du texte de raisonnement
 # non structuré (probablement leur "thinking" qui interfère avec le mode
@@ -131,6 +137,34 @@ OLLAMA_MODEL = "mistral-small:24b"
 # correctement à `format: "json"` — mistral-small:24b retenu par défaut
 # (bon compromis qualité/vitesse) ; gemma3:27b en repli si besoin.
 LLM_TEMPERATURE = 0.0
+
+
+def configure_llm(*, backend: str | None = None, base_url: str | None = None,
+                  api_token: str | None = None, model: str | None = None,
+                  timeout: float | None = None) -> None:
+    """Applique les options LLM du CLI avant l'import des étapes."""
+    global LLM_BACKEND, OLLAMA_URL, OLLAMA_MODEL
+    global CATGPT_BASE_URL, CATGPT_API_TOKEN, CATGPT_MODEL, CATGPT_TIMEOUT
+    if backend is not None:
+        if backend not in {"ollama", "catgpt"}:
+            raise ValueError(f"backend LLM inconnu : {backend}")
+        LLM_BACKEND = backend
+    if base_url is not None:
+        if LLM_BACKEND == "catgpt":
+            CATGPT_BASE_URL = base_url.rstrip("/")
+        else:
+            OLLAMA_URL = base_url.rstrip("/")
+    if api_token is not None:
+        CATGPT_API_TOKEN = api_token
+    if model is not None:
+        if LLM_BACKEND == "catgpt": CATGPT_MODEL = model
+        else: OLLAMA_MODEL = model
+    if timeout is not None:
+        CATGPT_TIMEOUT = timeout
+
+
+def llm_model() -> str:
+    return CATGPT_MODEL if LLM_BACKEND == "catgpt" else OLLAMA_MODEL
 
 # ------------------------------------------------------------------
 # Preuve française (repris de sense_in_context.py)
