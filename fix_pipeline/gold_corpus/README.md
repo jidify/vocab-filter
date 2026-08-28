@@ -9,6 +9,13 @@ sert qu'à ça — aucun scorer n'est fourni ici, c'est l'étape suivante.
 Livrable : `the_humans_gold_v0.jsonl` — un objet JSON par segment retenu, avec la
 liste de ses spans-repères (`gold_spans`).
 
+**Corpus gelé en v0 à partir du 2026-08-28** (fin de la Phase 0 du plan
+`plan_detection_benchmark_funnel.md`) : plus aucune modification de contenu
+(segments, spans, offsets, catégories) après cette date. Seul l'ajout du champ
+`role` et du champ `nested_in` (voir plus bas) a eu lieu en Phase 0 ; toute
+évolution ultérieure du corpus est un nouveau v1, pas une modification de ce
+fichier.
+
 ## Segmentation
 
 Segments extraits via le chemin de production exact : `pipeline.corpus.load_segments()`
@@ -49,6 +56,38 @@ sous-chaîne, jamais tapés à la main.
 Chaque span porte aussi `edge_case` (bool) + `edge_type` quand la difficulté est
 structurelle plutôt que lexicale : `hyphen_modifier`, `possessive_boundary`,
 `dialogue_dash`, `bracket_nonverbal`, `hyphen_tokenization`.
+
+## Rôles (ajoutés en Phase 0, 2026-08-28)
+
+Chaque span **positif** (`is_gold: true`) porte en plus un champ `role`, distinct
+de la catégorie linguistique ci-dessus (les catégories ne sont pas modifiées) :
+
+| `role` | Sens | Mappé depuis |
+|---|---|---:|
+| `lexical_candidate` | Unité à extraire pour le vocabulaire | `nominal_compound`, `phrasal_verb_separable`, `phrasal_verb_inseparable`, `idiom` |
+| `protective_span` | Empêche l'export d'un fragment erroné (ex. entité tronquée) | `multi_token_entity` |
+| `pedagogical_word` | Mot simple à signaler à un apprenant | `simple_word` |
+
+Le mapping est purement dérivé de la catégorie, sans exception : voir la section
+« 3 fonctions différentes » du plan (`plan_detection_benchmark_funnel.md`).
+Les spans `hard_negative` (`is_gold: false`) ne portent pas de champ `role` —
+il n'a de sens que pour les positifs.
+
+| `role` | Comptes |
+|---|---:|
+| `lexical_candidate` | 71 |
+| `protective_span` | 4 |
+| `pedagogical_word` | 7 |
+
+### Spans imbriqués acceptables
+
+Un seul cas dans le corpus (vérifié mécaniquement, aucun autre chevauchement
+gold/gold) : idx 75, `duplex tenement apartment` (44–69) est entièrement inclus
+dans `ground-floor/basement duplex tenement apartment` (22–69). Les deux sont
+gold, à des granularités différentes — ce n'est pas une erreur de l'un ou
+l'autre. Documenté explicitement par un champ `nested_in` sur le span le plus
+court (`duplex tenement apartment`), pointant vers la surface du span englobant,
+sans toucher aux champs `category`/offsets/`note` existants.
 
 ## Comptes
 
