@@ -2,7 +2,18 @@
 
 ## 0. Objectif, règle d'or et mesure de départ
 
-L'objectif est que le pipeline produise automatiquement `pipeline_out/vocab.csv` avec une qualité lexicale, sémantique, traductionnelle et pédagogique équivalente à `pipeline_out/vocab_corrige.csv`. Le benchmark est une **vérité d'évaluation** : il ne doit jamais être lu par le pipeline de production, copié dans les magasins permanents ni transformé en liste d'exceptions propre à *The Humans*.
+L'objectif est que le pipeline produise automatiquement `pipeline_out/vocab.csv` avec une qualité lexicale, sémantique, traductionnelle et pédagogique au moins équivalente à `pipeline_out/vocab_corrige.csv`.
+
+Le benchmark a été construit manuellement **à partir du périmètre des lignes déjà présentes dans `vocab.csv`**. Il est donc une référence de correction forte pour les unités qu'il couvre, mais **pas un inventaire exhaustif de toutes les unités pertinentes du livre**. Une unité absente du benchmark n'est pas automatiquement un faux positif : une correction peut légitimement découvrir un véritable idiome, un véritable phrasal verb ou un mot simple utile qui n'était pas dans le périmètre initial corrigé. Ces découvertes constituent une qualité supérieure au benchmark et doivent être conservées lorsqu'elles sont lexicalement, sémantiquement et pédagogiquement validées. `latch` est le cas témoin obligatoire pour les mots simples récupérés.
+
+Le benchmark est une **vérité d'évaluation sur son périmètre**, jamais une liste blanche de production : il ne doit pas être lu par le pipeline de production, copié dans les magasins permanents ni transformé en liste d'exceptions propre à *The Humans*.
+
+### Contraintes de conception confirmées
+
+- La machine de production dédiée dispose d'une **RTX 5090**. Le GPU est une ressource normale de production, pas une hypothèse optionnelle ni un coût d'infrastructure discriminant.
+- Le temps CPU/GPU et le niveau de ressources du pipeline actuel **ne sont pas des critères d'exclusion** pour les solutions de remplacement. Une solution plus exigeante est recevable si elle améliore réellement la qualité et reste exploitable sur la RTX 5090.
+- La comparaison `pipeline_out/spacy_quick_compare/report.md` montre qu'aucun des modèles spaCy `sm`, `lg` ou `trf` ne fournit seul une qualité suffisante pour assurer la couverture et les bornes des unités lexicales à extraire/filtrer. Le gain NER de `trf` est utile, mais ne corrige pas la faiblesse générale des composés et ne justifie pas de traiter spaCy comme source de vérité.
+- En conséquence, le choix d'architecture doit être fait sur la qualité bout en bout (rappel des unités, exactitude des spans, POS/sens et taux de révision), et non sur la proximité avec l'architecture ou le coût de calcul actuels. spaCy peut rester une source de signaux, mais toute alternative GPU pertinente — modèle transformer spécialisé, proposition contextuelle/LLM locale, ou combinaison de plusieurs détecteurs — doit être évaluée sans pénalité liée aux ressources.
 
 Ordre impératif des travaux :
 
@@ -14,7 +25,7 @@ Ordre impératif des travaux :
 6. décider si l'unité représente une difficulté pédagogique ;
 7. exporter ou envoyer en révision, sans suppression silencieuse.
 
-Baseline observée le 2026-08-28 (les nombres doivent être recalculés par l'outil d'évaluation, car les deux CSV contiennent des formes canoniques dupliquées) :
+Baseline observée le 2026-08-28 (les nombres doivent être recalculés par l'outil d'évaluation, car les deux CSV contiennent des formes canoniques dupliquées). Les unités seulement présentes dans le résultat courant sont des **écarts à expertiser**, pas des erreurs par définition :
 
 - `vocab.csv` : 1 091 lignes ; benchmark : 1 052 lignes ;
 - comparaison grossière `(canonical_form, unit_type)` : 43 unités seulement dans le résultat courant, dont 34 MWE et 9 mots ; 11 MWE seulement dans le benchmark ;
@@ -25,7 +36,7 @@ Définition opérationnelle de « qualité équivalente » pour le gate final (Q
 
 | Dimension | Seuil final minimal |
 |---|---:|
-| précision des unités conservées | 97 % |
+| précision des unités couvertes par le benchmark | 97 % |
 | rappel des unités du benchmark | 97 % |
 | exactitude POS des unités appariées | 99 % |
 | exactitude d'identité de sens | 97 % |
@@ -38,20 +49,31 @@ Définition opérationnelle de « qualité équivalente » pour le gate final (Q
 
 Ces seuils ne permettent pas de compenser un défaut critique par de bons résultats ailleurs. Une unité incertaine peut être envoyée en révision et sortir du dénominateur « non révisé », mais Q0-1 doit aussi publier le taux de révision : il ne doit pas dépasser 5 % des candidats finaux, afin d'éviter d'atteindre artificiellement la précision en différant toutes les décisions difficiles.
 
+### Politique d'évaluation des écarts hors benchmark
+
+Q0-1 et tous les rapports aval doivent classer chaque unité produite mais absente du benchmark dans l'une de ces catégories :
+
+1. **amélioration hors périmètre** : unité attestée dans le livre, span correct, canon/POS/sens cohérents, traduction fiable et difficulté pédagogique réelle ; elle est conservée et comptée séparément comme gain au-delà du benchmark ;
+2. **variante de représentation** : même unité que le benchmark, mais découpage, canon ou traduction alternative acceptable ; elle n'est pas pénalisée avant adjudication ;
+3. **révision nécessaire** : plausibilité réelle mais preuves insuffisantes ; elle va dans la file de révision ;
+4. **régression/faux positif** : mauvais span, mélange de sens, combinaison libre présentée comme lexicalisée, mauvais sens ou absence de valeur pédagogique ; elle doit être corrigée ou exclue.
+
+Une amélioration hors périmètre doit être validée indépendamment du modèle qui l'a proposée : preuve lexicale externe lorsqu'elle existe, décision contextuelle distincte, cohérence avec les occurrences et tests négatifs. Le rapport publie deux résultats complémentaires : **qualité sur le périmètre du benchmark** et **nombre/précision auditée des améliorations hors périmètre**.
+
 ### Correction Q0-1 — construire l'évaluateur de référence
 
 - **Pré-requis** : les deux CSV existent ; aucune correction fonctionnelle n'a encore besoin d'être appliquée.
-- **Description** : créer un comparateur reproductible qui normalise Unicode/casse/apostrophes, gère les homonymes et compare séparément inventaire, spans/surfaces, POS, identité de sens, définition, traduction et décision garder/exclure. Il doit produire un JSON de métriques et un rapport Markdown, sans modifier le benchmark.
-- **Résultat attendu** : `pipeline_out/fix_quality_metrics.json` et `pipeline_out/fix_quality_report.md` donnent la baseline, les écarts par étape et une liste de cas nommés. Les métriques minimales sont : précision/rappel des unités, précision MWE, rappel MWE, exactitude POS, exactitude du sens, exactitude de la définition, couverture FR, cohérence sens–définition–FR, précision de la sélection pédagogique et taille de la file de révision.
-- **Vérifications** : le rapport retrouve au minimum les écarts `come to`, `let someone go`, `burn out`, `latch`, `affection`, `intelligible`, `facility`, `frosting`, `York` et les 99 traductions officielles manquantes. Un test avec deux lignes homonymes prouve que le comparateur ne les écrase pas dans un dictionnaire indexé seulement par `canonical_form`.
+- **Description** : créer un comparateur reproductible qui normalise Unicode/casse/apostrophes, gère les homonymes et compare séparément inventaire, spans/surfaces, POS, identité de sens, définition, traduction et décision garder/exclure. Il doit produire un JSON de métriques et un rapport Markdown, sans modifier le benchmark. Il ne doit jamais assimiler automatiquement « absent du benchmark » à « faux positif » et applique la politique des écarts hors benchmark ci-dessus.
+- **Résultat attendu** : `pipeline_out/fix_quality_metrics.json` et `pipeline_out/fix_quality_report.md` donnent la baseline, les écarts par étape et une liste de cas nommés. Les métriques minimales sont : précision/rappel sur le périmètre couvert, précision MWE, rappel MWE, exactitude POS, exactitude du sens, exactitude de la définition, couverture FR, cohérence sens–définition–FR, précision de la sélection pédagogique, taille de la file de révision, nombre d'améliorations hors périmètre validées et précision auditée de ces ajouts.
+- **Vérifications** : le rapport retrouve au minimum les écarts `come to`, `let someone go`, `burn out`, `latch`, `affection`, `intelligible`, `facility`, `frosting`, `York` et les 99 traductions officielles manquantes. `latch` est classé comme récupération/amélioration attendue, jamais comme faux positif du seul fait de son absence du benchmark. Un test avec deux lignes homonymes prouve que le comparateur ne les écrase pas dans un dictionnaire indexé seulement par `canonical_form`.
 - **Gate qualité** : la baseline générée est stable sur deux exécutions et toute différence avec les comptes ci-dessus est expliquée par le rapport.
 
 ### Correction Q0-2 — créer un corpus de régression stratifié
 
 - **Pré-requis** : Q0-1 validée.
-- **Description** : extraire des artefacts existants un jeu de cas minimal, sans utiliser les réponses du benchmark à l'exécution du pipeline. Les attentes vivent uniquement dans les tests. Strates : MWE fusionnées, MWE manquées, polysémie MWE, mauvais POS/lemme, sens WordNet erroné, entités/composés, `aucun_sens_adapte`, traduction transparente, traduction pending.
+- **Description** : extraire des artefacts existants un jeu de cas minimal, sans utiliser les réponses du benchmark à l'exécution du pipeline. Les attentes vivent uniquement dans les tests. Strates : MWE fusionnées, MWE manquées, polysémie MWE, mauvais POS/lemme, sens WordNet erroné, entités/composés, `aucun_sens_adapte`, traduction transparente, traduction pending et unités valides hors périmètre.
 - **Résultat attendu** : une suite de tests ciblés donne une localisation de régression par étape et un test end-to-end compare le CSV final au benchmark.
-- **Vérifications** : chaque anomalie citée en Q0-1 appartient à au moins une strate ; les tests savent tourner hors réseau avec réponses LLM figées et disposent séparément d'un mode d'évaluation réel non déterministe.
+- **Vérifications** : chaque anomalie citée en Q0-1 appartient à au moins une strate ; `latch` et au moins un véritable idiome/phrasal verb hors benchmark testent la conservation des améliorations ; les tests savent tourner hors réseau avec réponses LLM figées et disposent séparément d'un mode d'évaluation réel non déterministe.
 - **Gate qualité** : tous les défauts connus échouent avant correction pour la bonne raison ; aucun test ne valide une simple chaîne propre au livre sans invariant généralisable.
 
 ## 1. Correction de S1 — analyse des occurrences
@@ -59,7 +81,7 @@ Ces seuils ne permettent pas de compenser un défaut critique par de bons résul
 ### Correction S1-1 — préserver forme, lemme, POS et alternatives d'analyse
 
 - **Pré-requis** : Q0-1 et Q0-2 validées ; `pipeline_out/occurrences.jsonl` reste la source auditée.
-- **Description** : ne plus faire du couple spaCy `(lemma, wn_pos)` une vérité irrévocable. Conserver dans chaque occurrence la surface, le POS spaCy, le lemme spaCy, les alternatives plausibles issues de la morphologie et les indicateurs de forme fléchie/nominalisée. Ajouter un identifiant de version d'analyse.
+- **Description** : ne plus faire du couple spaCy `(lemma, wn_pos)` une vérité irrévocable. Conserver dans chaque occurrence la surface, les sorties spaCy comme signaux sourcés, les alternatives plausibles issues de la morphologie et d'une analyse contextuelle indépendante, ainsi que les indicateurs de forme fléchie/nominalisée. Ajouter un identifiant de version d'analyse. Le recours à un analyseur plus lourd sur GPU est explicitement autorisé.
 - **Résultat attendu** : S5 pourra ouvrir un inventaire alternatif sans reparcourir le livre. `frosting`, `creeping`, `facilities`, `stressing` et `bitch` conservent les analyses permettant respectivement les sens `frosting.n.01`, `creeping.s.01`, `facilities.n.02`, `de_stress.v.01` et `bitch.n.01`.
 - **Vérifications** : dans `occurrences.jsonl`, chaque cas possède sa surface exacte et au moins l'analyse alternative attendue ; les offsets pointent toujours exactement dans le segment source ; les tests existants de zones et d'inventaire restent verts.
 - **Qualité estimée** : prépare la correction des 14 erreurs POS/sens mesurées, sans gain final tant que S5 n'utilise pas les alternatives.
@@ -67,10 +89,10 @@ Ces seuils ne permettent pas de compenser un défaut critique par de bons résul
 ### Correction S1-2 — annoter les composés et entités multi-tokens
 
 - **Pré-requis** : S1-1 validée.
-- **Description** : produire des candidats de composé/entité avec spans exacts, sans supprimer les tokens simples à S1. Combiner dépendances spaCy, NER et patrons nominaux ; conserver score et provenance.
+- **Description** : produire à haut rappel des candidats de composé/entité avec spans exacts, sans supprimer les tokens simples à S1. Combiner au minimum ressources lexicales, patrons de surface/syntaxiques et proposition contextuelle indépendante ; les dépendances et le NER spaCy ne sont qu'une source parmi d'autres et leur absence ne peut écarter un candidat. Benchmarker des solutions GPU plus riches (transformer spécialisé, LLM local structuré ou ensemble) sur Q0-2 et retenir celle qui satisfait les seuils de qualité, même si elle consomme davantage que le pipeline actuel. Conserver score, provenance et désaccords entre sources.
 - **Résultat attendu** : `New York`, `Virgin Mary`, `ranch dip`, `observation deck`, `nursing home` et `crystal ball` sont visibles comme spans candidats dans un artefact auditable, tout en gardant leurs tokens composants disponibles jusqu'à S4.
-- **Vérifications** : les spans et offsets sont exacts ; `York`, `Virgin`, `ranch`, `observation`, `nursing` et `crystal` ne peuvent plus être validés comme unités autonomes sans que le candidat couvrant soit examiné ; aucune réservation n'a encore lieu.
-- **Qualité estimée** : couvre directement les 6 faux mots/composés les plus visibles du benchmark.
+- **Vérifications** : les spans et offsets sont exacts ; `York`, `Virgin`, `ranch`, `observation`, `nursing` et `crystal` ne peuvent plus être validés comme unités autonomes sans que le candidat couvrant soit examiné ; aucune réservation n'a encore lieu. Le corpus de régression contient aussi les erreurs partagées par les trois modèles spaCy (`attention shifts`, ponctuation traversée, `ground-floor apartment`) et des unités pertinentes qu'ils manquent, afin d'interdire qu'un simple changement `sm` → `lg`/`trf` soit considéré comme une correction suffisante.
+- **Qualité estimée** : couvre directement les 6 faux mots/composés les plus visibles du benchmark et remplace l'hypothèse invalidée selon laquelle la couverture pourrait être assurée par spaCy seul.
 
 ### Correction S1-3 — fiabiliser et enrichir les candidats VPC
 
@@ -92,9 +114,9 @@ Ces seuils ne permettent pas de compenser un défaut critique par de bons résul
 ### Correction S2-2 — augmenter le rappel des MWE du benchmark
 
 - **Pré-requis** : S2-1 validée afin que le gain de rappel ne recrée pas de sur-fusion.
-- **Description** : fusionner trois sources de candidats : lexiques MWE, syntaxe VPC/composés et proposition contextuelle contrôlée. Permettre les slots possessifs/pronominaux et flexions, avec provenance explicite.
+- **Description** : fusionner trois sources de candidats : lexiques MWE, syntaxe VPC/composés et proposition contextuelle contrôlée. Permettre les slots possessifs/pronominaux et flexions, avec provenance explicite. Le benchmark mesure le rappel sur son périmètre, mais ne limite jamais la découverte de MWE supplémentaires authentiques.
 - **Résultat attendu** : les candidats couvrent `let it go`, `come back to earth`, `get worked up`, `at ease`, `burn out`, `put to rest`, `steer clear of`, `could care less` et `tighten our belts` sous un canon approprié.
-- **Vérifications** : présence des neuf familles dans `mwe_candidates.jsonl`, avec surface et offsets exacts ; chaque nouveau patron comporte au moins un test négatif compositionnel ; le rappel MWE contre le benchmark augmente sans baisse de précision supérieure au seuil défini par Q0-1.
+- **Vérifications** : présence des neuf familles dans `mwe_candidates.jsonl`, avec surface et offsets exacts ; chaque nouveau patron comporte au moins un test négatif compositionnel ; le rappel MWE contre le benchmark augmente sans baisse de précision supérieure au seuil défini par Q0-1 ; les MWE supplémentaires validées sont comptées comme améliorations hors périmètre et conservées.
 
 ### Correction S2-3 — normaliser l'identité d'occurrence sans décider du sens
 
@@ -216,7 +238,7 @@ Ces seuils ne permettent pas de compenser un défaut critique par de bons résul
 ### Correction S7-1 — ajouter une porte d'éligibilité pédagogique au niveau du sens
 
 - **Pré-requis** : traductions S6 complètes et identités de sens stables.
-- **Description** : décider garder/exclure avec traduction officielle, transparence orthographique, faux amis, fréquence/CEFR, surprise du sens et intérêt de la MWE. Une identité EN=FR n'est pas automatiquement exclue si elle masque un faux ami ou une difficulté, mais les cognats directs sans difficulté le sont.
+- **Description** : décider garder/exclure avec traduction officielle, transparence orthographique, faux amis, fréquence/CEFR, surprise du sens et intérêt de la MWE. Une identité EN=FR n'est pas automatiquement exclue si elle masque un faux ami ou une difficulté, mais les cognats directs sans difficulté le sont. L'absence du benchmark n'est jamais un critère d'exclusion : toute unité hors périmètre passe la même porte pédagogique et peut améliorer le résultat final.
 - **Résultat attendu** : `affection=affection`, `intelligible=intelligible` et les cognats transparents comparables sont exclus ; les faux amis comme `sensible` restent évalués sur leur sens réel ; les MWE compositionnelles/triviales du benchmark sont retirées.
 - **Vérifications** : les 53 identités exactes initiales sont classées avec raison ; fixtures positives/négatives ; précision de sélection pédagogique contre le benchmark au seuil Q0-1.
 
@@ -241,6 +263,7 @@ Ces seuils ne permettent pas de compenser un défaut critique par de bons résul
 - **Résultat attendu** : qualité globale équivalente au benchmark, écarts résiduels explicitement classés comme variantes acceptables ou révision humaine ; aucun défaut critique connu.
 - **Vérifications finales obligatoires** :
   - `latch` conservé et correctement routé ;
+  - toute MWE ou tout mot simple absent du benchmark mais lexicalement et pédagogiquement valide est conservé, identifié comme amélioration hors périmètre et n'est pas compté comme faux positif ;
   - aucune ligne `come to` ne mélange les cinq surfaces fautives ;
   - `let it go`, `come back to earth`, `could care less`, `at ease`, `burn out`, `put to rest`, `steer clear of`, `tighten one's belt` présents si éligibles ;
   - sens distincts de `burn out` avec IDs distincts ;
@@ -261,7 +284,7 @@ Chaque correction est un lot indépendant. Elle doit :
 3. modifier le minimum d'étapes nécessaire, sans exception codée pour une ligne du benchmark ;
 4. régénérer uniquement les artefacts requis en respectant les digests et caches ;
 5. exécuter tests ciblés, tests de non-régression et comparateur Q0-1 ;
-6. publier un mini-rapport avant/après avec gains, régressions et cas encore ouverts ;
+6. publier un mini-rapport avant/après avec gains sur le périmètre, améliorations hors périmètre, régressions et cas encore ouverts ;
 7. ne passer au lot suivant que lorsque le `Résultat attendu` et toutes les `Vérifications` du lot sont satisfaits.
 
 Une hausse du score global ne suffit jamais si elle masque une régression critique. Les gates nommés (`latch`, séparation des MWE, absence de suppression silencieuse, traduction complète) sont bloquants.
