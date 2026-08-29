@@ -11,13 +11,15 @@ mwe_judge (S3) — le premier passage select avant mwe/mwe_judge était mort
 (voir le plan, point 6) puisqu'il ne pouvait réserver aucun span MWE tant
 que S2/S3 n'avaient pas tourné :
 
-S6b tourne en deux temps : sense_fr_frontier (passe primaire et
+S5 resout maintenant conjointement lemme/POS/sens dans `senses`, a partir
+des analyses sourcees de S1. S6b tourne ensuite en deux temps : sense_fr_frontier (passe primaire et
 contextuelle, modèle frontière via LiteLLM — voir sa docstring) puis
 sense_fr_adjudicate (arbitrage hors ligne, Stage A seul par défaut ;
 Stage B/C restent manuels, --with-backtranslation/--with-judge). Le chemin
 ollama local historique (pipeline/sense_fr.py::classify_synset_key) reste
 disponible via `uv run python -m pipeline.sense_fr --retry-pending` mais
-n'est plus dans l'enchaînement par défaut. Les deux étapes S6b sont
+n'est plus dans l'enchaînement par défaut. `sense_fr_reassign` suit
+l'adjudication comme filet structurel standard. Les étapes frontière sont
 SAUTÉES proprement (pas d'échec du run) si aucune clé API LiteLLM n'est
 disponible (ANTHROPIC_API_KEY/OPENAI_API_KEY, .env ou environnement) —
 export retombe alors sur ce qui est déjà dans data/sense_fr.jsonl.
@@ -44,6 +46,7 @@ STAGES = [
     ("senses", "pipeline.senses"),
     ("sense_fr_frontier", "pipeline.sense_fr_frontier"),   # S6b-1 : passe primaire contextuelle
     ("sense_fr_adjudicate", "pipeline.sense_fr_adjudicate"),  # S6b-2 : arbitrage hors ligne (Stage A)
+    ("sense_fr_reassign", "pipeline.sense_fr_reassign"),  # filet structurel; S5 conjoint vit dans senses
     ("export", "pipeline.export"),
 ]
 
@@ -52,9 +55,9 @@ STAGES = [
 # externe. sense_fr_adjudicate tourne par défaut en Stage A seul (aucun
 # appel LLM), donc n'échoue en pratique jamais ici ; inclus quand même par
 # prudence si les valeurs par défaut changent un jour.
-FRONTIER_STAGES = {"sense_fr_frontier", "sense_fr_adjudicate"}
+FRONTIER_STAGES = {"sense_fr_frontier", "sense_fr_adjudicate", "sense_fr_reassign"}
 
-# Lot 6 (plan, Partie 3) : --tranches ne gouverne QUE ces quatre étapes —
+# Lot 6 (plan, Partie 3) : --tranches borne la chaine avale via `senses` —
 # corpus/analyze/mwe/mwe_judge/select tournent TOUJOURS sur le livre entier,
 # jamais par tranche (l'inventaire doit être figé une seule fois, voir la
 # Partie 3 et le principe directeur en tête du plan). Mécaniquement, seul

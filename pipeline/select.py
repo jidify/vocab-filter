@@ -406,6 +406,7 @@ def run() -> int:
                 "pos": entry["wn_pos"],
                 "sense_id": None,
                 "segment_idx": occ["segment_idx"],
+                "surface": occ["surface"],
                 "start_char": occ["start_char"],
                 "end_char": occ["end_char"],
                 "zone_id": zone_id,

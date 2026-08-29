@@ -71,7 +71,7 @@ import litellm
 from nltk.corpus import wordnet as nwn
 from pydantic import BaseModel
 
-from pipeline import config, senses, sense_fr, verify_fr_lock
+from pipeline import config, inventory as lexical_inventory, senses, sense_fr, verify_fr_lock
 
 # ============================================================
 # Périmètre — voir la docstring du module pour la justification de
@@ -375,7 +375,9 @@ def apply_decision(
             )
         chosen = next((c for c in inventory if c["sense_id"] == new_key), None)
         definition_en = chosen["definition"] if chosen else None
-        store[new_key] = _build_reassigned_entry(entry, decision, new_key, definition_en, existing_target)
+        store[new_key] = _build_reassigned_entry(
+            entry, decision, new_key, definition_en, existing_target, inventory
+        )
         store[entry["key"]] = {**entry, "agreement": f"reassigne_vers:{new_key}"}
         return "reassigne", None
 
@@ -384,7 +386,7 @@ def apply_decision(
 
 def _build_reassigned_entry(
     entry: dict, decision: ReassignedDecision, new_key: str, definition_en: str | None,
-    existing_target: dict | None,
+    existing_target: dict | None, inventory: list[dict],
 ) -> dict:
     """`existing_target` : entrée déjà présente sous `new_key`, si elle existe
     et n'est PAS verrouillée (voir run() — jamais appelé sinon). Ses
@@ -414,6 +416,14 @@ def _build_reassigned_entry(
         },
         "decided_at": date.today().isoformat(), "decided_by": "auto_joint",
         "note": decision.reason,
+        "reassignment_provenance": {
+            "initial_key": entry["key"],
+            "initial_pos": entry.get("pos"),
+            "selected_key": new_key,
+            "selected_pos": new_key.split(".")[-2],
+            "reason": decision.reason,
+            "inventory_sense_ids": [c["sense_id"] for c in inventory],
+        },
     }
 
 
@@ -459,6 +469,9 @@ def write_audit_csv(rows: list[dict]) -> None:
 
 def run(model: str = config.SENSE_FR_FRONTIER_MODEL, dry_run: bool = False) -> int:
     config.require_frontier_model(model)
+    lexical_inventory.verify_consumer(
+        config.SENSES_INVENTORY_HASH_PATH, "sense_fr_reassign"
+    )
     store = sense_fr.load_store()
     targets = select_targets(store)
     print(f"{len(targets)} entrée(s) pending structurelle(s) à réassigner "

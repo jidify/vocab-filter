@@ -59,10 +59,11 @@ def compute_hash(rows: list[dict]) -> str:
     import json
     pairs = sorted(
         (r["occurrence_id"], r["unit_key"],
-         json.dumps({"analysis": r.get("analysis"),
+         json.dumps({"surface": r.get("surface"),
+                     "analysis": r.get("analysis"),
                      "multi_token_candidates": r.get("multi_token_candidates", [])},
                     ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-         if "analysis" in r or "multi_token_candidates" in r else None)
+         if "surface" in r or "analysis" in r or "multi_token_candidates" in r else None)
         for r in rows
     )
     digest = hashlib.sha256()

@@ -29,6 +29,7 @@ GlossBERT et le meilleur synset "preuve FR" diffèrent (désaccord).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
@@ -41,6 +42,7 @@ from pipeline import atomic, config, inventory, llm
 from pipeline.corpus import Segment, load_segments
 
 MARGIN_THRESHOLD = 0.15
+SENSE_RESOLUTION_VERSION = "joint-lemma-pos-sense-v1"
 
 _gloss_model = None
 _EN = None
@@ -108,6 +110,93 @@ def get_synsets(word, pos):
                 results.append(synset)
                 break
     return results
+
+
+def controlled_analysis_inventory(occurrence: dict) -> list[dict]:
+    """Ouvre WordNet uniquement via les analyses sourcees par S1."""
+    analysis = occurrence.get("analysis") or {}
+    primary = analysis.get("primary") or {
+        "lemma": occurrence.get("canonical_form"),
+        "wn_pos": occurrence.get("pos"),
+        "source": "legacy_inventory",
+    }
+    hypotheses = [primary, *(analysis.get("alternatives") or [])]
+    opened: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for rank, hypothesis in enumerate(hypotheses):
+        lemma = (hypothesis.get("lemma") or "").strip().casefold()
+        pos = hypothesis.get("wn_pos")
+        if not lemma or pos not in {"n", "v", "a", "s", "r"}:
+            continue
+        normalized_pos = "a" if pos == "s" else pos
+        key = (lemma, normalized_pos)
+        if key in seen:
+            continue
+        synsets = get_synsets(lemma, normalized_pos)
+        if not synsets:
+            continue
+        seen.add(key)
+        opened.append({
+            "lemma": lemma,
+            "pos": normalized_pos,
+            "source": hypothesis.get("source") or ("primary" if rank == 0 else "alternative"),
+            "analysis_rank": rank,
+            "synset_ids": [synset.name() for synset in synsets],
+        })
+    return opened
+
+
+def resolution_digest(inventory_digest: str) -> str:
+    payload = f"{inventory_digest}\n{SENSE_RESOLUTION_VERSION}\n"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def resolve_joint_occurrence(occurrence: dict, segments: list[Segment]) -> dict | None:
+    """Choisit conjointement lemme, POS et sens dans l'inventaire S1 borne."""
+    opened = controlled_analysis_inventory(occurrence)
+    if not opened:
+        return None
+    evaluated: list[tuple[float, int, dict, dict]] = []
+    for hypothesis in opened:
+        kwargs = {"allow_arbitration": False}
+        if occurrence.get("surface"):
+            kwargs["target_surface"] = occurrence["surface"]
+        record = analyze_occurrence(
+            hypothesis["lemma"], hypothesis["pos"], segments,
+            occurrence["segment_idx"], **kwargs,
+        )
+        if record is None or record.get("best_sense") == "aucun_sens_adapte":
+            continue
+        allowed = set(hypothesis["synset_ids"])
+        if record.get("best_sense") not in allowed:
+            continue
+        top_score = max(
+            (float(c.get("final_score", 0.0)) for c in record.get("candidates", [])),
+            default=0.0,
+        )
+        evaluated.append((top_score, -hypothesis["analysis_rank"], hypothesis, record))
+    if not evaluated:
+        return None
+    _, _, chosen, record = max(evaluated, key=lambda item: (item[0], item[1]))
+    initial = opened[0]
+    resolved_lemma = record["word"]
+    record["word"] = occurrence.get("canonical_form") or initial["lemma"]
+    record["resolved_lemma"] = resolved_lemma
+    record["joint_resolution"] = {
+        "version": SENSE_RESOLUTION_VERSION,
+        "initial_analysis": {
+            "lemma": initial["lemma"], "pos": initial["pos"], "source": initial["source"],
+        },
+        "selected_analysis": {
+            "lemma": chosen["lemma"], "pos": chosen["pos"], "source": chosen["source"],
+        },
+        "reassigned": (chosen["lemma"], chosen["pos"]) != (initial["lemma"], initial["pos"]),
+        "reason": "meilleur score contextuel parmi les inventaires WordNet autorises",
+        "allowed_sense_ids": chosen["synset_ids"],
+    }
+    if record["best_sense"] not in set(chosen["synset_ids"]):
+        raise ValueError(f"sense_id hors inventaire controle: {record['best_sense']}")
+    return record
 
 
 def get_synonyms(synset):
@@ -442,8 +531,8 @@ def compute_fr_scores(word, pos, synsets, french, claimed):
 # GlossBERT
 # ============================================================
 
-def glossbert_scores(word, pos, context_text, restrict, synsets):
-    located = locate_target_word(word, pos, context_text, restrict)
+def glossbert_scores(word, pos, context_text, restrict, synsets, target_surface=None):
+    located = locate_target_word(target_surface or word, pos, context_text, restrict)
     if located is None:
         return {}, None
     start, end, surface = located
@@ -495,7 +584,8 @@ def arbitrate(word, pos, context_text, synsets):
 # ============================================================
 
 def analyze_occurrence(
-    word: str, pos: str, segments: list[Segment], seg_idx: int, allow_arbitration: bool = True
+    word: str, pos: str, segments: list[Segment], seg_idx: int, allow_arbitration: bool = True,
+    target_surface: str | None = None,
 ) -> dict | None:
     synsets = get_synsets(word, pos)
     if not synsets:
@@ -510,11 +600,13 @@ def analyze_occurrence(
         # jamais le résultat (un seul candidat gagne toujours), donc
         # coûterait un forward BERT pour rien. ~21% des occurrences du
         # livre sont dans ce cas (mesuré sur The Humans).
-        located = locate_target_word(word, pos, context_text, restrict)
+        located = locate_target_word(target_surface or word, pos, context_text, restrict)
         surface = located[2] if located else None
         gloss_scores: dict[str, float] = {}
     else:
-        gloss_scores, surface = glossbert_scores(word, pos, context_text, restrict, synsets)
+        gloss_scores, surface = glossbert_scores(
+            word, pos, context_text, restrict, synsets, target_surface=target_surface
+        )
 
     by_idx, _ = _segment_lookup(segments)
     french = by_idx[seg_idx].fr or ""
@@ -789,7 +881,8 @@ def load_word_occurrences_by_unit_key() -> dict[str, list[dict]]:
     return by_unit_key
 
 
-def load_existing_senses(current_digest: str) -> dict[str, dict]:
+def load_existing_senses(current_digest: str,
+                         current_resolution_digest: str | None = None) -> dict[str, dict]:
     """occurrence_id -> enregistrement, pour la fusion incrémentale par
     tranche (Lot 6, Partie 3) : seuls les enregistrements dont
     `inventory_digest` correspond à l'inventaire COURANT sont réutilisables
@@ -816,6 +909,9 @@ def load_existing_senses(current_digest: str) -> dict[str, dict]:
                 continue
             occurrence_id = record.get("occurrence_id")
             if not occurrence_id or record.get("inventory_digest") != current_digest:
+                continue
+            if (current_resolution_digest is not None
+                    and record.get("resolution_digest") != current_resolution_digest):
                 continue
             kept[occurrence_id] = record
     return kept
@@ -886,6 +982,7 @@ def run(segment_idxs: set[int] | None = None, top_k: int | None = None) -> int:
     # d'inventaire (pipeline/inventory.py) plutôt que de désambiguïser contre
     # un selected_types.jsonl qu'on ne peut pas prouver à jour.
     digest = inventory.current_hash("senses")
+    s5_digest = resolution_digest(digest)
 
     with config.SELECTED_TYPES_PATH.open(encoding="utf-8") as f:
         types = [json.loads(l) for l in f]
@@ -897,7 +994,7 @@ def run(segment_idxs: set[int] | None = None, top_k: int | None = None) -> int:
     # à jour contre l'inventaire courant n'est jamais recalculé, tranche
     # demandée ou non — c'est ce qui rend un run répété sur le même
     # inventaire quasi gratuit d'une tranche à l'autre.
-    existing = load_existing_senses(digest)
+    existing = load_existing_senses(digest, s5_digest)
 
     segments = load_segments()
 
@@ -941,7 +1038,10 @@ def run(segment_idxs: set[int] | None = None, top_k: int | None = None) -> int:
         for occ_row in occ_rows:
             seg_idx = occ_row["segment_idx"]
             if use_full:
-                record = analyze_occurrence(t["lemma"], t["wn_pos"], segments, seg_idx)
+                joint_input = dict(occ_row)
+                joint_input.setdefault("canonical_form", t["lemma"])
+                joint_input.setdefault("pos", t["wn_pos"])
+                record = resolve_joint_occurrence(joint_input, segments)
             else:
                 synsets = get_synsets(t["lemma"], t["wn_pos"])
                 if not synsets:
@@ -968,6 +1068,7 @@ def run(segment_idxs: set[int] | None = None, top_k: int | None = None) -> int:
             # toujours.
             record["occurrence_id"] = occ_row["occurrence_id"]
             record["inventory_digest"] = digest
+            record["resolution_digest"] = s5_digest
             kept_records.append(record)
 
     # Lot 0 — écriture atomique (pipeline/atomic.py) : le fichier
