@@ -123,6 +123,43 @@ class S3JudgeOccurrencePromptTests(unittest.TestCase):
         self.assertEqual(batch_sizes, [2, 1])
         self.assertEqual(len(saved_stores[0]), 3)
 
+    def test_run_passes_fully_qualified_model_not_bare_model(self):
+        """Régression : run() passait task.bare_model ("catgpt-browser") à
+        judge_occurrences_batch/judge_occurrence, qui depuis le Lot U2
+        (client unifié) attendent "provider/modèle" (llm_client.call ne
+        prend plus de `backend=` séparé). Un modèle nu ne matche jamais
+        "catgpt/..." dans llm_litellm_catgpt.call_kwargs -> le provider
+        custom n'est jamais enregistré -> litellm.exceptions.BadRequestError
+        ("LLM Provider NOT provided") sur CHAQUE appel réel (mesuré en
+        conditions réelles avec catgpt/catgpt-browser)."""
+        task = _task("S3-judge-occurrence", batch=True, size=2, model="catgpt/catgpt-browser")
+        types = [
+            {"idiom": "turn off", "occurrences": [_occurrence(1)]},
+        ]
+        candidates_path = SimpleNamespace()
+        candidates_path.open = lambda **_: _Context(StringIO("\n".join(json.dumps(row) for row in types)))
+        seen_models = []
+
+        def fake_batch(items, _segments, **kwargs):
+            seen_models.append(kwargs.get("model"))
+            return {occ["occurrence_id"]: _normalize_for_run(idiom) for idiom, occ in items}
+
+        with patch("pipeline.corpus.load_segments", return_value=[
+            SimpleNamespace(idx=1, en="sentence 1")
+        ]), patch.object(mwe_judge.config, "MWE_CANDIDATES_PATH", candidates_path), \
+             patch.object(mwe_judge.config, "ensure_out_dir"), \
+             patch.object(mwe_judge, "task_config", return_value=task), \
+             patch.object(mwe_judge.mwe_stores, "load_occurrence_store", return_value={}), \
+             patch.object(mwe_judge.mwe_stores, "write_occurrence_store"), \
+             patch.object(mwe_judge, "judge_occurrences_batch", side_effect=fake_batch), \
+             patch.object(mwe_judge, "assign_sense_ids"), \
+             patch.object(mwe_judge, "assign_cluster_definitions"), \
+             patch.object(mwe_judge.atomic, "atomic_write_jsonl"), \
+             patch.object(mwe_judge, "write_confirmed_spans"):
+            self.assertEqual(mwe_judge.run(), 0)
+
+        self.assertEqual(seen_models, ["catgpt/catgpt-browser"])
+
 
 class _Context:
     def __init__(self, value): self.value = value

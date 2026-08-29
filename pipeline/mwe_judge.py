@@ -932,13 +932,13 @@ def run() -> int:
         if occurrence_batch_mode:
             decisions = judge_occurrences_batch(
                 [(idiom, occ) for idiom, occ, _ in pending_batch], segments_by_idx,
-                model=occurrence_task.bare_model,
+                model=occurrence_task.model,
             )
             n_occ_llm_calls += 1
         else:
             decisions = {
                 occ["occurrence_id"]: judge_occurrence(
-                    idiom, occ, segments_by_idx, model=occurrence_task.bare_model
+                    idiom, occ, segments_by_idx, model=occurrence_task.model
                 )
                 for idiom, occ, _ in pending_batch
             }
