@@ -17,6 +17,7 @@ from collections import defaultdict
 from nltk.corpus import wordnet as nwn
 
 from pipeline import atomic, config, llm, mwe_stores
+from pipeline.llm_tasks import TaskLlmConfig, effective_batch_size, task_config, use_batch_prompt
 
 VALID_LABELS = {"idiome", "phrasal_verb", "semi_fige", "littéral", "incertain"}
 
@@ -220,12 +221,15 @@ def occurrence_context_signature(idiom: str, occ: dict, segments_by_idx: dict) -
 
 
 def occurrence_store_key(idiom: str, occurrence_id: str, *, model: str | None = None,
-                         backend: str | None = None, context_signature: str = "") -> str:
+                         backend: str | None = None, context_signature: str = "",
+                         mode_batch: bool = False, batch_size: int = 1) -> str:
     """Clé protocolaire : les anciennes décisions sont auditables mais illisibles."""
     payload = {
         "prompt_version": S3_PROMPT_VERSION,
         "backend": backend or config.LLM_BACKEND,
         "model": model or config.llm_model(),
+        "mode_batch": mode_batch,
+        "batch_size": batch_size if mode_batch else 1,
         "schema_version": S3_DECISION_SCHEMA_VERSION,
         "canonical_form": idiom.casefold().strip(), "occurrence_id": occurrence_id,
         "context_signature": context_signature,
@@ -324,6 +328,20 @@ Réponds en JSON strict :
 {{"candidate_id": "<identifiant exact, ou null>", "custom_definition": "<définition si aucun candidat exact, sinon chaîne vide>", "occurrence_checks": [{{"occurrence_id": "<id>", "contradicts": false}}], "reason": "<justification brève>"}}
 """
 
+DEFINITION_BATCH_SYSTEM_PROMPT = DEFINITION_SYSTEM_PROMPT + (
+    " Tu reçois plusieurs clusters indépendants : compare uniquement les "
+    "occurrences et candidats du cluster portant le même cluster_id."
+)
+
+DEFINITION_BATCH_PROMPT_TEMPLATE = """Choisis séparément une définition pour les {count} clusters suivants.
+
+{items}
+
+Réponds en JSON strict avec ce schéma :
+{{"decisions":[{{"cluster_id":"<id exact>","candidate_id":"<identifiant exact ou null>","custom_definition":"<définition si aucun candidat exact, sinon chaîne vide>","occurrence_checks":[{{"occurrence_id":"<id>","contradicts":false}}],"reason":"<justification brève>"}}]}}
+Il doit y avoir exactement une décision par cluster_id, dans le même ordre.
+"""
+
 
 def definition_candidates(canonical_form: str, pos: str) -> list[dict]:
     """Inventaire exhaustif et dédupliqué des glosses disponibles."""
@@ -350,9 +368,8 @@ def definition_candidates(canonical_form: str, pos: str) -> list[dict]:
     return unique
 
 
-def choose_cluster_definition(canonical_form: str, pos: str, occurrences: list[dict],
-                              segments_by_idx: dict) -> dict:
-    """Choisit une glose après comparaison de tous les candidats/contexts."""
+def _definition_request(canonical_form: str, pos: str, occurrences: list[dict],
+                        segments_by_idx: dict, *, cluster_id: str | None = None) -> dict:
     candidates = definition_candidates(canonical_form, pos)
     occurrence_lines, occurrence_ids = [], []
     for occ in occurrences:
@@ -367,10 +384,17 @@ def choose_cluster_definition(canonical_form: str, pos: str, occurrences: list[d
         canonical_form=canonical_form, pos=pos, occurrences="\n".join(occurrence_lines),
         candidates="\n".join(candidate_lines) or "- (aucune entrée disponible)",
     )
-    try:
-        result = llm.call_json(prompt, system=DEFINITION_SYSTEM_PROMPT, timeout=120)
-    except llm.LLMError as exc:
-        result = {"candidate_id": None, "custom_definition": "", "reason": str(exc)}
+    return {
+        "cluster_id": cluster_id or f"{canonical_form}|{pos}|unit",
+        "canonical_form": canonical_form, "pos": pos, "occurrences": occurrences,
+        "candidates": candidates, "occurrence_ids": occurrence_ids, "prompt": prompt,
+    }
+
+
+def _definition_selection(request: dict, result: object) -> dict:
+    result = result if isinstance(result, dict) else {}
+    candidates = request["candidates"]
+    occurrence_ids = request["occurrence_ids"]
 
     by_id = {c["candidate_id"]: c for c in candidates}
     candidate_id = result.get("candidate_id")
@@ -386,10 +410,68 @@ def choose_cluster_definition(canonical_form: str, pos: str, occurrences: list[d
         return {"definition_en": custom, "definition_source": "custom",
                 "definition_candidate_id": None, "definition_needs_review": False}
     fallback = next((o["occurrence_decision"].get("contextual_paraphrase", "")
-                     for o in occurrences
-                     if o["occurrence_decision"].get("contextual_paraphrase")), canonical_form)
+                     for o in request["occurrences"]
+                     if o["occurrence_decision"].get("contextual_paraphrase")),
+                    request["canonical_form"])
     return {"definition_en": fallback, "definition_source": "custom",
             "definition_candidate_id": None, "definition_needs_review": True}
+
+
+def choose_cluster_definition(canonical_form: str, pos: str, occurrences: list[dict],
+                              segments_by_idx: dict, *, model: str | None = None) -> dict:
+    """Chemin unitaire explicite de S3-definition-cluster."""
+    task = task_config("S3-definition-cluster")
+    request = _definition_request(canonical_form, pos, occurrences, segments_by_idx)
+    try:
+        result = llm.call_json(
+            request["prompt"], system=DEFINITION_SYSTEM_PROMPT,
+            model=model or task.bare_model, backend=task.provider, timeout=120,
+            cache_metadata=_s3_call_metadata(task, mode_batch=False, batch_size=1,
+                                              prompt_variant="definition-unit"),
+        )
+    except llm.LLMError:
+        result = {}
+    return _definition_selection(request, result)
+
+
+def choose_cluster_definitions_batch(requests: list[dict], *, model: str | None = None) -> dict[str, dict]:
+    """Chemin lot de S3-definition-cluster, contrôlé par cluster_id."""
+    task = task_config("S3-definition-cluster")
+    if not requests:
+        return {}
+    if len(requests) > effective_batch_size(task):
+        raise ValueError(f"lot S3 définition de {len(requests)} clusters > batch_size={effective_batch_size(task)}")
+    items = "\n\n".join(
+        f"{index}. cluster_id={request['cluster_id']!r}\n{request['prompt']}"
+        for index, request in enumerate(requests, start=1)
+    )
+    prompt = DEFINITION_BATCH_PROMPT_TEMPLATE.format(count=len(requests), items=items)
+    try:
+        raw = llm.call_json(
+            prompt, system=DEFINITION_BATCH_SYSTEM_PROMPT,
+            model=model or task.bare_model, backend=task.provider, timeout=120,
+            cache_metadata=_s3_call_metadata(task, mode_batch=True, batch_size=effective_batch_size(task),
+                                              prompt_variant="definition-batch"),
+        )
+    except llm.LLMError:
+        raw = {}
+    expected = {request["cluster_id"] for request in requests}
+    received: dict[str, dict] = {}
+    duplicates: set[str] = set()
+    for decision in raw.get("decisions", []) if isinstance(raw, dict) else []:
+        cluster_id = decision.get("cluster_id") if isinstance(decision, dict) else None
+        if cluster_id in received:
+            duplicates.add(cluster_id)
+        elif cluster_id in expected:
+            received[cluster_id] = decision
+    return {
+        request["cluster_id"]: _definition_selection(
+            request,
+            received.get(request["cluster_id"], {})
+            if request["cluster_id"] not in duplicates else {},
+        )
+        for request in requests
+    }
 
 
 def assign_cluster_definitions(records: list[dict], segments_by_idx: dict) -> None:
@@ -401,9 +483,27 @@ def assign_cluster_definitions(records: list[dict], segments_by_idx: dict) -> No
                 key = (decision["canonical_form"].casefold().strip(), decision["pos"],
                        decision["sense_id"])
                 clusters[key].append(occ)
-    for (canonical_form, pos, _sense_id), occurrences in clusters.items():
-        selection = choose_cluster_definition(canonical_form, pos, occurrences, segments_by_idx)
-        for occ in occurrences:
+    task = task_config("S3-definition-cluster")
+    cluster_requests = [
+        _definition_request(canonical_form, pos, occurrences, segments_by_idx,
+                            cluster_id=f"{canonical_form}|{pos}|{sense_id}")
+        for (canonical_form, pos, sense_id), occurrences in clusters.items()
+    ]
+    size = effective_batch_size(task)
+    if use_batch_prompt(task, size):
+        selections = {}
+        for start in range(0, len(cluster_requests), size):
+            selections.update(choose_cluster_definitions_batch(cluster_requests[start:start + size]))
+    else:
+        selections = {
+            request["cluster_id"]: choose_cluster_definition(
+                request["canonical_form"], request["pos"], request["occurrences"], segments_by_idx
+            )
+            for request in cluster_requests
+        }
+    for request in cluster_requests:
+        selection = selections[request["cluster_id"]]
+        for occ in request["occurrences"]:
             occ["occurrence_decision"].update(selection)
 
 
@@ -434,8 +534,24 @@ def _calibrate_occurrence(result: dict, label: str) -> tuple[float, list[str]]:
     return round(score, 4), features
 
 
-def judge_occurrence(idiom: str, occ: dict, segments_by_idx: dict,
-                     *, model: str | None = None) -> dict:
+OCC_BATCH_SYSTEM_PROMPT = OCC_SYSTEM_PROMPT + (
+    " Tu reçois plusieurs occurrences indépendantes : ne les fusionne jamais et "
+    "renvoie une décision séparée pour chaque occurrence_id."
+)
+
+OCC_BATCH_PROMPT_TEMPLATE = """Classe séparément les {count} occurrences suivantes.
+Chaque occurrence doit être jugée seulement dans sa propre phrase, selon les
+mêmes catégories et critères que le jugement unitaire.
+
+{items}
+
+Réponds en JSON strict avec ce schéma :
+{{"decisions":[{{"occurrence_id":"<id exact>","label":"<une des 5 catégories>","canonical_form":"<canon>","pos":"<NOUN|VERB|ADJ|ADV|OTHER>","contextual_paraphrase":"<paraphrase anglaise>","confidence":<0.0-1.0>,"evidence":["<indice observable>"],"wordnet_sense_id":"<sens WordNet exact ou null>","reason":"<1 phrase en français>"}}]}}
+Il doit y avoir exactement une décision par occurrence_id, dans le même ordre.
+"""
+
+
+def _occurrence_prompt(idiom: str, occ: dict, segments_by_idx: dict) -> tuple[str, list]:
     seg = segments_by_idx.get(occ["segment_idx"])
     sentence = seg.en if seg else occ["surface"]
     prompt = OCC_PROMPT_TEMPLATE.format(
@@ -449,36 +565,35 @@ def judge_occurrence(idiom: str, occ: dict, segments_by_idx: dict,
     if wn_candidates:
         prompt += "\nSens WordNet autorisés (choisir seulement une correspondance exacte) :\n"
         prompt += "\n".join(f"- {s.name()}: {s.definition()}" for s in wn_candidates)
-    try:
-        result = llm.call_json(
-            prompt, system=OCC_SYSTEM_PROMPT, model=model, timeout=120,
-            cache_metadata={"protocol": S3_PROMPT_VERSION,
-                            "schema": S3_DECISION_SCHEMA_VERSION},
-        )
-    except llm.LLMError as exc:
-        return {
-            "label": "incertain", "verdict": "incertain",
-            "canonical_form": idiom, "pos": "OTHER",
-            "contextual_paraphrase": "", "model_confidence": 0.0,
-            "confidence": 0.0, "confidence_features": ["llm_failure"],
-            "evidence": [], "reason": f"LLM indisponible: {exc}",
-        }
+    return prompt, wn_candidates
 
-    label = result.get("label")
-    if label not in VALID_LABELS:
-        return {
-            "label": "incertain", "verdict": "incertain",
-            "canonical_form": idiom, "pos": "OTHER",
-            "contextual_paraphrase": "", "model_confidence": 0.0,
-            "confidence": 0.0, "confidence_features": ["invalid_response"],
-            "evidence": [], "reason": f"réponse LLM invalide: {result!r}",
-        }
 
+def _occurrence_failure(idiom: str, reason: str, *, invalid: bool = False) -> dict:
+    return {
+        "label": "incertain", "verdict": "incertain",
+        "canonical_form": idiom, "pos": "OTHER",
+        "contextual_paraphrase": "", "model_confidence": 0.0,
+        "confidence": 0.0,
+        "confidence_features": ["invalid_response" if invalid else "llm_failure"],
+        "evidence": [], "reason": reason,
+    }
+
+
+def _normalize_occurrence_result(idiom: str, result: object, wn_candidates: list) -> dict:
+    if not isinstance(result, dict) or result.get("label") not in VALID_LABELS:
+        return _occurrence_failure(idiom, f"réponse LLM invalide: {result!r}", invalid=True)
+
+    label = result["label"]
     canonical = str(result.get("canonical_form") or idiom).strip()
     pos = str(result.get("pos") or "OTHER").upper()
     if pos not in VALID_POS:
         pos = "OTHER"
-    confidence, confidence_features = _calibrate_occurrence(result, label)
+    try:
+        model_confidence = max(0.0, min(1.0, float(result.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        model_confidence = 0.0
+    calibrated_input = {**result, "confidence": model_confidence}
+    confidence, confidence_features = _calibrate_occurrence(calibrated_input, label)
     lexicalized = label in {"idiome", "phrasal_verb", "semi_fige"}
     valid_wn_ids = {s.name() for s in wn_candidates}
     selected_wn_id = result.get("wordnet_sense_id")
@@ -488,13 +603,95 @@ def judge_occurrence(idiom: str, occ: dict, segments_by_idx: dict,
         "canonical_form": canonical,
         "pos": pos,
         "contextual_paraphrase": str(result.get("contextual_paraphrase") or "").strip(),
-        "model_confidence": max(0.0, min(1.0, float(result.get("confidence", 0.0)))),
+        "model_confidence": model_confidence,
         "confidence": confidence,
         "confidence_features": confidence_features,
         "evidence": [str(x).strip() for x in result.get("evidence", []) if str(x).strip()],
         "wordnet_sense_id": selected_wn_id if selected_wn_id in valid_wn_ids else None,
         "reason": result.get("reason", ""),
     }
+
+
+def _s3_call_metadata(task: TaskLlmConfig, *, mode_batch: bool, batch_size: int,
+                      prompt_variant: str) -> dict:
+    return {
+        "task_id": task.task_id, "model": task.model, "mode_batch": mode_batch,
+        "batch_size": batch_size if mode_batch else 1, "prompt_variant": prompt_variant,
+        "protocol": S3_PROMPT_VERSION, "schema": S3_DECISION_SCHEMA_VERSION,
+    }
+
+
+def judge_occurrence(idiom: str, occ: dict, segments_by_idx: dict,
+                     *, model: str | None = None) -> dict:
+    """Chemin unitaire explicite de S3-judge-occurrence."""
+    task = task_config("S3-judge-occurrence")
+    prompt, wn_candidates = _occurrence_prompt(idiom, occ, segments_by_idx)
+    try:
+        result = llm.call_json(
+            prompt, system=OCC_SYSTEM_PROMPT, model=model or task.bare_model,
+            backend=task.provider, timeout=120,
+            cache_metadata=_s3_call_metadata(task, mode_batch=False, batch_size=1,
+                                              prompt_variant="occurrence-unit"),
+        )
+    except llm.LLMError as exc:
+        return _occurrence_failure(idiom, f"LLM indisponible: {exc}")
+    return _normalize_occurrence_result(idiom, result, wn_candidates)
+
+
+def judge_occurrences_batch(items: list[tuple[str, dict]], segments_by_idx: dict,
+                            *, model: str | None = None) -> dict[str, dict]:
+    """Chemin lot S3 : un prompt, une décision contrôlée par occurrence_id."""
+    task = task_config("S3-judge-occurrence")
+    if not items:
+        return {}
+    if len(items) > effective_batch_size(task):
+        raise ValueError(f"lot S3 de {len(items)} occurrences > batch_size={effective_batch_size(task)}")
+
+    prompts: list[tuple[str, str, list]] = []
+    for idiom, occ in items:
+        prompt, wn_candidates = _occurrence_prompt(idiom, occ, segments_by_idx)
+        prompts.append((occ["occurrence_id"], prompt, wn_candidates))
+    numbered = "\n\n".join(
+        f"{index}. occurrence_id={occurrence_id!r}\n{prompt}"
+        for index, (occurrence_id, prompt, _) in enumerate(prompts, start=1)
+    )
+    prompt = OCC_BATCH_PROMPT_TEMPLATE.format(count=len(items), items=numbered)
+    try:
+        raw = llm.call_json(
+            prompt, system=OCC_BATCH_SYSTEM_PROMPT, model=model or task.bare_model,
+            backend=task.provider, timeout=120,
+            cache_metadata=_s3_call_metadata(task, mode_batch=True, batch_size=effective_batch_size(task),
+                                              prompt_variant="occurrence-batch"),
+        )
+    except llm.LLMError as exc:
+        return {occ["occurrence_id"]: _occurrence_failure(idiom, f"LLM indisponible: {exc}")
+                for idiom, occ in items}
+
+    expected_ids = [occ["occurrence_id"] for _, occ in items]
+    expected = set(expected_ids)
+    received: dict[str, dict] = {}
+    duplicates: set[str] = set()
+    for item in raw.get("decisions", []) if isinstance(raw, dict) else []:
+        occurrence_id = item.get("occurrence_id") if isinstance(item, dict) else None
+        if occurrence_id in received:
+            duplicates.add(occurrence_id)
+        elif occurrence_id in expected:
+            received[occurrence_id] = item
+
+    decisions: dict[str, dict] = {}
+    for idiom, occ in items:
+        occurrence_id = occ["occurrence_id"]
+        if occurrence_id not in received or occurrence_id in duplicates:
+            decisions[occurrence_id] = _occurrence_failure(
+                idiom, f"réponse LLM invalide: occurrence_id manquant ou dupliqué: {occurrence_id}",
+                invalid=True,
+            )
+            continue
+        wn_candidates = next(candidates for key, _, candidates in prompts if key == occurrence_id)
+        decisions[occurrence_id] = _normalize_occurrence_result(
+            idiom, received[occurrence_id], wn_candidates
+        )
+    return decisions
 
 
 LEXICALIZED_LABELS = {"idiome", "phrasal_verb", "semi_fige"}
@@ -627,41 +824,72 @@ def run() -> int:
     legacy_store_entries = sum(not key.startswith(f"s3:{S3_PROMPT_VERSION}:")
                                for key in occurrence_store)
 
-    print(f"{len(types)} groupes à juger occurrence par occurrence via {config.llm_model()}...")
+    print(f"{len(types)} groupes à juger occurrence par occurrence...")
     if legacy_store_entries:
         print(f"  {legacy_store_entries} ancienne(s) décision(s) globale(s)/incompatible(s) "
               "conservée(s) pour audit mais invalidée(s) par le protocole S3 courant.")
 
+    occurrence_task = task_config("S3-judge-occurrence")
+    occurrence_batch_size = effective_batch_size(occurrence_task)
+    occurrence_batch_mode = use_batch_prompt(occurrence_task, occurrence_batch_size)
+    print(f"S3-judge-occurrence : {occurrence_task.model}, "
+          f"prompt {'lot' if occurrence_batch_mode else 'unitaire'}.")
     lexicalized = 0
     n_occ_llm_calls = 0
     n_occ_llm_failures = 0
     n_occ_escalated = 0
     records = []
-    for i, entry in enumerate(types, start=1):
+    pending: list[tuple[str, dict, str]] = []
+    for entry in types:
         idiom = entry["idiom"]
         occurrences = []
         for occ in entry["occurrences"]:
             n_occ_escalated += 1
             signature = occurrence_context_signature(idiom, occ, segments_by_idx)
             store_key = occurrence_store_key(
-                idiom, occ["occurrence_id"], model=config.llm_model(),
-                backend=config.LLM_BACKEND,
-                context_signature=signature,
+                idiom, occ["occurrence_id"], model=occurrence_task.model,
+                backend=occurrence_task.provider, mode_batch=occurrence_batch_mode,
+                batch_size=occurrence_batch_size, context_signature=signature,
             )
             occ_cached = occurrence_store.get(store_key)
+            prepared_occ = {**occ}
             if occ_cached is not None:
-                occ_decision = {k: v for k, v in occ_cached.items()
-                                if k not in {"key", "status", "decided_at"}}
+                prepared_occ["occurrence_decision"] = {
+                    k: v for k, v in occ_cached.items()
+                    if k not in {"key", "status", "decided_at"}
+                }
             else:
-                occ_decision = judge_occurrence(idiom, occ, segments_by_idx)
-                n_occ_llm_calls += 1
-                if is_llm_failure(occ_decision):
-                    n_occ_llm_failures += 1
-                else:
-                    occurrence_store[store_key] = mwe_stores.build_entry(store_key, occ_decision)
-            occ = {**occ, "occurrence_decision": occ_decision}
-            occurrences.append(occ)
+                pending.append((idiom, prepared_occ, store_key))
+            occurrences.append(prepared_occ)
 
+        records.append({**entry, "occurrences": occurrences})
+
+    for start in range(0, len(pending), occurrence_batch_size):
+        pending_batch = pending[start:start + occurrence_batch_size]
+        if occurrence_batch_mode:
+            decisions = judge_occurrences_batch(
+                [(idiom, occ) for idiom, occ, _ in pending_batch], segments_by_idx,
+                model=occurrence_task.bare_model,
+            )
+            n_occ_llm_calls += 1
+        else:
+            decisions = {
+                occ["occurrence_id"]: judge_occurrence(
+                    idiom, occ, segments_by_idx, model=occurrence_task.bare_model
+                )
+                for idiom, occ, _ in pending_batch
+            }
+            n_occ_llm_calls += len(pending_batch)
+        for idiom, occ, store_key in pending_batch:
+            occ_decision = decisions[occ["occurrence_id"]]
+            occ["occurrence_decision"] = occ_decision
+            if is_llm_failure(occ_decision):
+                n_occ_llm_failures += 1
+            else:
+                occurrence_store[store_key] = mwe_stores.build_entry(store_key, occ_decision)
+
+    for i, record in enumerate(records, start=1):
+        occurrences = record["occurrences"]
         labels = [o["occurrence_decision"]["label"] for o in occurrences]
         heterogeneous = len(set(labels)) > 1
         decision = {
@@ -673,7 +901,7 @@ def run() -> int:
         }
         if any(label in LEXICALIZED_LABELS for label in labels):
             lexicalized += 1
-        records.append({**entry, **decision, "occurrences": occurrences})
+        record.update(decision)
         if i % 25 == 0 or i == len(types):
             print(f"  {i}/{len(types)}")
     assign_sense_ids(records)

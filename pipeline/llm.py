@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import urllib.error
 import urllib.request
 
@@ -33,6 +34,7 @@ def call_json(
     prompt: str,
     *,
     model: str | None = None,
+    backend: str | None = None,
     system: str | None = None,
     timeout: float = 60.0,
     cache_metadata: dict | None = None,
@@ -42,7 +44,7 @@ def call_json(
     un JSON valide — l'appelant doit alors mettre le cas en révision
     plutôt que planter tout le batch."""
 
-    backend = config.LLM_BACKEND
+    backend = backend or config.LLM_BACKEND
     model = model or config.llm_model()
     effective_timeout = max(timeout, config.CATGPT_TIMEOUT) if backend == "catgpt" else timeout
     cache_key = json.dumps(
@@ -65,6 +67,18 @@ def call_json(
         url = f"{config.CATGPT_BASE_URL}/chat/completions"
         headers = {"Content-Type": "application/json",
                    "Authorization": f"Bearer {config.CATGPT_API_TOKEN}"}
+    elif backend == "openai":
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        payload = {"model": model, "messages": messages, "stream": False,
+                   "temperature": config.LLM_TEMPERATURE,
+                   "response_format": {"type": "json_object"}}
+        base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        url = f"{base_url}/chat/completions"
+        headers = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}"}
     elif backend == "ollama":
         payload = {"model": model, "prompt": prompt, "system": system or "",
                    "format": "json", "stream": False,
@@ -84,7 +98,7 @@ def call_json(
         raise LLMError(f"{backend} injoignable ({url}): {exc}") from exc
 
     try:
-        raw = (body["choices"][0]["message"]["content"] if backend == "catgpt"
+        raw = (body["choices"][0]["message"]["content"] if backend in {"catgpt", "openai"}
                else body.get("response", ""))
     except (KeyError, IndexError, TypeError) as exc:
         raise LLMError(f"réponse {backend} inattendue: {body!r}") from exc

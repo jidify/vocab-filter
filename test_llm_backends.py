@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -43,6 +44,17 @@ class LLMBackendTests(unittest.TestCase):
             open_url.return_value = _Response({"response": '{"ok": true}'})
             self.assertEqual(llm.call_json("question"), {"ok": True})
             self.assertEqual(open_url.call_args.args[0].full_url, "http://ollama/api/generate")
+
+    def test_openai_task_provider_uses_openai_compatible_request(self):
+        with patch.dict(os.environ, {"OPENAI_BASE_URL": "http://openai/v1", "OPENAI_API_KEY": "key"}), \
+             patch("pipeline.llm._cache_path") as cache_path, \
+             patch("pipeline.llm.urllib.request.urlopen") as open_url:
+            cache_path.return_value.exists.return_value = False
+            open_url.return_value = _Response({"choices": [{"message": {"content": '{"ok": true}'}}]})
+            self.assertEqual(llm.call_json("question", model="gpt-test", backend="openai"), {"ok": True})
+            request = open_url.call_args.args[0]
+            self.assertEqual(request.full_url, "http://openai/v1/chat/completions")
+            self.assertEqual(request.get_header("Authorization"), "Bearer key")
 
 
 if __name__ == "__main__":
