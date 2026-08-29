@@ -217,7 +217,12 @@ def is_likely_named_entity(entry: dict, meta: dict) -> bool:
 
 
 def gate(entry: dict) -> tuple[bool, dict]:
-    """Retourne (garder, métadonnées) pour un type."""
+    """Retourne (garder, métadonnées) pour un type.
+
+    S4 ne connaît pas encore le sens réellement employé. Les signaux de
+    fréquence et CEFR sont donc conservés pour S6/S7, mais ne peuvent plus
+    éliminer ici un lemme banal dont l'occurrence porte un sens rare.
+    """
 
     lemma = entry["lemma"]
     wn_pos = entry["wn_pos"]
@@ -229,6 +234,9 @@ def gate(entry: dict) -> tuple[bool, dict]:
         "zipf": None,
         "prevalence_source": None,
         "cefr_levels": sorted(lexicon.cefr_levels_for(lemma, wn_pos)),
+        "prevalence_signal": "unknown",
+        "cefr_signal": "unknown",
+        "pedagogical_filter_deferred": False,
     }
 
     if prevalence is None:
@@ -243,18 +251,23 @@ def gate(entry: dict) -> tuple[bool, dict]:
         meta["nobs"] = prevalence.nobs
         meta["zipf"] = prevalence.zipf
         meta["prevalence_source"] = "found"
-
-        if prevalence.nobs >= config.MIN_NOBS and prevalence.pknown < config.MIN_PKNOWN:
-            meta["drop_reason"] = "pknown"
-            return False, meta
+        meta["prevalence_signal"] = (
+            "low_prevalence"
+            if prevalence.nobs >= config.MIN_NOBS and prevalence.pknown < config.MIN_PKNOWN
+            else "measured"
+        )
 
     if is_likely_named_entity(entry, meta):
         meta["drop_reason"] = "named_entity"
         return False, meta
 
-    if lexicon.should_exclude_cefr(set(meta["cefr_levels"])):
-        meta["drop_reason"] = "cefr"
-        return False, meta
+    basic_cefr = lexicon.should_exclude_cefr(set(meta["cefr_levels"]))
+    meta["cefr_signal"] = "basic_only" if basic_cefr else (
+        "measured" if meta["cefr_levels"] else "unknown"
+    )
+    meta["pedagogical_filter_deferred"] = (
+        basic_cefr or meta["prevalence_signal"] == "low_prevalence"
+    )
 
     return True, meta
 
@@ -352,6 +365,7 @@ def run() -> int:
 
     kept = 0
     dropped_by_reason: dict[str, int] = defaultdict(int)
+    deferred_by_signal: dict[str, int] = defaultdict(int)
     kept_records = []
     # Lot 3 (point E) : une ligne par occurrence RETENUE, mot simple ou MWE
     # — voir pipeline/inventory.py. Alimenté ici (mots) et plus bas (MWE),
@@ -363,6 +377,11 @@ def run() -> int:
         if not keep:
             dropped_by_reason[meta["drop_reason"]] += 1
             continue
+
+        if meta["cefr_signal"] == "basic_only":
+            deferred_by_signal["cefr"] += 1
+        if meta["prevalence_signal"] == "low_prevalence":
+            deferred_by_signal["prevalence"] += 1
 
         kept += 1
         kept_records.append({
@@ -412,6 +431,9 @@ def run() -> int:
           f"entité nommée={dropped_by_reason['named_entity']}, "
           f"cefr={dropped_by_reason['cefr']}) -> "
           f"{config.SELECTED_TYPES_PATH}")
+    print("  filtres pédagogiques différés après S5 : "
+          f"CEFR={deferred_by_signal['cefr']}, "
+          f"prévalence={deferred_by_signal['prevalence']}")
 
     mwe_units = build_mwe_units(mwe_spans_by_segment)
     atomic.atomic_write_jsonl(config.SELECTED_MWE_PATH, mwe_units)
