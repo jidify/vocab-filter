@@ -192,7 +192,7 @@ class SenseFrFrontierProtectedFilterTests(unittest.TestCase):
 
         seen_batches: list[list] = []
 
-        def fake_translate_batches(batches, model):
+        def fake_translate_batches(batches, model, *, mode_batch=True, batch_size=None):
             seen_batches.extend(batches)
             return [{} for _ in batches], 0.0
 

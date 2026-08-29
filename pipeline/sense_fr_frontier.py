@@ -78,6 +78,7 @@ from nltk.corpus.reader.wordnet import WordNetError
 from pydantic import BaseModel
 
 from pipeline import config, inventory, lex_bilingual, sense_fr, senses
+from pipeline.llm_tasks import effective_batch_size, task_config, use_batch_prompt
 
 # ============================================================
 # Schéma de sortie structurée
@@ -96,6 +97,10 @@ class SenseTranslation(BaseModel):
 
 class BatchTranslations(BaseModel):
     translations: list[SenseTranslation]
+
+
+class UnitTranslation(SenseTranslation):
+    """Réponse d'un prompt unitaire (un sens, objet scalaire)."""
 
 
 # ============================================================
@@ -168,6 +173,13 @@ def _format_item(target: dict, occurrences: list[dict], candidates: list[str]) -
     if candidates:
         lines.append(ITEM_CANDIDATES.format(candidates=" ; ".join(candidates)))
     return "\n".join(lines)
+
+
+def build_unit_user_prompt(item: tuple[dict, list[dict], list[str]]) -> str:
+    target, occurrences, candidates = item
+    return "Sens à traduire (1) :\n" + _format_item(target, occurrences, candidates) + (
+        "\nRéponds avec un objet JSON unique pour ce sense_id (pas de liste)."
+    )
 
 
 def build_user_prompt(batch: list[tuple[dict, list[dict], list[str]]]) -> str:
@@ -272,15 +284,18 @@ def collect_candidates(target: dict, rng: random.Random) -> list[str]:
 # ============================================================
 
 
-def _cache_path(model: str, system: str, user: str) -> Path:
-    cache_key = json.dumps({"model": model, "system": system, "user": user}, sort_keys=True)
+def _cache_path(model: str, system: str, user: str, *, mode_batch: bool = True, batch_size: int | None = None) -> Path:
+    cache_key = json.dumps({"task_id": "S6-translate-frontier", "model": model,
+                            "mode_batch": mode_batch, "batch_size": batch_size or (1 if not mode_batch else 0),
+                            "system": system, "user": user}, sort_keys=True)
     digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
     config.ensure_out_dir()
     return config.CACHE_DIR / f"frontier_{digest}.json"
 
 
 def _translate_batches(
-    batches: list[list[tuple[dict, list[dict], list[str]]]], model: str
+    batches: list[list[tuple[dict, list[dict], list[str]]]], model: str,
+    *, mode_batch: bool = True, batch_size: int | None = None,
 ) -> tuple[list[dict[str, SenseTranslation]], float]:
     """Traduit chaque lot (avec cache disque par lot). Renvoie la liste
     des {sense_id: SenseTranslation} par lot (même ordre que `batches`)
@@ -291,11 +306,21 @@ def _translate_batches(
     total_cost = 0.0
 
     for i, batch in enumerate(batches):
-        user_prompt = build_user_prompt(batch)
-        cache_file = _cache_path(model, SYSTEM_PROMPT, user_prompt)
+        if not mode_batch and len(batch) != 1:
+            raise ValueError(
+                f"S6-translate-frontier: mode unitaire attend exactement 1 item par lot, "
+                f"reçu {len(batch)}"
+            )
+        user_prompt = build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0])
+        cache_file = _cache_path(model, SYSTEM_PROMPT, user_prompt, mode_batch=mode_batch, batch_size=batch_size)
         if cache_file.exists():
-            parsed = BatchTranslations.model_validate_json(cache_file.read_text(encoding="utf-8"))
-            results[i] = {t.sense_id: t for t in parsed.translations}
+            content = cache_file.read_text(encoding="utf-8")
+            if mode_batch:
+                parsed = BatchTranslations.model_validate_json(content)
+                results[i] = {t.sense_id: t for t in parsed.translations}
+            else:
+                parsed = UnitTranslation.model_validate_json(content)
+                results[i] = {parsed.sense_id: parsed}
         else:
             to_call.append((i, batch))
 
@@ -303,14 +328,14 @@ def _translate_batches(
         messages = [
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_user_prompt(batch)},
+                {"role": "user", "content": build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0])},
             ]
             for _, batch in to_call
         ]
         responses = litellm.batch_completion(
             model=model,
             messages=messages,
-            response_format=BatchTranslations,
+            response_format=BatchTranslations if mode_batch else UnitTranslation,
             reasoning_effort="low",  # recherche lexicale par item, pas du raisonnement long
             max_tokens=16000,
             # Pas de temperature explicite : certains modèles (famille GPT-5)
@@ -330,10 +355,13 @@ def _translate_batches(
             except Exception:
                 pass
             content = response.choices[0].message.content
-            parsed = BatchTranslations.model_validate_json(content)
-            cache_file = _cache_path(model, SYSTEM_PROMPT, build_user_prompt(batch))
+            parsed = (BatchTranslations if mode_batch else UnitTranslation).model_validate_json(content)
+            cache_file = _cache_path(model, SYSTEM_PROMPT,
+                                     build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0]),
+                                     mode_batch=mode_batch, batch_size=batch_size)
             cache_file.write_text(parsed.model_dump_json(), encoding="utf-8")
-            results[i] = {t.sense_id: t for t in parsed.translations}
+            results[i] = ({t.sense_id: t for t in parsed.translations} if mode_batch
+                          else {parsed.sense_id: parsed})
 
     return [r or {} for r in results], total_cost
 
@@ -360,7 +388,7 @@ def is_protected(existing: dict | None) -> bool:
     return existing is not None and existing.get("status") in PROTECTED_STATUSES
 
 
-def build_entry(target: dict, translation: SenseTranslation | None) -> dict:
+def build_entry(target: dict, translation: SenseTranslation | None, *, model: str | None = None) -> dict:
     """N'écrit JAMAIS les phrases du livre dans l'entrée renvoyée : cette
     entrée est destinée à data/sense_fr.jsonl, le magasin PERMANENT
     réutilisé d'un livre à l'autre (voir pipeline/sense_fr.py) — une
@@ -424,7 +452,7 @@ def build_entry(target: dict, translation: SenseTranslation | None) -> dict:
         "source": translation.source,
         "evidence": {
             "omw_fr": omw, "wonef": wonef,
-            "frontier_model": config.SENSE_FR_FRONTIER_MODEL,
+            "frontier_model": model or config.SENSE_FR_FRONTIER_MODEL,
             "frontier_fr": translation.fr,
             "frontier_confidence": translation.confidence,
         },
@@ -467,8 +495,10 @@ def write_sense_id_suspects_csv(store: dict[str, dict], occurrences_by_sense: di
 # ============================================================
 
 
-def run(model: str = config.SENSE_FR_FRONTIER_MODEL, limit: int | None = None, dry_run: bool = False) -> int:
-    config.require_frontier_model(model)
+def run(model: str | None = None, limit: int | None = None, dry_run: bool = False) -> int:
+    task = task_config("S6-translate-frontier")
+    model = model or task.model
+    config.require_frontier_model(model, "S6-translate-frontier")
     # Lot 3 (point E) : senses.jsonl doit avoir été calculé contre
     # l'inventaire COURANT (pipeline/inventory.py) — sinon les occurrences
     # présentées en contexte au modèle frontière pourraient ne plus
@@ -528,14 +558,15 @@ def run(model: str = config.SENSE_FR_FRONTIER_MODEL, limit: int | None = None, d
     # sera rejoué au modèle comme les lots MWE. verify_fr_lock (voir
     # data/sense_fr.lock.json) reste le filet de sécurité si ce lot
     # change la traduction verrouillée d'un synset qu'il contient.
-    batch_size = config.SENSE_FR_FRONTIER_BATCH_SIZE
+    batch_size = effective_batch_size(task)
     items_by_kind: dict[str, list[tuple[dict, list[dict], list[str]]]] = {}
     for item in items:
         items_by_kind.setdefault(item[0]["kind"], []).append(item)
     batches: list[list[tuple[dict, list[dict], list[str]]]] = []
     for kind_items in items_by_kind.values():
         batches.extend(kind_items[i:i + batch_size] for i in range(0, len(kind_items), batch_size))
-    translations_by_batch, cost = _translate_batches(batches, model)
+    mode_batch = use_batch_prompt(task, batch_size)
+    translations_by_batch, cost = _translate_batches(batches, model, mode_batch=mode_batch, batch_size=batch_size)
 
     # `store` a déjà été chargé plus haut pour le filtrage protégé — pas de
     # second appel à `sense_fr.load_store()` ici (Lot 6). `resolved` ne
@@ -546,7 +577,7 @@ def run(model: str = config.SENSE_FR_FRONTIER_MODEL, limit: int | None = None, d
     for batch, translations in zip(batches, translations_by_batch):
         for target, _occs, _candidates in batch:
             translation = translations.get(target["key"])
-            entry = build_entry(target, translation)
+            entry = build_entry(target, translation, model=model)
             store[entry["key"]] = entry
             n_by_status[entry["status"]] = n_by_status.get(entry["status"], 0) + 1
             if entry.get("agreement") in SUSPECT_AGREEMENTS:
@@ -591,11 +622,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model", default=config.SENSE_FR_FRONTIER_MODEL,
-        choices=sorted(config.ALLOWED_FRONTIER_MODELS),
-        help="Modèle LiteLLM — restreint à config.ALLOWED_FRONTIER_MODELS (voir sa docstring : "
-             "empêche un --model tapé de travers de déclencher silencieusement un modèle plus "
-             "coûteux). Pour en utiliser un autre, l'ajouter explicitement à cette liste blanche.",
+        "--model", default=None,
+        help="Modèle LiteLLM — par défaut, celui résolu par task_config('S6-translate-frontier') "
+             "(voir pipeline/llm_tasks.py). require_frontier_model refuse tout autre modèle : "
+             "pour en utiliser un autre, poser VOCAB_LLM_S6_TRANSLATE_FRONTIER=provider/nom;... "
+             "plutôt que de passer --model seul (empêche une frappe de travers de déclencher "
+             "silencieusement un modèle plus coûteux).",
     )
     parser.add_argument(
         "--limit", type=int, default=None,

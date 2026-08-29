@@ -294,6 +294,22 @@ SENSE_FR_FRONTIER_MAX_OCCURRENCES = 2   # phrases distinctes présentées par se
 # mesurée contre cette dégradation.
 SENSE_FR_REASSIGN_BATCH_SIZE = 10
 
+# Taille de lot pour Stage B (pipeline/sense_fr_adjudicate.py::run_stage_b) —
+# remontée en constante lors du branchement multi-modèles (Lot M2) : c'était
+# auparavant un littéral de signature (`batch_size: int = 40`), jamais une
+# valeur configurable ni documentée ici. Valeur inchangée (voir
+# fix_pipeline/multi_models/baseline_batch_inventory.md §7).
+SENSE_FR_BACKTRANSLATE_BATCH_SIZE = 40
+
+# Plafond de lot pour Stage C (pipeline/sense_fr_adjudicate.py::run_stage_c).
+# Contrairement à SENSE_FR_REASSIGN_BATCH_SIZE, ce n'est PAS une valeur
+# mesurée : avant le Lot M2, `run_stage_c` acceptait un paramètre
+# `batch_size` jamais utilisé pour découper — tout `residual` partait dans
+# un unique appel, sans plafond réel (voir baseline_batch_inventory.md §7).
+# 20 est le défaut de registre choisi pour appliquer enfin un découpage
+# effectif, pas la reprise d'un comportement déjà validé.
+SENSE_FR_JUDGE_BATCH_SIZE = 20
+
 # Liste blanche des modèles autorisés pour un appel frontière/conjoint (S6b
 # pipeline/sense_fr_frontier.py, S6c pipeline/sense_fr_reassign.py). Un seul
 # élément aujourd'hui, volontairement : le but n'est pas de choisir parmi
@@ -308,11 +324,23 @@ SENSE_FR_REASSIGN_BATCH_SIZE = 10
 ALLOWED_FRONTIER_MODELS = {SENSE_FR_FRONTIER_MODEL}
 
 
-def require_frontier_model(model: str) -> None:
-    if model not in ALLOWED_FRONTIER_MODELS:
+def require_frontier_model(model: str, task_id: str | None = None) -> None:
+    if task_id is not None:
+        from pipeline.llm_tasks import task_config
+        allowed = {task_config(task_id).model}
+        if model not in allowed:
+            raise SystemExit(
+                f"Modèle '{model}' non autorisé pour la tâche '{task_id}' — "
+                f"seul le modèle résolu par task_config est accepté : {sorted(allowed)}. "
+                f"Pour en utiliser un autre, pose VOCAB_LLM_{task_id.replace('-', '_')}"
+                "=provider/nom;... (voir pipeline/llm_tasks.py)."
+            )
+        return
+    allowed = ALLOWED_FRONTIER_MODELS
+    if model not in allowed:
         raise SystemExit(
             f"Modèle '{model}' non autorisé pour un appel frontière/conjoint — "
-            f"liste blanche actuelle : {sorted(ALLOWED_FRONTIER_MODELS)}. "
+            f"liste blanche actuelle : {sorted(allowed)}. "
             f"Pour l'utiliser sciemment, ajoute-le à config.ALLOWED_FRONTIER_MODELS."
         )
 

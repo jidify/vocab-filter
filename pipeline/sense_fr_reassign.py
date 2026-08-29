@@ -72,6 +72,7 @@ from nltk.corpus import wordnet as nwn
 from pydantic import BaseModel
 
 from pipeline import config, inventory as lexical_inventory, senses, sense_fr, verify_fr_lock
+from pipeline.llm_tasks import effective_batch_size, task_config, use_batch_prompt
 
 # ============================================================
 # Périmètre — voir la docstring du module pour la justification de
@@ -188,6 +189,10 @@ class ReassignBatch(BaseModel):
     decisions: list[ReassignedDecision]
 
 
+class UnitReassignedDecision(ReassignedDecision):
+    """Réponse d'un prompt unitaire (une décision scalaire)."""
+
+
 # ============================================================
 # Prompt
 # ============================================================
@@ -266,6 +271,13 @@ def _format_item(entry: dict, occurrences: list[dict], inventory: list[dict]) ->
     return "\n".join(lines)
 
 
+def build_unit_user_prompt(item: tuple[dict, list[dict], list[dict]]) -> str:
+    entry, occurrences, inventory = item
+    return "Entrées à réassigner (1) :\n" + _format_item(entry, occurrences, inventory) + (
+        "\nRéponds avec un objet JSON unique pour cette key (pas de liste)."
+    )
+
+
 def build_user_prompt(batch: list[tuple[dict, list[dict], list[dict]]]) -> str:
     items = "\n".join(_format_item(entry, occs, inventory) for entry, occs, inventory in batch)
     return f"Entrées à réassigner ({len(batch)}) :\n{items}"
@@ -276,26 +288,37 @@ def build_user_prompt(batch: list[tuple[dict, list[dict], list[dict]]]) -> str:
 # ============================================================
 
 
-def _cache_path(model: str, system: str, user: str) -> Path:
-    cache_key = json.dumps({"model": model, "system": system, "user": user}, sort_keys=True)
+def _cache_path(model: str, system: str, user: str, *, mode_batch: bool = True, batch_size: int | None = None) -> Path:
+    cache_key = json.dumps({"task_id": "S6-reassign", "model": model,
+                            "mode_batch": mode_batch, "batch_size": batch_size or (1 if not mode_batch else 0),
+                            "system": system, "user": user}, sort_keys=True)
     digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
     config.ensure_out_dir()
     return config.CACHE_DIR / f"reassign_{digest}.json"
 
 
 def _translate_batches(
-    batches: list[list[tuple[dict, list[dict], list[dict]]]], model: str
+    batches: list[list[tuple[dict, list[dict], list[dict]]]], model: str,
+    *, mode_batch: bool = True, batch_size: int | None = None,
 ) -> tuple[list[dict[str, ReassignedDecision]], float]:
     to_call: list[tuple[int, list[tuple[dict, list[dict], list[dict]]]]] = []
     results: list[dict[str, ReassignedDecision] | None] = [None] * len(batches)
     total_cost = 0.0
 
     for i, batch in enumerate(batches):
-        user_prompt = build_user_prompt(batch)
-        cache_file = _cache_path(model, SYSTEM_PROMPT, user_prompt)
+        if not mode_batch and len(batch) != 1:
+            raise ValueError(
+                f"S6-reassign: mode unitaire attend exactement 1 item par lot, reçu {len(batch)}"
+            )
+        user_prompt = build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0])
+        cache_file = _cache_path(model, SYSTEM_PROMPT, user_prompt, mode_batch=mode_batch, batch_size=batch_size)
         if cache_file.exists():
-            parsed = ReassignBatch.model_validate_json(cache_file.read_text(encoding="utf-8"))
-            results[i] = {d.key: d for d in parsed.decisions}
+            if mode_batch:
+                parsed = ReassignBatch.model_validate_json(cache_file.read_text(encoding="utf-8"))
+                results[i] = {d.key: d for d in parsed.decisions}
+            else:
+                parsed = UnitReassignedDecision.model_validate_json(cache_file.read_text(encoding="utf-8"))
+                results[i] = {parsed.key: parsed}
         else:
             to_call.append((i, batch))
 
@@ -303,12 +326,12 @@ def _translate_batches(
         messages = [
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_user_prompt(batch)},
+                {"role": "user", "content": build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0])},
             ]
             for _, batch in to_call
         ]
         responses = litellm.batch_completion(
-            model=model, messages=messages, response_format=ReassignBatch,
+            model=model, messages=messages, response_format=ReassignBatch if mode_batch else UnitReassignedDecision,
             reasoning_effort="low", max_tokens=16000,
             max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
         )
@@ -322,10 +345,13 @@ def _translate_batches(
             except Exception:
                 pass
             content = response.choices[0].message.content
-            parsed = ReassignBatch.model_validate_json(content)
-            cache_file = _cache_path(model, SYSTEM_PROMPT, build_user_prompt(batch))
+            parsed = (ReassignBatch if mode_batch else UnitReassignedDecision).model_validate_json(content)
+            cache_file = _cache_path(model, SYSTEM_PROMPT,
+                                     build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0]),
+                                     mode_batch=mode_batch, batch_size=batch_size)
             cache_file.write_text(parsed.model_dump_json(), encoding="utf-8")
-            results[i] = {d.key: d for d in parsed.decisions}
+            results[i] = ({d.key: d for d in parsed.decisions} if mode_batch
+                          else {parsed.key: parsed})
 
     return [r or {} for r in results], total_cost
 
@@ -371,7 +397,7 @@ def _build_promoted_entry(entry: dict, decision: ReassignedDecision) -> dict:
 
 def apply_decision(
     entry: dict, decision: ReassignedDecision, inventory: list[dict], contexte_en: str,
-    store: dict[str, dict],
+    store: dict[str, dict], *, model: str | None = None,
 ) -> tuple[str, dict | None]:
     """Applique UNE décision à `store` (en place) et renvoie (groupe,
     ligne_d_audit_ou_None) — groupe in {"promu", "reassigne", "audit",
@@ -416,7 +442,7 @@ def apply_decision(
         chosen = next((c for c in inventory if c["sense_id"] == new_key), None)
         definition_en = chosen["definition"] if chosen else None
         store[new_key] = _build_reassigned_entry(
-            entry, decision, new_key, definition_en, existing_target, inventory
+            entry, decision, new_key, definition_en, existing_target, inventory, model=model
         )
         store[entry["key"]] = {**entry, "agreement": f"reassigne_vers:{new_key}"}
         return "reassigne", None
@@ -426,7 +452,7 @@ def apply_decision(
 
 def _build_reassigned_entry(
     entry: dict, decision: ReassignedDecision, new_key: str, definition_en: str | None,
-    existing_target: dict | None, inventory: list[dict],
+    existing_target: dict | None, inventory: list[dict], *, model: str | None = None,
 ) -> dict:
     """`existing_target` : entrée déjà présente sous `new_key`, si elle existe
     et n'est PAS verrouillée (voir run() — jamais appelé sinon). Ses
@@ -451,7 +477,7 @@ def _build_reassigned_entry(
         "sense_fit": decision.sense_fit, "sense_fit_note": decision.sense_fit_note,
         "source": None,
         "evidence": {
-            "omw_fr": [], "wonef": [], "frontier_model": config.SENSE_FR_FRONTIER_MODEL,
+            "omw_fr": [], "wonef": [], "frontier_model": model or config.SENSE_FR_FRONTIER_MODEL,
             "frontier_fr": decision.fr, "frontier_confidence": decision.confidence,
         },
         "decided_at": date.today().isoformat(), "decided_by": "auto_joint",
@@ -507,8 +533,10 @@ def write_audit_csv(rows: list[dict]) -> None:
 # ============================================================
 
 
-def run(model: str = config.SENSE_FR_FRONTIER_MODEL, dry_run: bool = False) -> int:
-    config.require_frontier_model(model)
+def run(model: str | None = None, dry_run: bool = False) -> int:
+    task = task_config("S6-reassign")
+    model = model or task.model
+    config.require_frontier_model(model, "S6-reassign")
     lexical_inventory.verify_consumer(
         config.SENSES_INVENTORY_HASH_PATH, "sense_fr_reassign"
     )
@@ -529,9 +557,10 @@ def run(model: str = config.SENSE_FR_FRONTIER_MODEL, dry_run: bool = False) -> i
         inventory = [] if entry["kind"] == "mwe" else open_inventory(entry["lemmas_en"][0])
         items.append((entry, occs, inventory))
 
-    batch_size = config.SENSE_FR_REASSIGN_BATCH_SIZE
+    batch_size = effective_batch_size(task)
     batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
-    decisions_by_batch, cost = _translate_batches(batches, model)
+    mode_batch = use_batch_prompt(task, batch_size)
+    decisions_by_batch, cost = _translate_batches(batches, model, mode_batch=mode_batch, batch_size=batch_size)
 
     n_promu = n_reassigne = n_bloque = n_audit = 0
     audit_rows: list[dict] = []
@@ -542,7 +571,7 @@ def run(model: str = config.SENSE_FR_FRONTIER_MODEL, dry_run: bool = False) -> i
             if decision is None:
                 continue  # échec de lot déjà signalé par _translate_batches
             contexte_en = sense_fr.format_occurrences_en(occs)
-            group, audit_row = apply_decision(entry, decision, inventory, contexte_en, store)
+            group, audit_row = apply_decision(entry, decision, inventory, contexte_en, store, model=model)
             if group == "promu":
                 n_promu += 1
             elif group == "reassigne":
@@ -576,10 +605,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model", default=config.SENSE_FR_FRONTIER_MODEL,
-        choices=sorted(config.ALLOWED_FRONTIER_MODELS),
-        help="Modèle LiteLLM — restreint à config.ALLOWED_FRONTIER_MODELS (empêche un --model "
-             "tapé de travers de déclencher silencieusement un modèle plus coûteux).",
+        "--model", default=None,
+        help="Modèle LiteLLM — par défaut, celui résolu par task_config('S6-reassign') (voir "
+             "pipeline/llm_tasks.py). require_frontier_model refuse tout autre modèle : pour en "
+             "utiliser un autre, poser VOCAB_LLM_S6_REASSIGN=provider/nom;... plutôt que --model "
+             "seul (empêche une frappe de travers de déclencher silencieusement un modèle plus "
+             "coûteux).",
     )
     parser.add_argument(
         "--dry-run", action="store_true",

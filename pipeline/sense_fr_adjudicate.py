@@ -62,14 +62,18 @@ Usage :
 from __future__ import annotations
 
 import csv
+import random
 from datetime import date
 from typing import Literal
+
+from pydantic import BaseModel
 
 from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
 from wordfreq import zipf_frequency
 
 from pipeline import config, fr_norm, inventory, lex_bilingual, senses, sense_fr
+from pipeline.llm_tasks import effective_batch_size, task_config, use_batch_prompt
 
 ADJUDICATION_CSV_PATH = config.OUT_DIR / "sense_fr_adjudication.csv"
 
@@ -369,7 +373,114 @@ class _BacktranslationResult:
         self.key, self.en = key, en
 
 
-def _backtranslate_batch(entries: list[dict], model: str) -> dict[str, str]:
+class _Guess(BaseModel):
+    key: str
+    en: str
+
+
+class _BatchGuesses(BaseModel):
+    guesses: list[_Guess]
+
+
+class _Verdict(BaseModel):
+    key: str
+    fr: str
+    fr_alt: list[str]
+    confidence: Literal["high", "medium", "low"]
+    reason: str
+    no_equivalent: bool = False
+
+
+class _BatchVerdicts(BaseModel):
+    verdicts: list[_Verdict]
+
+
+JUDGE_SYSTEM = (
+    "Tu es lexicographe bilingue anglais-français. Pour CHAQUE sens, on te "
+    "donne sa définition WordNet, éventuellement une ou deux phrases RÉELLES "
+    "d'un livre où le mot apparaît dans ce sens (à privilégier — elles "
+    "montrent l'usage réel), et une liste de candidats de traduction "
+    "française DÉJÀ PROPOSÉS par différentes sources (mélangés, sans "
+    "indiquer leur origine). Choisis le meilleur candidat (ou réécris-en "
+    "un meilleur si aucun ne convient vraiment), donne des variantes "
+    "acceptables (fr_alt), ta confiance, et une justification courte. Si "
+    "aucun équivalent français satisfaisant n'existe (expression trop "
+    "culturellement située, etc.), mets no_equivalent à true."
+)
+
+
+def _format_judge_item(
+    entry: dict, audits: dict[str, dict], occurrences_by_sense: dict[str, list[dict]],
+    rng: random.Random,
+) -> str:
+    """Une ligne de dossier — le MÊME format pour le chemin unitaire et le
+    chemin lot (voir la docstring de _judge_batch) : phrases réelles du
+    livre courant, POS, lemmes, et candidats mélangés (rng.shuffle) pour ne
+    jamais indiquer leur origine au juge, seul composant du dispositif
+    autorisé à réécrire fr/fr_alt."""
+    audit = audits.get(entry["key"], {})
+    candidates = list({
+        entry.get("fr"), *(entry.get("fr_alt") or []),
+        *((audit.get("dbnary_fr") or "").split("; ") if audit.get("dbnary_fr") else []),
+    } - {None, ""})
+    rng.shuffle(candidates)
+    occs_all = occurrences_by_sense.get(entry["key"]) or []
+    occs = senses.pick_diverse_occurrences(occs_all, config.SENSE_FR_FRONTIER_MAX_OCCURRENCES) if occs_all else []
+    sentences = " || ".join(
+        f'"{o["context"]}" (mot cible : {o["target_surface"]})' for o in occs
+    )
+    return (
+        f"- {entry['key']} | {entry.get('pos') or 'mwe'} | {'/'.join(entry.get('lemmas_en', []))} | "
+        f"définition : {entry.get('definition_en') or '?'} | phrase(s) : {sentences or '(aucune)'} | "
+        f"candidats : {' ; '.join(candidates) or '(aucun)'}"
+    )
+
+
+def build_judge_batch_prompt(
+    entries: list[dict], audits: dict[str, dict], occurrences_by_sense: dict[str, list[dict]],
+    rng: random.Random,
+) -> str:
+    lines = [_format_judge_item(e, audits, occurrences_by_sense, rng) for e in entries]
+    return f"Sens à trancher ({len(entries)}) :\n" + "\n".join(lines) + "\nRéponds avec exactement une décision par clé dans verdicts[]."
+
+
+def build_judge_unit_prompt(
+    entries: list[dict], audits: dict[str, dict], occurrences_by_sense: dict[str, list[dict]],
+    rng: random.Random,
+) -> str:
+    """Un vrai N=1 : MÊME dossier (phrases, POS, lemmes, candidats
+    mélangés) qu'un item du chemin lot — voir _format_judge_item. Avant le
+    Lot M2 (correctif), ce chemin utilisait un prompt appauvri distinct qui
+    perdait les phrases réelles du livre, dégradant silencieusement le juge
+    en configuration `batch=false`."""
+    if len(entries) != 1:
+        raise ValueError(f"build_judge_unit_prompt attend exactement 1 entrée, reçu {len(entries)}")
+    line = _format_judge_item(entries[0], audits, occurrences_by_sense, rng)
+    return "Sens à trancher (1) :\n" + line + "\nRéponds avec un objet JSON unique (verdict), pas une liste verdicts[]."
+
+
+BACKTRANSLATE_SYSTEM = (
+    "Tu es traducteur français-anglais. Pour CHAQUE entrée, on te donne un "
+    "mot ou une courte expression française, et le sens anglais précis "
+    "qu'il est censé traduire (définition WordNet d'origine). Donne, pour "
+    "chaque entrée, la traduction anglaise la plus naturelle de ce mot ou "
+    "cette expression DANS CE SENS précis. Recopie la clé à l'identique."
+)
+
+
+def build_backtranslate_unit_prompt(entries: list[dict]) -> str:
+    e = entries[0]
+    return (f"Entrée (1) :\n- {e['key']} | français : \"{e.get('fr')}\" | "
+            f"sens visé : {e.get('definition_en') or '?'}\n"
+            "Réponds avec un objet JSON unique {key,en}, pas une liste.")
+
+
+def build_backtranslate_batch_prompt(entries: list[dict]) -> str:
+    lines = [f"- {e['key']} | français : \"{e.get('fr')}\" | sens visé : {e.get('definition_en') or '?'}" for e in entries]
+    return "Entrées (" + str(len(entries)) + ") :\n" + "\n".join(lines) + "\nRéponds avec exactement une décision par clé dans guesses[]."
+
+
+def _backtranslate_batch(entries: list[dict], model: str, *, mode_batch: bool = True, batch_size: int = 40) -> dict[str, str]:
     """Un appel par lot ; réutilise pipeline.sense_fr.backtranslation_matches
     pour la comparaison (voisinage WordNet, pas de chaînes) — voir sa
     docstring. Renvoie {key: traduction_anglaise_devinee}."""
@@ -377,56 +488,51 @@ def _backtranslate_batch(entries: list[dict], model: str) -> dict[str, str]:
     import json as _json
 
     import litellm
-    from pydantic import BaseModel as _BaseModel
 
-    class _Guess(_BaseModel):
-        key: str
-        en: str
+    if not mode_batch and len(entries) != 1:
+        raise ValueError(
+            f"S6-backtranslate: mode unitaire attend exactement 1 entrée, reçu {len(entries)}"
+        )
 
-    class _BatchGuesses(_BaseModel):
-        guesses: list[_Guess]
+    system = BACKTRANSLATE_SYSTEM
+    user = build_backtranslate_batch_prompt(entries) if mode_batch else build_backtranslate_unit_prompt(entries)
 
-    system = (
-        "Tu es traducteur français-anglais. Pour CHAQUE entrée, on te donne un "
-        "mot ou une courte expression française, et le sens anglais précis "
-        "qu'il est censé traduire (définition WordNet d'origine). Donne, pour "
-        "chaque entrée, la traduction anglaise la plus naturelle de ce mot ou "
-        "cette expression DANS CE SENS précis. Recopie la clé à l'identique."
-    )
-    lines = [
-        f"- {e['key']} | français : \"{e.get('fr')}\" | sens visé : {e.get('definition_en') or '?'}"
-        for e in entries
-    ]
-    user = "Entrées (" + str(len(entries)) + ") :\n" + "\n".join(lines)
-
-    cache_key = _json.dumps({"model": model, "system": system, "user": user}, sort_keys=True)
+    cache_key = _json.dumps({"task_id": "S6-backtranslate", "model": model, "mode_batch": mode_batch,
+                             "batch_size": batch_size if mode_batch else 1, "system": system, "user": user}, sort_keys=True)
     digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
     config.ensure_out_dir()
     cache_file = config.CACHE_DIR / f"backtranslate_{digest}.json"
     if cache_file.exists():
-        parsed = _BatchGuesses.model_validate_json(cache_file.read_text(encoding="utf-8"))
+        parsed = (_BatchGuesses if mode_batch else _Guess).model_validate_json(cache_file.read_text(encoding="utf-8"))
     else:
         response = litellm.completion(
             model=model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            response_format=_BatchGuesses,
+            response_format=_BatchGuesses if mode_batch else _Guess,
             reasoning_effort="low",
             max_tokens=8000,
         )
         content = response.choices[0].message.content
-        parsed = _BatchGuesses.model_validate_json(content)
+        parsed = (_BatchGuesses if mode_batch else _Guess).model_validate_json(content)
         cache_file.write_text(parsed.model_dump_json(), encoding="utf-8")
-    return {g.key: g.en for g in parsed.guesses}
+    return ({g.key: g.en for g in parsed.guesses} if mode_batch else {parsed.key: parsed.en})
 
 
-def run_stage_b(store: dict, targets: list[dict], model: str, batch_size: int = 40) -> dict[str, dict]:
+def run_stage_b(store: dict, targets: list[dict], model: str | None = None, batch_size: int | None = None) -> dict[str, dict]:
     """Rétro-traduit `targets` (entrées avec exactement 1 signal Stage A,
     ou `auto_llm` ayant passé les tests déterministes) et renvoie
     {key: {"en": ..., "ok": bool}}. Nécessite une clé API LiteLLM."""
+    task = task_config("S6-backtranslate")
+    model = model or task.model
+    if batch_size is None:
+        batch_size = effective_batch_size(task)
+    mode_batch = use_batch_prompt(task, batch_size)
+    if not mode_batch:
+        batch_size = 1
     results: dict[str, dict] = {}
     batches = [targets[i:i + batch_size] for i in range(0, len(targets), batch_size)]
     for batch in batches:
-        guesses = _backtranslate_batch(batch, model)
+        guesses = _backtranslate_batch(batch, model, mode_batch=mode_batch, batch_size=batch_size)
         for entry in batch:
             en_guess = guesses.get(entry["key"])
             if not en_guess:
@@ -442,9 +548,9 @@ def run_stage_b(store: dict, targets: list[dict], model: str, batch_size: int = 
 # ============================================================
 
 
-def run_stage_c(
+def _judge_batch(
     store: dict, targets: list[dict], audits: dict[str, dict], model: str,
-    occurrences_by_sense: dict[str, list[dict]], batch_size: int = 20,
+    occurrences_by_sense: dict[str, list[dict]], *, mode_batch: bool = True, batch_size: int = 20,
 ) -> dict[str, dict]:
     """Juge sur dossier, candidats MÉLANGÉS et NON ÉTIQUETÉS (pas de "le
     modèle a dit", pas de "omw a dit") — seul composant du dispositif
@@ -458,82 +564,62 @@ def run_stage_c(
     désaccord."""
     import hashlib
     import json as _json
-    import random
 
     import litellm
-    from pydantic import BaseModel as _BaseModel
-    from typing import Literal as _Literal
 
-    class _Verdict(_BaseModel):
-        key: str
-        fr: str
-        fr_alt: list[str]
-        confidence: _Literal["high", "medium", "low"]
-        reason: str
-        no_equivalent: bool = False
-
-    class _BatchVerdicts(_BaseModel):
-        verdicts: list[_Verdict]
-
-    system = (
-        "Tu es lexicographe bilingue anglais-français. Pour CHAQUE sens, on te "
-        "donne sa définition WordNet, éventuellement une ou deux phrases RÉELLES "
-        "d'un livre où le mot apparaît dans ce sens (à privilégier — elles "
-        "montrent l'usage réel), et une liste de candidats de traduction "
-        "française DÉJÀ PROPOSÉS par différentes sources (mélangés, sans "
-        "indiquer leur origine). Choisis le meilleur candidat (ou réécris-en "
-        "un meilleur si aucun ne convient vraiment), donne des variantes "
-        "acceptables (fr_alt), ta confiance, et une justification courte. Si "
-        "aucun équivalent français satisfaisant n'existe (expression trop "
-        "culturellement située, etc.), mets no_equivalent à true."
-    )
+    if not mode_batch and len(targets) != 1:
+        raise ValueError(
+            f"S6-judge-dossier: mode unitaire attend exactement 1 cible, reçu {len(targets)}"
+        )
 
     rng = random.Random(42)  # ordre de présentation déterministe, pas d'indice de source
-    system_prompt_lines = []
-    for entry in targets:
-        audit = audits.get(entry["key"], {})
-        candidates = list({
-            entry.get("fr"), *(entry.get("fr_alt") or []),
-            *((audit.get("dbnary_fr") or "").split("; ") if audit.get("dbnary_fr") else []),
-        } - {None, ""})
-        rng.shuffle(candidates)
-        occs_all = occurrences_by_sense.get(entry["key"]) or []
-        # Mêmes phrases, dans le même ordre, que la colonne contexte_en de
-        # l'audit (voir compute_signals ci-dessus et sense_fr.format_occurrences_en) :
-        # pick_diverse_occurrences, pas les 2 premières dans l'ordre du
-        # fichier — sinon le juge peut voir des phrases différentes de
-        # celles que pipeline_out/sense_fr_adjudication.csv prétend lui
-        # avoir montrées.
-        occs = senses.pick_diverse_occurrences(occs_all, config.SENSE_FR_FRONTIER_MAX_OCCURRENCES) if occs_all else []
-        sentences = " || ".join(
-            f'"{o["context"]}" (mot cible : {o["target_surface"]})' for o in occs
-        )
-        system_prompt_lines.append(
-            f"- {entry['key']} | {entry.get('pos') or 'mwe'} | {'/'.join(entry.get('lemmas_en', []))} | "
-            f"définition : {entry.get('definition_en') or '?'} | phrase(s) : {sentences or '(aucune)'} | "
-            f"candidats : {' ; '.join(candidates) or '(aucun)'}"
-        )
-    user = f"Sens à trancher ({len(targets)}) :\n" + "\n".join(system_prompt_lines)
+    if mode_batch:
+        user = build_judge_batch_prompt(targets, audits, occurrences_by_sense, rng)
+        system = JUDGE_SYSTEM
+    else:
+        user = build_judge_unit_prompt(targets, audits, occurrences_by_sense, rng)
+        system = JUDGE_SYSTEM + " Réponds par un objet verdict unique, sans enveloppe verdicts[]."
 
-    cache_key = _json.dumps({"model": model, "system": system, "user": user}, sort_keys=True)
+    cache_key = _json.dumps({"task_id": "S6-judge-dossier", "model": model, "mode_batch": mode_batch,
+                             "batch_size": batch_size if mode_batch else 1, "system": system, "user": user}, sort_keys=True)
     digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
     config.ensure_out_dir()
     cache_file = config.CACHE_DIR / f"judge_{digest}.json"
     if cache_file.exists():
-        parsed = _BatchVerdicts.model_validate_json(cache_file.read_text(encoding="utf-8"))
+        parsed = (_BatchVerdicts if mode_batch else _Verdict).model_validate_json(cache_file.read_text(encoding="utf-8"))
     else:
         response = litellm.completion(
             model=model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            response_format=_BatchVerdicts,
+            response_format=_BatchVerdicts if mode_batch else _Verdict,
             reasoning_effort="medium",
             max_tokens=16000,
         )
         content = response.choices[0].message.content
-        parsed = _BatchVerdicts.model_validate_json(content)
+        parsed = (_BatchVerdicts if mode_batch else _Verdict).model_validate_json(content)
         cache_file.write_text(parsed.model_dump_json(), encoding="utf-8")
 
-    return {v.key: v.model_dump() for v in parsed.verdicts}
+    return ({v.key: v.model_dump() for v in parsed.verdicts} if mode_batch
+            else {parsed.key: parsed.model_dump()})
+
+
+def run_stage_c(
+    store: dict, targets: list[dict], audits: dict[str, dict], model: str | None,
+    occurrences_by_sense: dict[str, list[dict]], batch_size: int | None = None,
+) -> dict[str, dict]:
+    task = task_config("S6-judge-dossier")
+    model = model or task.model
+    if batch_size is None:
+        batch_size = effective_batch_size(task)
+    mode_batch = use_batch_prompt(task, batch_size)
+    if not mode_batch:
+        batch_size = 1
+    output: dict[str, dict] = {}
+    for i in range(0, len(targets), batch_size):
+        batch = targets[i:i + batch_size]
+        output.update(_judge_batch(store, batch, audits, model, occurrences_by_sense,
+                                   mode_batch=mode_batch, batch_size=batch_size))
+    return output
 
 
 # ============================================================
@@ -556,9 +642,11 @@ def run(
     dry_run: bool = False,
     with_backtranslation: bool = False,
     with_judge: bool = False,
-    backtranslation_model: str = config.SENSE_FR_FRONTIER_MODEL,
-    judge_model: str = config.SENSE_FR_FRONTIER_MODEL,
+    backtranslation_model: str | None = None,
+    judge_model: str | None = None,
 ) -> int:
+    backtranslation_task = task_config("S6-backtranslate")
+    judge_task = task_config("S6-judge-dossier")
     # Lot 3 (point E) — voir sense_fr_frontier.py::run().
     inventory.verify_consumer(config.SENSES_INVENTORY_HASH_PATH, "sense_fr_adjudicate")
     store = sense_fr.load_store()
@@ -617,7 +705,8 @@ def run(
             )
         ]
         print(f"Stage B (rétro-traduction) : {len(stage_b_targets)} candidat(s).")
-        bt_results = run_stage_b(store, stage_b_targets, backtranslation_model)
+        bt_results = run_stage_b(store, stage_b_targets, backtranslation_model,
+                                 effective_batch_size(backtranslation_task))
         for entry in stage_b_targets:
             result = bt_results.get(entry["key"])
             if result is None:
@@ -643,7 +732,8 @@ def run(
 
     if with_judge and residual:
         print(f"Stage C (juge sur dossier) : {len(residual)} candidat(s).")
-        verdicts = run_stage_c(store, residual, audits, judge_model, occurrences_by_sense)
+        verdicts = run_stage_c(store, residual, audits, judge_model,
+                               occurrences_by_sense, effective_batch_size(judge_task))
         for entry in residual:
             verdict = verdicts.get(entry["key"])
             if verdict is None:
@@ -704,8 +794,8 @@ if __name__ == "__main__":
                          help="Stage B : nécessite une clé API (LiteLLM).")
     parser.add_argument("--with-judge", action="store_true",
                          help="Stage C : nécessite une clé API (LiteLLM).")
-    parser.add_argument("--backtranslation-model", default=config.SENSE_FR_FRONTIER_MODEL)
-    parser.add_argument("--judge-model", default=config.SENSE_FR_FRONTIER_MODEL)
+    parser.add_argument("--backtranslation-model", default=None)
+    parser.add_argument("--judge-model", default=None)
     args = parser.parse_args()
     raise SystemExit(run(
         limit=args.limit, dry_run=args.dry_run,
