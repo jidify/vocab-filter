@@ -50,14 +50,20 @@ pour les 4 tâches S6 routées par LiteLLM :
   poser séparément.
 - `catgpt/*` **n'est pas** un provider natif de LiteLLM (recherche exhaustive
   dans `.venv/Lib/site-packages/litellm/` : aucune référence à `catgpt`). Le
-  poser sur une des 4 variables `VOCAB_LLM_S6_*` passe la validation de
-  configuration (`task_config`/`require_frontier_model`) mais échouera à
-  l'appel réel tant que le routage LiteLLM→CatGPT-Gateway n'est pas câblé.
-  **Ce n'est pas un défaut introduit par ce chantier** (le M0 baseline notait
-  déjà que S6b-1/2/c ne parlaient qu'à OpenAI en pratique) — seulement rendu
-  *configurable sans erreur immédiate*, ce qui aurait pu laisser croire à tort
-  que c'était opérationnel. D'où l'avertissement explicite dans le README
-  plutôt qu'un exemple qui échouerait à l'usage.
+  poser sur une des 4 variables `VOCAB_LLM_S6_*` passait la validation de
+  configuration (`task_config`/`require_frontier_model`) mais échouait à
+  l'appel réel tant que le routage LiteLLM→CatGPT-Gateway n'était pas câblé.
+  **Ce n'était pas un défaut introduit par ce chantier** (le M0 baseline
+  notait déjà que S6b-1/2/c ne parlaient qu'à OpenAI en pratique) — seulement
+  rendu *configurable sans erreur immédiate*, ce qui aurait pu laisser croire
+  à tort que c'était opérationnel.
+  **Écart fermé depuis** par un adaptateur minimal
+  (`pipeline/llm_litellm_catgpt.py`, `litellm.CustomLLM`) — voir
+  `report_m9_catgpt_litellm_adapter.md`. Limite restante, assumée : le
+  gateway ne reçoit que `response_format: {"type":"json_object"}` (schéma
+  injecté en texte dans le prompt, pas contraint comme le `json_schema`
+  natif d'OpenAI) — une réponse hors schéma lève une `ValidationError` non
+  rattrapée par l'appelant.
 
 ### 2.2 Chaque tâche production a un modèle résolu
 
@@ -219,12 +225,13 @@ VOCAB_LLM_S6_JUDGE_DOSSIER="openai/gpt-5.6-sol;batch=true;batch_size=20"
 
 - Aucune modification de code requise — c'est exactement ce que ce chantier
   livre : deux tâches indépendantes, deux slots, deux modèles.
-- **« (ou CatGPT) »** du plan §7 n'est **pas encore atteignable** pour ces
-  tâches précises (S6b-1/S6b-2 B/C, S6c) tant que le routage LiteLLM→CatGPT-
-  Gateway n'est pas câblé (§2.1) — utiliser OpenAI pour ces 4 tâches en
-  attendant, ou `ollama/*` avec `OLLAMA_API_BASE` posé. CatGPT reste
-  pleinement fonctionnel dès aujourd'hui pour S3/S5/S6-\*-local (client
-  `pipeline/llm.py`, testé sur les 3 providers).
+- **« (ou CatGPT) »** du plan §7 est désormais atteignable pour ces tâches
+  (S6b-1/S6b-2 B/C, S6c) grâce à l'adaptateur
+  `pipeline/llm_litellm_catgpt.py` (§2.1, `report_m9_catgpt_litellm_adapter.md`) —
+  avec la limite assumée d'un schéma *instruit* dans le prompt, pas *contraint*
+  comme le `json_schema` natif d'OpenAI. CatGPT reste, comme avant, pleinement
+  fonctionnel pour S3/S5/S6-\*-local (client `pipeline/llm.py`, testé sur les
+  3 providers).
 - Chaque changement de modèle sur une tâche déjà utilisée invalide son cache
   disque (§2.5) — prévoir le coût du premier run après un changement de
   configuration S6-2.
@@ -255,9 +262,12 @@ uv run python -c "... task_config(...) pour les 9 task_id"  # capture §2.2
   périmètre exact de chaque levier de configuration ; 266 tests verts (0 échec,
   4 skip, 11 échecs attendus préexistants, stable sur plusieurs exécutions).
 - **Écarts encore ouverts, explicitement documentés, pas cachés** : M7 non
-  fait (evals encore en dur) ; CatGPT non câblé côté LiteLLM pour 4 tâches S6 ;
-  dépendance au chargement effectif de `.env` par l'environnement de
-  lancement pour l'alias `PROVIDER=chatgpt`.
+  fait (evals encore en dur) ; dépendance au chargement effectif de `.env`
+  par l'environnement de lancement pour l'alias `PROVIDER=chatgpt`.
+- **Écart fermé après M8** : CatGPT côté LiteLLM pour les 4 tâches S6, par un
+  adaptateur minimal — voir `report_m9_catgpt_litellm_adapter.md`. Limite
+  assumée : schéma *instruit* dans le prompt, pas *contraint* (pas de
+  `json_schema` natif pour ce provider).
 
 ## Gate M8
 

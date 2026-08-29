@@ -78,6 +78,7 @@ from nltk.corpus.reader.wordnet import WordNetError
 from pydantic import BaseModel
 
 from pipeline import config, inventory, lex_bilingual, sense_fr, senses
+from pipeline.llm_litellm_catgpt import call_kwargs as catgpt_call_kwargs
 from pipeline.llm_tasks import effective_batch_size, task_config, use_batch_prompt
 
 # ============================================================
@@ -344,6 +345,7 @@ def _translate_batches(
             # utile ici — c'est le cache disque, indexé sur le texte exact
             # du prompt, qui garantit qu'une relance identique est gratuite.
             max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
+            **catgpt_call_kwargs(model),
         )
         for (i, batch), response in zip(to_call, responses):
             if isinstance(response, Exception):

@@ -76,6 +76,10 @@ VOCAB_LLM_S6_TRANSLATE_FRONTIER="openai/gpt-5-mini;batch=true;batch_size=20"
 # sa propre variable OLLAMA_API_BASE (pas OLLAMA_URL), voir note providers ci-dessous
 VOCAB_LLM_S6_JUDGE_DOSSIER="ollama/mistral-small:24b;batch=true;batch_size=20"
 
+# S6-backtranslate : CatGPT-Gateway — adaptateur pipeline/llm_litellm_catgpt.py,
+# voir note providers ci-dessous pour ses limites (pas de json_schema natif)
+VOCAB_LLM_S6_BACKTRANSLATE="catgpt/catgpt-browser;batch=true;batch_size=40"
+
 # S6-translate-local / S6-backtranslate-local : batch_allowed=false, jamais de ;batch=true
 VOCAB_LLM_S6_TRANSLATE_LOCAL="ollama/mistral-small:24b"
 VOCAB_LLM_S6_BACKTRANSLATE_LOCAL="ollama/mistral-small:24b"
@@ -91,10 +95,20 @@ VOCAB_LLM_S6_BACKTRANSLATE_LOCAL="ollama/mistral-small:24b"
   `ollama/*` fonctionne aussi, mais LiteLLM lit sa **propre** variable
   `OLLAMA_API_BASE` (pas `OLLAMA_URL` de ce projet) — à poser séparément si on
   pointe une de ces 4 tâches vers Ollama. `catgpt/*` **n'est pas** un provider
-  natif de LiteLLM : le poser sur une de ces 4 variables échouera tant que le
-  routage LiteLLM→CatGPT-Gateway n'a pas été câblé (hors périmètre de ce lot).
-  En v1, préférer `openai/*` (ou `ollama/*` avec `OLLAMA_API_BASE`) pour ces
-  4 tâches.
+  natif de LiteLLM, mais un adaptateur minimal le câble
+  (`pipeline/llm_litellm_catgpt.py`, `litellm.CustomLLM`) : envoi HTTP direct
+  au gateway (`CATGPT_BASE_URL`/`CATGPT_API_TOKEN`/`CATGPT_TIMEOUT`, comme
+  `pipeline/llm.py`), et — le gateway ne sachant pas produire de JSON
+  contraint par schéma — le schéma attendu (`response_format=<modèle
+  Pydantic>`) est rajouté en texte dans le message système avant l'envoi, le
+  gateway ne recevant que `response_format: {"type":"json_object"}`. Rien
+  d'autre n'est câblé (pas de streaming, pas d'appel asynchrone, pas de
+  comptabilité de coût réelle — `litellm.completion_cost` reste non mappé
+  pour ce provider et échoue silencieusement, comme pour tout modèle inconnu
+  de LiteLLM). Conséquence : un modèle du gateway qui répond hors schéma lève
+  une `ValidationError` non rattrapée par l'appelant (seule l'erreur réseau
+  l'est, via `isinstance(response, Exception)`) — à valider sur un petit lot
+  avant de basculer une tâche coûteuse.
 
 ### Invalidation du cache disque au changement de modèle/mode
 

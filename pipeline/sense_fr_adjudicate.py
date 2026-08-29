@@ -489,6 +489,8 @@ def _backtranslate_batch(entries: list[dict], model: str, *, mode_batch: bool = 
 
     import litellm
 
+    from pipeline.llm_litellm_catgpt import call_kwargs as catgpt_call_kwargs
+
     if not mode_batch and len(entries) != 1:
         raise ValueError(
             f"S6-backtranslate: mode unitaire attend exactement 1 entrée, reçu {len(entries)}"
@@ -511,6 +513,7 @@ def _backtranslate_batch(entries: list[dict], model: str, *, mode_batch: bool = 
             response_format=_BatchGuesses if mode_batch else _Guess,
             reasoning_effort="low",
             max_tokens=8000,
+            **catgpt_call_kwargs(model),
         )
         content = response.choices[0].message.content
         parsed = (_BatchGuesses if mode_batch else _Guess).model_validate_json(content)
@@ -567,6 +570,8 @@ def _judge_batch(
 
     import litellm
 
+    from pipeline.llm_litellm_catgpt import call_kwargs as catgpt_call_kwargs
+
     if not mode_batch and len(targets) != 1:
         raise ValueError(
             f"S6-judge-dossier: mode unitaire attend exactement 1 cible, reçu {len(targets)}"
@@ -594,6 +599,7 @@ def _judge_batch(
             response_format=_BatchVerdicts if mode_batch else _Verdict,
             reasoning_effort="medium",
             max_tokens=16000,
+            **catgpt_call_kwargs(model),
         )
         content = response.choices[0].message.content
         parsed = (_BatchVerdicts if mode_batch else _Verdict).model_validate_json(content)

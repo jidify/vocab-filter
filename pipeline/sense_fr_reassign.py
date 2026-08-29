@@ -72,6 +72,7 @@ from nltk.corpus import wordnet as nwn
 from pydantic import BaseModel
 
 from pipeline import config, inventory as lexical_inventory, senses, sense_fr, verify_fr_lock
+from pipeline.llm_litellm_catgpt import call_kwargs as catgpt_call_kwargs
 from pipeline.llm_tasks import effective_batch_size, task_config, use_batch_prompt
 
 # ============================================================
@@ -334,6 +335,7 @@ def _translate_batches(
             model=model, messages=messages, response_format=ReassignBatch if mode_batch else UnitReassignedDecision,
             reasoning_effort="low", max_tokens=16000,
             max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
+            **catgpt_call_kwargs(model),
         )
         for (i, batch), response in zip(to_call, responses):
             if isinstance(response, Exception):
