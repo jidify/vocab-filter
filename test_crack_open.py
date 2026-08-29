@@ -1,9 +1,14 @@
-from idiomatch import Idiomatcher
+import unittest
+
+if __name__ != "__main__":
+    raise unittest.SkipTest("manual idiomatch exploration; run this file directly")
+
+from pipeline.mwe import get_matcher
 
 
 print("Chargement du matcher...")
 
-matcher = Idiomatcher.from_pretrained(n=2)
+matcher = get_matcher()
 
 print("Ajout de 'crack open'...")
 

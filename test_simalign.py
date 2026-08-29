@@ -1,3 +1,12 @@
+import unittest
+
+if __name__ != "__main__":
+    raise unittest.SkipTest("manual SimAlign exploration; run this file directly")
+
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 import re
 from simalign import SentenceAligner
 

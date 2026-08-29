@@ -15,6 +15,7 @@ proposition_1.
 from __future__ import annotations
 
 import json
+import builtins
 from collections import Counter, defaultdict
 
 from idiomatch import Idiomatcher
@@ -107,7 +108,27 @@ def get_idiom_definition(idiom: str) -> str | None:
 def get_matcher():
     global _MATCHER
     if _MATCHER is None:
-        _MATCHER = Idiomatcher.from_pretrained(n=2)
+        # idiomatch 0.x opens its UTF-8 YAML/JSON resources without an
+        # explicit encoding.  On Windows that means cp1252 and crashes on
+        # perfectly valid Unicode.  Scope the compatibility shim to the
+        # dependency module and to this load only; application files keep
+        # using the normal built-in open.
+        import idiomatch.idiomatcher as idiomatcher_module
+
+        def open_utf8(path, mode="r", *args, **kwargs):
+            if "b" not in mode:
+                kwargs.setdefault("encoding", "utf-8")
+            return builtins.open(path, mode, *args, **kwargs)
+
+        previous_open = getattr(idiomatcher_module, "open", None)
+        idiomatcher_module.open = open_utf8
+        try:
+            _MATCHER = Idiomatcher.from_pretrained(n=2)
+        finally:
+            if previous_open is None:
+                del idiomatcher_module.open
+            else:
+                idiomatcher_module.open = previous_open
         _MATCHER.add_idioms(_all_custom_idioms())
     return _MATCHER
 

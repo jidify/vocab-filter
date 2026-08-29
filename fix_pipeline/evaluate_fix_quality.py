@@ -184,6 +184,17 @@ def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]], audit
     expected_mwe = sum(normalize(r["unit_type"]) == "mwe" for r in expected)
     matched_mwe = len(mwe_pairs)
     missing_fr_fixed = [a for a, e in paired if not normalize(a["meaning_fr_official"]) and normalize(e["meaning_fr_official"])]
+    # Historical plan figure: set difference of canonical WORD keys.  Keep it
+    # separate from the multiset metrics, which correctly preserve homonyms.
+    actual_word_canons = {
+        normalize(r["canonical_form"]) for r in actual
+        if normalize(r["unit_type"]) == "word"
+    }
+    expected_word_canons = {
+        normalize(r["canonical_form"]) for r in expected
+        if normalize(r["unit_type"]) == "word"
+    }
+    actual_only_unique_words = sorted(actual_word_canons - expected_word_canons)
 
     def summary(row: dict[str, str]) -> dict[str, str]:
         return {k: row.get(k, "") for k in ("canonical_form", "surface_forms", "unit_type", "pos", "sense_id", "meaning_fr_official", "definition_en", "needs_review")}
@@ -230,6 +241,7 @@ def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]], audit
         "actual_only_rows": len(only_a), "benchmark_only_rows": len(only_e),
         "actual_only_mwe": sum(normalize(actual[i]["unit_type"]) == "mwe" for i in only_a),
         "actual_only_words": sum(normalize(actual[i]["unit_type"]) == "word" for i in only_a),
+        "actual_only_unique_word_canons": len(actual_only_unique_words),
         "benchmark_only_mwe": sum(normalize(expected[i]["unit_type"]) == "mwe" for i in only_e),
         "benchmark_only_words": sum(normalize(expected[i]["unit_type"]) == "word" for i in only_e),
         "mwe_missing_pos": sum(not normalize(a["pos"]) and bool(normalize(e["pos"])) for a, e in mwe_pairs),
@@ -263,6 +275,7 @@ def evaluate(actual: list[dict[str, str]], expected: list[dict[str, str]], audit
         "metrics": metrics,
         "counts": counts,
         "actual_only": out_of_scope,
+        "actual_only_unique_words": actual_only_unique_words,
         "benchmark_only": [summary(expected[i]) for i in only_e],
         "out_of_scope_policy": "An absence from the benchmark defaults to needs_review and never to false_positive.",
         "classifications": {

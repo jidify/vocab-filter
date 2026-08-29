@@ -74,6 +74,15 @@ class FixQualityEvaluatorTests(unittest.TestCase):
         self.assertEqual(result["counts"]["documented_mwe_definition_mismatches_baseline"], 38)
         self.assertEqual(result["counts"]["mwe_definition_mismatches"], 43)
 
+    def test_historical_nine_extra_word_canons_are_measured(self):
+        result = evaluate(read_csv(Path("pipeline_out/vocab.csv")),
+                          read_csv(Path("pipeline_out/vocab_corrige.csv")))
+        self.assertEqual(result["counts"]["actual_only_unique_word_canons"], 9)
+        self.assertEqual(result["actual_only_unique_words"], [
+            "crystal", "ease", "forth", "nursing", "observation",
+            "ranch", "tighten", "virgin", "york",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

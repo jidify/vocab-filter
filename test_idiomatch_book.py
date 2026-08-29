@@ -1,7 +1,12 @@
+import unittest
+
+if __name__ != "__main__":
+    raise unittest.SkipTest("manual whole-book exploration; run this file directly")
+
 from pathlib import Path
 from collections import Counter
 
-from idiomatch import Idiomatcher
+from pipeline.mwe import get_matcher
 
 
 # ============================================================
@@ -39,9 +44,7 @@ print()
 
 print("Chargement de Idiomatcher...")
 
-idiomatcher = (
-    Idiomatcher.from_pretrained()
-)
+idiomatcher = get_matcher()
 
 print("Idiomatcher chargé.")
 print()

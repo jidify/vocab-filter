@@ -185,6 +185,13 @@ def build_records() -> list[dict]:
                 # ignorées plutôt que de faire échouer tout l'export.
                 n_corrupt += 1
                 continue
+            # S5-4 keeps an auditable occurrence record but it is an explicit
+            # structural exclusion, not a lexical sense to aggregate/export.
+            # The decision lives on this physical occurrence only; autonomous
+            # occurrences of the same lemma remain separate lines and survive.
+            if (occ.get("resolution_status") == "excluded"
+                    and occ.get("exclusion_reason") == "covered_by_confirmed_multi_token"):
+                continue
             key = (occ["word"], occ["pos"])
             type_meta = types_by_key.get(key, {})
 

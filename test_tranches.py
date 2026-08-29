@@ -103,7 +103,9 @@ class SensesTrancheMergeTests(unittest.TestCase):
 
         self.calls: list[tuple[str, str, int]] = []
 
-        def fake_analyze_occurrence(word, pos, segments, seg_idx, allow_arbitration=True):
+        def fake_analyze_occurrence(word, pos, segments, seg_idx,
+                                    allow_arbitration=True, target_surface=None,
+                                    **_resolution_signals):
             self.calls.append((word, pos, seg_idx))
             return {
                 "word": word, "pos": pos, "segment_idx": seg_idx,

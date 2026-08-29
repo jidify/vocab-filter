@@ -42,7 +42,9 @@ from lemminflect import getAllInflections, getAllInflectionsOOV
 from pipeline import atomic, config, inventory, llm
 from pipeline.corpus import Segment, load_segments
 
-SENSE_RESOLUTION_VERSION = "no-sense-recovery-v3"
+SENSE_RESOLUTION_VERSION = "compound-fragment-v4"
+
+MULTI_TOKEN_FRAGMENT_SENSE_ID = "excluded.multi_token_fragment"
 
 # Seuils issus du corpus Q0-2. La marge brute n'est plus une porte de
 # production : elle reste exposee dans les artefacts pour audit et pour la
@@ -157,6 +159,53 @@ def resolution_digest(inventory_digest: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def confirmed_covering_candidates(occurrence: dict) -> list[dict]:
+    """Return structural S1 candidates strong enough to block a simple sense.
+
+    This decision is deliberately occurrence-scoped: candidates are copied on
+    each token occurrence by S1/S4, so another occurrence of the same lemma is
+    unaffected.  Only the two structurally grounded families currently emitted
+    by :mod:`pipeline.multi_token` qualify; lower-confidence boundary proposals
+    remain hypotheses and cannot suppress vocabulary by themselves.
+    """
+    confirmed = []
+    for candidate in occurrence.get("multi_token_candidates") or []:
+        types = set(candidate.get("candidate_types") or [])
+        score = float(candidate.get("score") or 0.0)
+        is_entity = any(t.startswith("named_entity:") for t in types)
+        is_compound = "nominal_compound" in types
+        if (is_entity and score >= 0.90) or (is_compound and score >= 0.80):
+            confirmed.append(candidate)
+    return confirmed
+
+
+def multi_token_fragment_record(occurrence: dict, segments: list[Segment]) -> dict | None:
+    """Build an auditable exclusion instead of assigning a fragment synset."""
+    covering = confirmed_covering_candidates(occurrence)
+    if not covering:
+        return None
+    wide = build_wide_context_from_segments(segments, occurrence["segment_idx"])
+    by_idx, _ = _segment_lookup(segments)
+    surfaces = list(dict.fromkeys(c.get("surface") for c in covering if c.get("surface")))
+    return {
+        "word": occurrence.get("canonical_form") or occurrence.get("lemma") or occurrence.get("surface"),
+        "pos": occurrence.get("pos"),
+        "segment_idx": occurrence["segment_idx"],
+        "target_surface": occurrence.get("surface"),
+        "context": wide["text"],
+        "french": by_idx[occurrence["segment_idx"]].fr or None,
+        "candidates": [],
+        "best_sense": MULTI_TOKEN_FRAGMENT_SENSE_ID,
+        "margin": 1.0,
+        "needs_review": False,
+        "arbitration": None,
+        "resolution_status": "excluded",
+        "exclusion_reason": "covered_by_confirmed_multi_token",
+        "covering_multi_token_candidates": covering,
+        "covering_surfaces": surfaces,
+    }
+
+
 def _stable_recovery_id(prefix: str, occurrence: dict, payload: str = "") -> str:
     identity = "\n".join([
         str(occurrence.get("canonical_form") or occurrence.get("word") or ""),
@@ -234,6 +283,9 @@ def unresolved_occurrence_record(occurrence: dict, segments: list[Segment]) -> d
 
 def resolve_joint_occurrence(occurrence: dict, segments: list[Segment]) -> dict | None:
     """Choisit conjointement lemme, POS et sens dans l'inventaire S1 borne."""
+    fragment = multi_token_fragment_record(occurrence, segments)
+    if fragment is not None:
+        return fragment
     opened = controlled_analysis_inventory(occurrence)
     if not opened:
         return None
@@ -1228,7 +1280,10 @@ def run(segment_idxs: set[int] | None = None, top_k: int | None = None) -> int:
 
         for occ_row in occ_rows:
             seg_idx = occ_row["segment_idx"]
-            if use_full:
+            fragment = multi_token_fragment_record(occ_row, segments)
+            if fragment is not None:
+                record = fragment
+            elif use_full:
                 joint_input = dict(occ_row)
                 joint_input.setdefault("canonical_form", t["lemma"])
                 joint_input.setdefault("pos", t["wn_pos"])
