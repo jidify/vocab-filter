@@ -41,6 +41,7 @@ from lemminflect import getAllInflections, getAllInflectionsOOV
 
 from pipeline import atomic, config, inventory, llm
 from pipeline.corpus import Segment, load_segments
+from pipeline.llm_tasks import effective_batch_size, task_config
 
 SENSE_RESOLUTION_VERSION = "compound-fragment-v4"
 
@@ -700,18 +701,93 @@ Réponds en JSON strict :
 """
 
 
-def arbitrate(word, pos, context_text, synsets):
-    candidates = "\n".join(
-        f'- {s.name()}: {s.definition()}' for s in synsets
-    )
-    prompt = ARBITRATION_TEMPLATE.format(
+ARBITRATION_BATCH_SYSTEM = ARBITRATION_SYSTEM + (
+    " Tu reçois plusieurs arbitrages indépendants : ne les confonds jamais et "
+    "renvoie une décision séparée pour chaque request_id."
+)
+
+ARBITRATION_BATCH_TEMPLATE = """Arbitre séparément les {count} cas suivants.
+
+{items}
+
+Réponds en JSON strict avec ce schéma :
+{{"decisions":[{{"request_id":"<id exact>","selected_sense":"<id du sens choisi ou 'aucun_sens_adapte'>","usage_type":"<litteral|idiomatique|autre>","contextual_meaning_fr":"<courte paraphrase française>","custom_definition_en":"<définition anglaise précise seulement si aucun sens ne convient, sinon chaîne vide>","evidence":"<indice textuel>","confidence":<0.0-1.0>}}]}}
+Il doit y avoir exactement une décision par request_id, dans le même ordre.
+"""
+
+
+def _arbitration_prompt(word, pos, context_text, synsets) -> str:
+    candidates = "\n".join(f'- {s.name()}: {s.definition()}' for s in synsets)
+    return ARBITRATION_TEMPLATE.format(
         word=word, pos=pos, context=context_text, candidates=candidates
     )
+
+
+def arbitrate(word, pos, context_text, synsets, *, model: str | None = None):
+    """Chemin unitaire explicite de S5-arbitrate."""
+    task = task_config("S5-arbitrate")
+    prompt = _arbitration_prompt(word, pos, context_text, synsets)
     try:
-        result = llm.call_json(prompt, system=ARBITRATION_SYSTEM, timeout=120)
+        result = llm.call_json(
+            prompt, system=ARBITRATION_SYSTEM, model=model or task.bare_model,
+            backend=task.provider, timeout=120,
+            cache_metadata={"task_id": task.task_id, "model": task.model,
+                            "mode_batch": False, "batch_size": 1},
+        )
     except llm.LLMError as exc:
         return {"selected_sense": None, "confidence": 0.0, "error": str(exc)}
     return result
+
+
+def arbitrate_batch(requests: list[tuple[str, str, str, str, list]],
+                    *, model: str | None = None) -> dict[str, dict]:
+    """Chemin lot de S5-arbitrate : un prompt, une décision par ``request_id``.
+
+    Chaque élément de ``requests`` est ``(request_id, word, pos, context_text, synsets)``."""
+    task = task_config("S5-arbitrate")
+    if not requests:
+        return {}
+    if len(requests) > effective_batch_size(task):
+        raise ValueError(
+            f"lot S5 arbitrage de {len(requests)} cas > batch_size={effective_batch_size(task)}"
+        )
+    items = "\n\n".join(
+        f"{index}. request_id={request_id!r}\n{_arbitration_prompt(word, pos, context_text, synsets)}"
+        for index, (request_id, word, pos, context_text, synsets) in enumerate(requests, start=1)
+    )
+    prompt = ARBITRATION_BATCH_TEMPLATE.format(count=len(requests), items=items)
+    try:
+        raw = llm.call_json(
+            prompt, system=ARBITRATION_BATCH_SYSTEM, model=model or task.bare_model,
+            backend=task.provider, timeout=120,
+            cache_metadata={"task_id": task.task_id, "model": task.model,
+                            "mode_batch": True, "batch_size": effective_batch_size(task)},
+        )
+    except llm.LLMError as exc:
+        return {request_id: {"selected_sense": None, "confidence": 0.0, "error": str(exc)}
+                for request_id, *_ in requests}
+
+    expected = {request_id for request_id, *_ in requests}
+    received: dict[str, dict] = {}
+    duplicates: set[str] = set()
+    for decision in raw.get("decisions", []) if isinstance(raw, dict) else []:
+        request_id = decision.get("request_id") if isinstance(decision, dict) else None
+        if request_id in received:
+            duplicates.add(request_id)
+        elif request_id in expected:
+            received[request_id] = decision
+
+    decisions: dict[str, dict] = {}
+    for request_id, *_ in requests:
+        if request_id not in received or request_id in duplicates:
+            decisions[request_id] = {
+                "selected_sense": None, "confidence": 0.0,
+                "error": f"réponse LLM invalide: request_id manquant ou dupliqué: {request_id}",
+            }
+        else:
+            decisions[request_id] = {k: v for k, v in received[request_id].items()
+                                     if k != "request_id"}
+    return decisions
 
 
 def _normalized_entropy(results: list[dict]) -> float:
