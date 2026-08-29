@@ -45,19 +45,18 @@ class S5ArbitrateUnitTests(unittest.TestCase):
     def test_unit_prompt_uses_task_slot_and_scalar_schema(self):
         task = _task("S5-arbitrate", batch=False, size=1, model="catgpt/arbiter-a")
         with patch.object(senses, "task_config", return_value=task), \
-             patch.object(senses.llm, "call_json", return_value=_reply()) as call:
+             patch.object(senses.llm_client, "call", return_value=_reply()) as call:
             got = senses.arbitrate("turn off", "VERB", "He turned off the lamp.", _synsets())
 
         self.assertEqual(got["selected_sense"], "turn_off.v.01")
-        self.assertEqual(call.call_args.kwargs["model"], "arbiter-a")
-        self.assertEqual(call.call_args.kwargs["backend"], "catgpt")
-        self.assertFalse(call.call_args.kwargs["cache_metadata"]["mode_batch"])
-        self.assertNotIn('"decisions"', call.call_args.args[0])
+        self.assertEqual(call.call_args.kwargs["model"], "catgpt/arbiter-a")
+        self.assertFalse(call.call_args.kwargs["cache_key_fields"]["extra"]["mode_batch"])
+        self.assertNotIn('"decisions"', call.call_args.kwargs["prompt"])
 
     def test_llm_failure_returns_none_selection_like_before(self):
         task = _task("S5-arbitrate", batch=False, size=1)
         with patch.object(senses, "task_config", return_value=task), \
-             patch.object(senses.llm, "call_json", side_effect=senses.llm.LLMError("down")):
+             patch.object(senses.llm_client, "call", side_effect=senses.llm_client.LLMError("down")):
             got = senses.arbitrate("turn off", "VERB", "He turned off the lamp.", _synsets())
 
         self.assertIsNone(got["selected_sense"])
@@ -81,16 +80,16 @@ class S5ArbitrateBatchTests(unittest.TestCase):
             {"request_id": "r3", **_reply("aucun_sens_adapte")},
         ]}
         with patch.object(senses, "task_config", return_value=task), \
-             patch.object(senses.llm, "call_json", return_value=reply) as call:
+             patch.object(senses.llm_client, "call", return_value=reply) as call:
             got = senses.arbitrate_batch(self._requests())
 
         self.assertEqual([got[r]["selected_sense"] for r in ("r1", "r2", "r3")],
                          ["turn_off.v.01", "turn_off.v.02", "aucun_sens_adapte"])
-        prompt = call.call_args.args[0]
+        prompt = call.call_args.kwargs["prompt"]
         self.assertIn('"decisions"', prompt)
         self.assertIn("exactement une décision par request_id", prompt)
-        self.assertTrue(call.call_args.kwargs["cache_metadata"]["mode_batch"])
-        self.assertEqual(call.call_args.kwargs["cache_metadata"]["batch_size"], 3)
+        self.assertTrue(call.call_args.kwargs["cache_key_fields"]["extra"]["mode_batch"])
+        self.assertEqual(call.call_args.kwargs["cache_key_fields"]["extra"]["batch_size"], 3)
 
     def test_batch_detects_missing_and_duplicate_ids_as_error_results(self):
         task = _task("S5-arbitrate", batch=True, size=3)
@@ -99,7 +98,7 @@ class S5ArbitrateBatchTests(unittest.TestCase):
             {"request_id": "r1", **_reply()},
         ]}
         with patch.object(senses, "task_config", return_value=task), \
-             patch.object(senses.llm, "call_json", return_value=reply):
+             patch.object(senses.llm_client, "call", return_value=reply):
             got = senses.arbitrate_batch(self._requests())
 
         self.assertTrue(all(item["selected_sense"] is None for item in got.values()))
@@ -114,7 +113,7 @@ class S5ArbitrateBatchTests(unittest.TestCase):
     def test_llm_failure_marks_every_request_as_error(self):
         task = _task("S5-arbitrate", batch=True, size=3)
         with patch.object(senses, "task_config", return_value=task), \
-             patch.object(senses.llm, "call_json", side_effect=senses.llm.LLMError("down")):
+             patch.object(senses.llm_client, "call", side_effect=senses.llm_client.LLMError("down")):
             got = senses.arbitrate_batch(self._requests())
 
         self.assertEqual(set(got), {"r1", "r2", "r3"})

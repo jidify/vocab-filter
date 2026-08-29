@@ -13,14 +13,24 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline import config, llm, mwe_judge
+from pipeline import config, llm_client, mwe_judge
+from pipeline.llm_tasks import task_config
 
 CASES_PATH = Path("fix_pipeline/s3_judge_eval_cases.json")
 GOLD_MWE_PATH = Path("fix_pipeline/gold_corpus/the_humans_gold_v0.jsonl")
 RESULTS_PATH = config.OUT_DIR / "s3_judge_model_results.json"
 REPORT_PATH = config.OUT_DIR / "s3_judge_model_report.md"
-FRONTIER_MODEL = config.SENSE_FR_FRONTIER_MODEL
-LOCAL_MODEL = config.llm_model()
+# Résolus via le registre (Lot U6 du plan d'unification, ferme M7 —
+# fix_pipeline/multi_models/report_multi_models.md §4bis/§5) : un override
+# VOCAB_LLM_S3_JUDGE_OCCURRENCE / VOCAB_LLM_S6_TRANSLATE_FRONTIER doit
+# atteindre cette évaluation comme la production, pas seulement un
+# config.llm_model()/config.SENSE_FR_FRONTIER_MODEL figés à l'import.
+# Indépendance juge/candidat de l'ablation (config.py:333-336) non concernée
+# ici : "frontière" et "local" sont déjà deux tâches distinctes du registre.
+LOCAL_TASK = task_config("S3-judge-occurrence")
+FRONTIER_TASK = task_config("S6-translate-frontier")
+LOCAL_MODEL = LOCAL_TASK.model
+FRONTIER_MODEL = FRONTIER_TASK.model
 MIN_PRECISION = 0.97
 MIN_RECALL = 0.97
 MAX_REVIEW_RATE = 0.05
@@ -69,28 +79,22 @@ Réponds uniquement avec ce JSON compact, sans explication ni champ supplémenta
 
 
 def _frontier_call(case: dict) -> tuple[dict, float]:
-    import litellm
+    """Client unifié (Lot U6) — cache dédié à cette évaluation (préfixe
+    ``s3_frontier_``), invalidé par ce changement de mécanique HTTP : cache
+    d'outil de diagnostic opt-in, pas l'un des 4 caches de production
+    préservés octet pour octet au Lot U3 (voir report_multi_models.md §4bis)."""
+    prompt = _prompt(case)
     metadata = {"protocol": mwe_judge.S3_PROMPT_VERSION,
                 "schema": mwe_judge.S3_DECISION_SCHEMA_VERSION,
                 "model": FRONTIER_MODEL, "canonical_form": case["canonical_form"],
                 "context_signature": hashlib.sha256(case["context"].encode()).hexdigest()}
-    key = json.dumps(metadata, sort_keys=True)
-    cache = config.CACHE_DIR / f"s3_frontier_{hashlib.sha256(key.encode()).hexdigest()}.json"
-    config.ensure_out_dir()
-    if cache.exists():
-        return json.loads(cache.read_text(encoding="utf-8")), 0.0
-    response = litellm.completion(
-        model=FRONTIER_MODEL,
-        messages=[{"role":"system","content":mwe_judge.OCC_SYSTEM_PROMPT},
-                  {"role":"user","content":_prompt(case)}],
-        response_format={"type":"json_object"}, reasoning_effort="low",
+    raw, cost = llm_client.call(
+        model=FRONTIER_MODEL, system=mwe_judge.OCC_SYSTEM_PROMPT, prompt=prompt,
+        cache_key_fields=llm_client.build_cache_key(
+            model=FRONTIER_MODEL, system=mwe_judge.OCC_SYSTEM_PROMPT, prompt=prompt, extra=metadata,
+        ),
+        cache_prefix="s3_frontier_", reasoning_effort="low", return_cost=True,
     )
-    raw = json.loads(response.choices[0].message.content)
-    cache.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
-    try:
-        cost = float(litellm.completion_cost(completion_response=response))
-    except Exception:
-        cost = 0.0
     return raw, cost
 
 
@@ -109,15 +113,19 @@ def _normalize(raw: dict, canonical: str) -> dict:
 def _run_case(case: dict, model_kind: str) -> tuple[dict, float]:
     started = time.perf_counter()
     if model_kind == "local":
+        prompt = _prompt(case)
         try:
-            raw = llm.call_json(
-                _prompt(case), system=mwe_judge.OCC_SYSTEM_PROMPT, model=LOCAL_MODEL,
+            raw = llm_client.call(
+                model=LOCAL_MODEL, system=mwe_judge.OCC_SYSTEM_PROMPT, prompt=prompt,
                 timeout=config.CATGPT_TIMEOUT,
-                cache_metadata={"protocol": "s3-judge-eval-1-compact",
-                                "schema": "label-canon-pos-confidence-v1"},
+                cache_key_fields=llm_client.build_cache_key(
+                    model=LOCAL_MODEL, system=mwe_judge.OCC_SYSTEM_PROMPT, prompt=prompt,
+                    extra={"protocol": "s3-judge-eval-1-compact",
+                          "schema": "label-canon-pos-confidence-v1"},
+                ),
             )
             normalized = _normalize(raw, case["canonical_form"])
-        except llm.LLMError:
+        except llm_client.LLMError:
             normalized = {"label": "incertain", "canonical_form": case["canonical_form"],
                           "confidence": 0.0, "schema_valid": False}
         cost = 0.0
@@ -157,13 +165,16 @@ Réponds uniquement avec un objet JSON compact, sans explication ni champ suppl�
 {{"decisions":[{{"case_id":"<id exact>","label":"<catégorie>","canonical_form":"<canon>","pos":"<NOUN|VERB|ADJ|ADV|OTHER>","confidence":<0.0-1.0>}}]}}
 Il doit y avoir exactement une décision par case_id, dans le même ordre.'''
     started = time.perf_counter()
-    raw = llm.call_json(
-        prompt, system=mwe_judge.OCC_SYSTEM_PROMPT, model=LOCAL_MODEL,
+    raw = llm_client.call(
+        model=LOCAL_MODEL, system=mwe_judge.OCC_SYSTEM_PROMPT, prompt=prompt,
         timeout=config.CATGPT_TIMEOUT,
-        cache_metadata={"protocol": "s3-judge-eval-1-compact-batch-prompt-2",
-                        "schema": "batch-label-canon-pos-confidence-v1",
-                        "cache_variant": cache_variant,
-                        "case_ids": [case["id"] for case in cases]},
+        cache_key_fields=llm_client.build_cache_key(
+            model=LOCAL_MODEL, system=mwe_judge.OCC_SYSTEM_PROMPT, prompt=prompt,
+            extra={"protocol": "s3-judge-eval-1-compact-batch-prompt-2",
+                  "schema": "batch-label-canon-pos-confidence-v1",
+                  "cache_variant": cache_variant,
+                  "case_ids": [case["id"] for case in cases]},
+        ),
     )
     elapsed = round(time.perf_counter() - started, 4)
     expected_ids = {case["id"] for case in cases}
@@ -258,7 +269,7 @@ def main() -> int:
             strata[row["stratum"]].append(row)
         metrics = _metrics(rows)
         results[kind] = {"model": LOCAL_MODEL if kind == "local" else FRONTIER_MODEL,
-                         "backend": config.LLM_BACKEND if kind == "local" else "litellm",
+                         "backend": LOCAL_TASK.provider if kind == "local" else FRONTIER_TASK.provider,
                          "metrics": metrics, "passes": _passes(metrics), "by_stratum": {
                              name: _metrics(items) for name, items in sorted(strata.items())}, "rows": rows}
     if set(results) == {"local", "frontier"}:

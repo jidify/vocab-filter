@@ -14,18 +14,16 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import random
 from collections import Counter
 from pathlib import Path
 from typing import Literal
 
-import litellm
 from nltk.corpus import wordnet as nwn
 from pydantic import BaseModel
 
-from pipeline import config, sense_fr, senses
+from pipeline import config, llm_client, sense_fr, senses
 
 
 CASES_PATH = config.OUT_DIR / "frontier_benchmark_cases.jsonl"
@@ -121,72 +119,44 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _cache_path(prefix: str, model: str, system: str, user: str) -> Path:
-    payload = json.dumps(
-        {"model": model, "system": system, "user": user},
-        ensure_ascii=False, sort_keys=True,
-    )
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    config.ensure_out_dir()
-    return config.CACHE_DIR / f"{prefix}_{digest}.json"
+def _cache_key_fields(model: str, system: str, user: str) -> dict:
+    return {"model": model, "system": system, "user": user}
 
 
 def _completion(model: str, system: str, user: str, schema: type[BaseModel],
                 prefix: str, reasoning_effort: str) -> tuple[BaseModel, float]:
-    cache = _cache_path(prefix, model, system, user)
-    if cache.exists():
-        return schema.model_validate_json(cache.read_text(encoding="utf-8")), 0.0
-    response = litellm.completion(
-        model=model,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        response_format=schema,
-        reasoning_effort=reasoning_effort,
-        max_tokens=16000,
+    """Client unifié (Lot U6 du plan d'unification, ferme M7 —
+    fix_pipeline/multi_models/report_multi_models.md §4bis/§5). Ne touche
+    PAS à ``DEFAULT_CANDIDATE_MODEL``/``DEFAULT_JUDGE_MODEL`` : ce benchmark
+    exige un juge indépendant du modèle candidat par construction
+    (config.py:333-336), donc jamais résolu via task_config/
+    ALLOWED_FRONTIER_MODELS — seule la mécanique d'appel change ici."""
+    return llm_client.call(
+        model=model, system=system, prompt=user, response_model=schema,
+        cache_key_fields=_cache_key_fields(model, system, user), cache_prefix=f"{prefix}_",
+        reasoning_effort=reasoning_effort, max_tokens=16000, return_cost=True,
     )
-    parsed = schema.model_validate_json(response.choices[0].message.content)
-    cache.write_text(parsed.model_dump_json(), encoding="utf-8")
-    try:
-        cost = float(litellm.completion_cost(completion_response=response))
-    except Exception:
-        cost = 0.0
-    return parsed, cost
 
 
 def _completions(model: str, system: str, users: list[str], schema: type[BaseModel],
                  prefix: str, reasoning_effort: str,
                  max_workers: int = 5) -> tuple[list[BaseModel], float]:
     """Version parallèle et ordonnée de _completion, avec le même cache."""
-    results: list[BaseModel | None] = [None] * len(users)
-    pending: list[tuple[int, str, Path]] = []
-    for index, user in enumerate(users):
-        cache = _cache_path(prefix, model, system, user)
-        if cache.exists():
-            results[index] = schema.model_validate_json(cache.read_text(encoding="utf-8"))
-        else:
-            pending.append((index, user, cache))
-    total_cost = 0.0
-    if pending:
-        responses = litellm.batch_completion(
-            model=model,
-            messages=[
-                [{"role": "system", "content": system}, {"role": "user", "content": user}]
-                for _, user, _ in pending
-            ],
-            response_format=schema,
-            reasoning_effort=reasoning_effort,
-            max_tokens=16000,
-            max_workers=max_workers,
-        )
-        for (index, _user, cache), response in zip(pending, responses):
-            if isinstance(response, Exception):
-                raise response
-            parsed = schema.model_validate_json(response.choices[0].message.content)
-            cache.write_text(parsed.model_dump_json(), encoding="utf-8")
-            results[index] = parsed
-            try:
-                total_cost += float(litellm.completion_cost(completion_response=response))
-            except Exception:
-                pass
+    items = [
+        llm_client.BatchItem(system=system, user=user,
+                             cache_key_fields=_cache_key_fields(model, system, user),
+                             cache_prefix=f"{prefix}_")
+        for user in users
+    ]
+
+    def _on_error(_i, _item, exc):
+        raise exc
+
+    results, total_cost = llm_client.call_batch_completion(
+        items, model=model, response_model=schema,
+        reasoning_effort=reasoning_effort, max_tokens=16000, max_workers=max_workers,
+        on_error=_on_error,
+    )
     if any(result is None for result in results):
         raise RuntimeError("Réponse LLM absente après traitement parallèle.")
     return [result for result in results if result is not None], total_cost

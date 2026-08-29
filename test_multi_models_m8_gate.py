@@ -1,12 +1,15 @@
 """Lot M8 — gate final (plan §5 Lot M8) : matrice manuelle minimale, « au
-moins un run mock par provider ». pipeline/llm.py (S3, S5, S6-*-local) est
-déjà couvert pour ollama/catgpt/openai par test_llm_backends.py (3 tests, un
-par provider). Côté LiteLLM (S6-translate-frontier, S6-backtranslate,
-S6-judge-dossier, S6-reassign), test_multi_models_m2_s6.py exerçait déjà
-openai/catgpt (build_entry/apply_decision, provenance du modèle) mais jamais
-ollama à travers un appel litellm réellement mocké — ce fichier ferme cet
-écart. Complète aussi le premier item de la checklist : « chaque tâche
-production a un modèle résolu »."""
+moins un run mock par provider ». Historique : à l'écriture de ce fichier,
+S3/S5/S6-*-local passaient encore par l'ancien pipeline/llm.py (couvert
+alors par test_llm_backends.py) et seules les 4 tâches S6 batchées
+passaient par LiteLLM — les deux clients ont depuis fusionné dans
+pipeline/llm_client.py (Lot U du plan d'unification, voir
+fix_pipeline/multi_models/report_multi_models.md §4bis) ; test_llm_client.py
+couvre désormais les 3 providers pour tout le registre. Ce fichier reste
+utile pour son deuxième volet : ollama n'était jamais exercé à travers un
+appel litellm réellement mocké côté S6 batché — ce fichier ferme cet écart.
+Complète aussi le premier item de la checklist : « chaque tâche production a
+un modèle résolu »."""
 
 from __future__ import annotations
 

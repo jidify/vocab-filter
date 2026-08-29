@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from . import config
+from .prompt_variants import PROMPT_VARIANTS, PromptOverride
 
 
 ALLOWED_PROVIDERS = frozenset({"ollama", "openai", "catgpt"})
@@ -30,6 +31,7 @@ class TaskDescriptor:
     default_mode_batch: bool
     default_batch_size: int
     global_model_fallback: bool = False
+    default_prompt_variant: str | None = None  # nom dans prompt_variants.PROMPT_VARIANTS
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,7 @@ class TaskLlmConfig:
     bare_model: str
     mode_batch: bool
     batch_size: int
+    custom_prompt: PromptOverride | None = None
 
 
 def _descriptor(
@@ -51,6 +54,7 @@ def _descriptor(
     mode_batch: bool,
     batch_size: int,
     global_model_fallback: bool = False,
+    prompt_variant: str | None = None,
 ) -> TaskDescriptor:
     return TaskDescriptor(
         task_id=task_id,
@@ -59,10 +63,12 @@ def _descriptor(
         default_mode_batch=mode_batch,
         default_batch_size=batch_size,
         global_model_fallback=global_model_fallback,
+        default_prompt_variant=prompt_variant,
     )
 
 
 _TASKS = (
+    _descriptor("S3-judge-type", batch_allowed=False, model="ollama/mistral-small:24b", mode_batch=False, batch_size=1, global_model_fallback=True),
     _descriptor("S3-judge-occurrence", batch_allowed=True, model="ollama/mistral-small:24b", mode_batch=False, batch_size=1, global_model_fallback=True),
     _descriptor("S3-definition-cluster", batch_allowed=True, model="ollama/mistral-small:24b", mode_batch=False, batch_size=1, global_model_fallback=True),
     _descriptor("S5-arbitrate", batch_allowed=True, model="ollama/mistral-small:24b", mode_batch=False, batch_size=1, global_model_fallback=True),
@@ -135,7 +141,7 @@ def _parse_override(raw: str, *, task_id: str) -> tuple[str, dict[str, str]]:
     if not model:
         raise TaskConfigError(f"{task_id}: modèle absent dans {_env_key(task_id)}")
     options: dict[str, str] = {}
-    allowed = {"batch", "mode_batch", "batch_size"}
+    allowed = {"batch", "mode_batch", "batch_size", "prompt"}
     for part in parts[1:]:
         key, separator, value = part.partition("=")
         key = key.strip().lower()
@@ -166,6 +172,7 @@ def task_config(task_id: str) -> TaskLlmConfig:
     )
     mode_batch = descriptor.default_mode_batch
     batch_size = descriptor.default_batch_size
+    prompt_variant_name = descriptor.default_prompt_variant
 
     raw_override = os.getenv(_env_key(task_id))
     if raw_override is not None:
@@ -179,6 +186,19 @@ def task_config(task_id: str) -> TaskLlmConfig:
                 raise TaskConfigError(f"{task_id}: batch_size doit être un entier") from exc
         if options.get("batch", "").strip().lower() == "true" and "batch_size" not in options:
             raise TaskConfigError(f"{task_id}: batch_size est requis quand batch=true")
+        if "prompt" in options:
+            prompt_variant_name = options["prompt"]
+
+    custom_prompt: PromptOverride | None = None
+    if prompt_variant_name is not None:
+        try:
+            custom_prompt = PROMPT_VARIANTS[prompt_variant_name]
+        except KeyError as exc:
+            allowed_variants = ", ".join(sorted(PROMPT_VARIANTS)) or "(catalogue vide)"
+            raise TaskConfigError(
+                f"{task_id}: variante de prompt inconnue {prompt_variant_name!r} "
+                f"(catalogue : {allowed_variants})"
+            ) from exc
 
     provider, bare_model = _split_model(model, context=task_id)
     if batch_size < 1:
@@ -195,6 +215,7 @@ def task_config(task_id: str) -> TaskLlmConfig:
         bare_model=bare_model,
         mode_batch=mode_batch,
         batch_size=batch_size,
+        custom_prompt=custom_prompt,
     )
 
 

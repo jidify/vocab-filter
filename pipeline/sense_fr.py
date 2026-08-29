@@ -56,7 +56,7 @@ from datetime import date
 from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
 
-from pipeline import config, inventory, llm, senses
+from pipeline import config, inventory, llm_client, senses
 from pipeline.llm_tasks import task_config
 
 # ============================================================
@@ -233,7 +233,7 @@ def llm_is_available() -> bool:
     deux (voir sense_fr's docstring de module pour le compromis)."""
     global _llm_available
     if _llm_available is None:
-        _llm_available = llm.is_available(backend=task_config("S6-translate-local").provider)
+        _llm_available = llm_client.is_available(backend=task_config("S6-translate-local").provider)
     return _llm_available
 
 
@@ -267,13 +267,14 @@ def llm_translate_votes(
             instruction=instruction,
         )
         try:
-            result = llm.call_json(
-                prompt, system=TRANSLATE_SYSTEM, timeout=120,
-                model=task.bare_model, backend=task.provider,
-                cache_metadata={"task_id": task.task_id, "model": task.model,
-                                "mode_batch": False, "batch_size": 1},
+            result = llm_client.call(
+                model=task.model, system=TRANSLATE_SYSTEM, prompt=prompt, timeout=120,
+                cache_key_fields=llm_client.build_cache_key(
+                    model=task.model, system=TRANSLATE_SYSTEM, prompt=prompt,
+                    extra={"task_id": task.task_id, "mode_batch": False, "batch_size": 1},
+                ),
             )
-        except llm.LLMError:
+        except llm_client.LLMError:
             continue
         fr = (result.get("fr") or "").strip()
         if not fr:
@@ -291,13 +292,14 @@ def llm_backtranslate(fr_candidate: str, definition_en: str) -> str | None:
     task = task_config("S6-backtranslate-local")
     prompt = BACKTRANSLATE_TEMPLATE.format(fr_candidate=fr_candidate, definition=definition_en or "?")
     try:
-        result = llm.call_json(
-            prompt, system=BACKTRANSLATE_SYSTEM, timeout=120,
-            model=task.bare_model, backend=task.provider,
-            cache_metadata={"task_id": task.task_id, "model": task.model,
-                            "mode_batch": False, "batch_size": 1},
+        result = llm_client.call(
+            model=task.model, system=BACKTRANSLATE_SYSTEM, prompt=prompt, timeout=120,
+            cache_key_fields=llm_client.build_cache_key(
+                model=task.model, system=BACKTRANSLATE_SYSTEM, prompt=prompt,
+                extra={"task_id": task.task_id, "mode_batch": False, "batch_size": 1},
+            ),
         )
-    except llm.LLMError:
+    except llm_client.LLMError:
         return None
     en = (result.get("en") or "").strip()
     return en or None
@@ -927,7 +929,7 @@ def run(
             # porter sur plusieurs centaines d'entrées et prendre des
             # heures (jusqu'à ~4 appels LLM chacune) — écrire seulement à
             # la fin ferait tout perdre en cas d'interruption. Les appels
-            # LLM eux-mêmes restent cachés sur disque (pipeline/llm.py),
+            # LLM eux-mêmes restent cachés sur disque (pipeline/llm_client.py),
             # donc une reprise après coupure ne repaie que le travail non
             # encore classé, pas les appels déjà faits.
             write_store(store)

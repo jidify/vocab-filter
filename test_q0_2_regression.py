@@ -211,7 +211,7 @@ class Q02CorpusContractTests(unittest.TestCase):
             from pipeline import mwe_judge
         frozen = {"label": "idiome", "confidence": 0.91, "reason": "fixture figée"}
         occurrences = [{"segment_idx": 1, "surface": "on her feet"}]
-        with mock.patch.object(mwe_judge.llm, "call_json", side_effect=lambda *a, **k: dict(frozen)) as call, mock.patch("urllib.request.urlopen", side_effect=AssertionError("network forbidden")):
+        with mock.patch.object(mwe_judge.llm_client, "call", side_effect=lambda *a, **k: dict(frozen)) as call, mock.patch("urllib.request.urlopen", side_effect=AssertionError("network forbidden")):
             first = mwe_judge.judge_type("on one's feet", occurrences, {}, wordnet_candidates=[])
             second = mwe_judge.judge_type("on one's feet", occurrences, {}, wordnet_candidates=[])
         self.assertEqual(first, second)

@@ -28,6 +28,7 @@ class LlmTaskRegistryTests(unittest.TestCase):
 
     def test_registry_contains_m0_tasks_and_defaults(self):
         expected = {
+            "S3-judge-type": (False, "ollama/mistral-small:24b", False, 1),
             "S3-judge-occurrence": (True, "ollama/mistral-small:24b", False, 1),
             "S3-definition-cluster": (True, "ollama/mistral-small:24b", False, 1),
             "S5-arbitrate": (True, "ollama/mistral-small:24b", False, 1),
@@ -119,6 +120,22 @@ class LlmTaskRegistryTests(unittest.TestCase):
             task = task_config("S6-reassign")
             self.assertTrue(use_batch_prompt(task))
             self.assertFalse(use_batch_prompt(task, batch_size=1))
+
+    def test_prompt_option_resolves_named_variant(self):
+        with self.env(VOCAB_LLM_S3_JUDGE_OCCURRENCE="catgpt/x;prompt=s3-occurrence-tags"):
+            cfg = task_config("S3-judge-occurrence")
+        self.assertIsNotNone(cfg.custom_prompt)
+        self.assertEqual(cfg.custom_prompt.schema_variant, "tags")
+
+    def test_unknown_prompt_variant_raises(self):
+        with self.env(VOCAB_LLM_S3_JUDGE_OCCURRENCE="catgpt/x;prompt=does-not-exist"):
+            with self.assertRaises(TaskConfigError):
+                task_config("S3-judge-occurrence")
+
+    def test_no_prompt_option_leaves_custom_prompt_none(self):
+        with self.env():
+            cfg = task_config("S3-judge-occurrence")
+        self.assertIsNone(cfg.custom_prompt)
 
     def test_rejects_unknown_task_provider_option_and_duplicate(self):
         with self.env():

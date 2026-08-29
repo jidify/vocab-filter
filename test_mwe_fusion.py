@@ -222,7 +222,7 @@ class OccurrenceFirstDecisionTests(unittest.TestCase):
              "source": "idiomatch"}
             for i, surface in enumerate(("let it go", "let him go", "let's go"), 1)
         ]
-        with mock.patch.object(mwe_judge.llm, "call_json", side_effect=replies):
+        with mock.patch.object(mwe_judge.llm_client, "call", side_effect=replies):
             decisions = [mwe_judge.judge_occurrence("let go", occ, {}) for occ in occurrences]
         self.assertEqual([d["label"] for d in decisions], ["idiome", "phrasal_verb", "littéral"])
         self.assertEqual(len({d["contextual_paraphrase"] for d in decisions}), 3)
@@ -234,7 +234,7 @@ class OccurrenceFirstDecisionTests(unittest.TestCase):
         reply = self._result("idiome", "could not care less", confidence=1.0, evidence=[])
         # Explicitly retain an empty list (the helper's default would add evidence).
         reply["evidence"] = []
-        with mock.patch.object(mwe_judge.llm, "call_json", return_value=reply):
+        with mock.patch.object(mwe_judge.llm_client, "call", return_value=reply):
             decision = mwe_judge.judge_occurrence("could care less", occurrence, {})
         self.assertEqual(decision["model_confidence"], 1.0)
         self.assertLess(decision["confidence"], mwe_judge.MIN_CONFIDENCE)
@@ -312,9 +312,9 @@ class ContextualMweDefinitionTests(unittest.TestCase):
         reply = {"candidate_id": "fail.v.04", "custom_definition": "",
                  "occurrence_checks": [{"occurrence_id": "m:10", "contradicts": False}]}
         with mock.patch.object(mwe_judge, "definition_candidates", return_value=candidates), \
-             mock.patch.object(mwe_judge.llm, "call_json", return_value=reply) as call:
+             mock.patch.object(mwe_judge.llm_client, "call", return_value=reply) as call:
             selected = mwe_judge.choose_cluster_definition("give out", "VERB", self._occurrences(), {})
-        prompt = call.call_args.args[0]
+        prompt = call.call_args.kwargs["prompt"]
         self.assertIn("announce publicly", prompt)
         self.assertIn("stop operating or functioning", prompt)
         self.assertEqual(selected["definition_en"], "stop operating or functioning")
@@ -327,7 +327,7 @@ class ContextualMweDefinitionTests(unittest.TestCase):
                  "occurrence_checks": [{"occurrence_id": "m:10", "contradicts": False}]}
         with mock.patch.object(mwe_judge, "definition_candidates", return_value=[
             {"candidate_id": "hotel", "definition": "announce arrival at a hotel", "source": "wordnet"}
-        ]), mock.patch.object(mwe_judge.llm, "call_json", return_value=reply):
+        ]), mock.patch.object(mwe_judge.llm_client, "call", return_value=reply):
             selected = mwe_judge.choose_cluster_definition("check in", "VERB", self._occurrences(), {})
         self.assertEqual(selected["definition_source"], "custom")
         self.assertEqual(selected["definition_en"], reply["custom_definition"])
@@ -337,7 +337,7 @@ class ContextualMweDefinitionTests(unittest.TestCase):
         reply = {"candidate_id": "wrong", "custom_definition": "announce publicly",
                  "occurrence_checks": [{"occurrence_id": "m:10", "contradicts": True}]}
         with mock.patch.object(mwe_judge, "definition_candidates", return_value=[]), \
-             mock.patch.object(mwe_judge.llm, "call_json", return_value=reply):
+             mock.patch.object(mwe_judge.llm_client, "call", return_value=reply):
             selected = mwe_judge.choose_cluster_definition("give out", "VERB", self._occurrences(), {})
         self.assertTrue(selected["definition_needs_review"])
         self.assertEqual(selected["definition_en"], "stop operating")
@@ -365,7 +365,7 @@ class ContextualMweDefinitionTests(unittest.TestCase):
                 reply = {"candidate_id": "book-sense", "custom_definition": "",
                          "occurrence_checks": [{"occurrence_id": "m:10", "contradicts": False}]}
                 with mock.patch.object(mwe_judge, "definition_candidates", return_value=candidates), \
-                     mock.patch.object(mwe_judge.llm, "call_json", return_value=reply):
+                     mock.patch.object(mwe_judge.llm_client, "call", return_value=reply):
                     selected = mwe_judge.choose_cluster_definition(
                         canonical, "VERB", self._occurrences(), {}
                     )

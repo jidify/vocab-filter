@@ -72,7 +72,7 @@ from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
 from wordfreq import zipf_frequency
 
-from pipeline import config, fr_norm, inventory, lex_bilingual, senses, sense_fr
+from pipeline import config, fr_norm, inventory, lex_bilingual, llm_client, senses, sense_fr
 from pipeline.llm_tasks import effective_batch_size, task_config, use_batch_prompt
 
 ADJUDICATION_CSV_PATH = config.OUT_DIR / "sense_fr_adjudication.csv"
@@ -483,14 +483,11 @@ def build_backtranslate_batch_prompt(entries: list[dict]) -> str:
 def _backtranslate_batch(entries: list[dict], model: str, *, mode_batch: bool = True, batch_size: int = 40) -> dict[str, str]:
     """Un appel par lot ; réutilise pipeline.sense_fr.backtranslation_matches
     pour la comparaison (voisinage WordNet, pas de chaînes) — voir sa
-    docstring. Renvoie {key: traduction_anglaise_devinee}."""
-    import hashlib
-    import json as _json
+    docstring. Renvoie {key: traduction_anglaise_devinee}.
 
-    import litellm
-
-    from pipeline.llm_litellm_catgpt import call_kwargs as catgpt_call_kwargs
-
+    Cache disque : clé et préfixe ``backtranslate_`` INCHANGÉS depuis avant
+    l'unification (Lot U3, report_multi_models.md §4bis) — ce cache
+    correspond à des appels OpenAI déjà payés."""
     if not mode_batch and len(entries) != 1:
         raise ValueError(
             f"S6-backtranslate: mode unitaire attend exactement 1 entrée, reçu {len(entries)}"
@@ -498,26 +495,14 @@ def _backtranslate_batch(entries: list[dict], model: str, *, mode_batch: bool = 
 
     system = BACKTRANSLATE_SYSTEM
     user = build_backtranslate_batch_prompt(entries) if mode_batch else build_backtranslate_unit_prompt(entries)
-
-    cache_key = _json.dumps({"task_id": "S6-backtranslate", "model": model, "mode_batch": mode_batch,
-                             "batch_size": batch_size if mode_batch else 1, "system": system, "user": user}, sort_keys=True)
-    digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
-    config.ensure_out_dir()
-    cache_file = config.CACHE_DIR / f"backtranslate_{digest}.json"
-    if cache_file.exists():
-        parsed = (_BatchGuesses if mode_batch else _Guess).model_validate_json(cache_file.read_text(encoding="utf-8"))
-    else:
-        response = litellm.completion(
-            model=model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            response_format=_BatchGuesses if mode_batch else _Guess,
-            reasoning_effort="low",
-            max_tokens=8000,
-            **catgpt_call_kwargs(model),
-        )
-        content = response.choices[0].message.content
-        parsed = (_BatchGuesses if mode_batch else _Guess).model_validate_json(content)
-        cache_file.write_text(parsed.model_dump_json(), encoding="utf-8")
+    response_model = _BatchGuesses if mode_batch else _Guess
+    parsed = llm_client.call(
+        model=model, system=system, prompt=user, response_model=response_model,
+        cache_key_fields={"task_id": "S6-backtranslate", "model": model, "mode_batch": mode_batch,
+                          "batch_size": batch_size if mode_batch else 1, "system": system, "user": user},
+        cache_prefix="backtranslate_",
+        reasoning_effort="low", max_tokens=8000,
+    )
     return ({g.key: g.en for g in parsed.guesses} if mode_batch else {parsed.key: parsed.en})
 
 
@@ -564,14 +549,11 @@ def _judge_batch(
     lues depuis le magasin, voir sense_fr.format_occurrences_en) : sans
     elles, le juge travaillerait à l'aveugle sur des candidats français
     hors sol alors qu'il est le dernier recours pour un sens encore en
-    désaccord."""
-    import hashlib
-    import json as _json
+    désaccord.
 
-    import litellm
-
-    from pipeline.llm_litellm_catgpt import call_kwargs as catgpt_call_kwargs
-
+    Cache disque : clé et préfixe ``judge_`` INCHANGÉS depuis avant
+    l'unification (Lot U3, report_multi_models.md §4bis) — ce cache
+    correspond à des appels OpenAI déjà payés."""
     if not mode_batch and len(targets) != 1:
         raise ValueError(
             f"S6-judge-dossier: mode unitaire attend exactement 1 cible, reçu {len(targets)}"
@@ -585,26 +567,14 @@ def _judge_batch(
         user = build_judge_unit_prompt(targets, audits, occurrences_by_sense, rng)
         system = JUDGE_SYSTEM + " Réponds par un objet verdict unique, sans enveloppe verdicts[]."
 
-    cache_key = _json.dumps({"task_id": "S6-judge-dossier", "model": model, "mode_batch": mode_batch,
-                             "batch_size": batch_size if mode_batch else 1, "system": system, "user": user}, sort_keys=True)
-    digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
-    config.ensure_out_dir()
-    cache_file = config.CACHE_DIR / f"judge_{digest}.json"
-    if cache_file.exists():
-        parsed = (_BatchVerdicts if mode_batch else _Verdict).model_validate_json(cache_file.read_text(encoding="utf-8"))
-    else:
-        response = litellm.completion(
-            model=model,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            response_format=_BatchVerdicts if mode_batch else _Verdict,
-            reasoning_effort="medium",
-            max_tokens=16000,
-            **catgpt_call_kwargs(model),
-        )
-        content = response.choices[0].message.content
-        parsed = (_BatchVerdicts if mode_batch else _Verdict).model_validate_json(content)
-        cache_file.write_text(parsed.model_dump_json(), encoding="utf-8")
-
+    response_model = _BatchVerdicts if mode_batch else _Verdict
+    parsed = llm_client.call(
+        model=model, system=system, prompt=user, response_model=response_model,
+        cache_key_fields={"task_id": "S6-judge-dossier", "model": model, "mode_batch": mode_batch,
+                          "batch_size": batch_size if mode_batch else 1, "system": system, "user": user},
+        cache_prefix="judge_",
+        reasoning_effort="medium", max_tokens=16000,
+    )
     return ({v.key: v.model_dump() for v in parsed.verdicts} if mode_batch
             else {parsed.key: parsed.model_dump()})
 

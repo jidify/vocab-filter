@@ -61,8 +61,6 @@ Usage :
 from __future__ import annotations
 
 import csv
-import hashlib
-import json
 from datetime import date
 from pathlib import Path
 from typing import Literal
@@ -71,8 +69,7 @@ import litellm
 from nltk.corpus import wordnet as nwn
 from pydantic import BaseModel
 
-from pipeline import config, inventory as lexical_inventory, senses, sense_fr, verify_fr_lock
-from pipeline.llm_litellm_catgpt import call_kwargs as catgpt_call_kwargs
+from pipeline import config, inventory as lexical_inventory, llm_client, senses, sense_fr, verify_fr_lock
 from pipeline.llm_tasks import effective_batch_size, task_config, use_batch_prompt
 
 # ============================================================
@@ -285,77 +282,61 @@ def build_user_prompt(batch: list[tuple[dict, list[dict], list[dict]]]) -> str:
 
 
 # ============================================================
-# Cache disque (même principe que sense_fr_frontier.py, préfixe dédié)
+# Cache disque — clé et préfixe INCHANGÉS depuis avant l'unification
+# (Lot U3, fix_pipeline/multi_models/report_multi_models.md §4bis) : ce
+# cache correspond à des appels OpenAI déjà payés, il ne doit pas être
+# invalidé par le passage au client LLM unique. Seule la mécanique de
+# hash/lecture/écriture déménage dans pipeline/llm_client.py.
 # ============================================================
 
 
+def _cache_key_fields(model: str, system: str, user: str, *, mode_batch: bool, batch_size: int | None) -> dict:
+    return {"task_id": "S6-reassign", "model": model,
+            "mode_batch": mode_batch, "batch_size": batch_size or (1 if not mode_batch else 0),
+            "system": system, "user": user}
+
+
 def _cache_path(model: str, system: str, user: str, *, mode_batch: bool = True, batch_size: int | None = None) -> Path:
-    cache_key = json.dumps({"task_id": "S6-reassign", "model": model,
-                            "mode_batch": mode_batch, "batch_size": batch_size or (1 if not mode_batch else 0),
-                            "system": system, "user": user}, sort_keys=True)
-    digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
-    config.ensure_out_dir()
-    return config.CACHE_DIR / f"reassign_{digest}.json"
+    return llm_client.cache_path_for(
+        _cache_key_fields(model, system, user, mode_batch=mode_batch, batch_size=batch_size),
+        prefix="reassign_",
+    )
 
 
 def _translate_batches(
     batches: list[list[tuple[dict, list[dict], list[dict]]]], model: str,
     *, mode_batch: bool = True, batch_size: int | None = None,
 ) -> tuple[list[dict[str, ReassignedDecision]], float]:
-    to_call: list[tuple[int, list[tuple[dict, list[dict], list[dict]]]]] = []
-    results: list[dict[str, ReassignedDecision] | None] = [None] * len(batches)
-    total_cost = 0.0
-
-    for i, batch in enumerate(batches):
+    items: list[llm_client.BatchItem] = []
+    for batch in batches:
         if not mode_batch and len(batch) != 1:
             raise ValueError(
                 f"S6-reassign: mode unitaire attend exactement 1 item par lot, reçu {len(batch)}"
             )
         user_prompt = build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0])
-        cache_file = _cache_path(model, SYSTEM_PROMPT, user_prompt, mode_batch=mode_batch, batch_size=batch_size)
-        if cache_file.exists():
-            if mode_batch:
-                parsed = ReassignBatch.model_validate_json(cache_file.read_text(encoding="utf-8"))
-                results[i] = {d.key: d for d in parsed.decisions}
-            else:
-                parsed = UnitReassignedDecision.model_validate_json(cache_file.read_text(encoding="utf-8"))
-                results[i] = {parsed.key: parsed}
-        else:
-            to_call.append((i, batch))
+        items.append(llm_client.BatchItem(
+            system=SYSTEM_PROMPT, user=user_prompt,
+            cache_key_fields=_cache_key_fields(model, SYSTEM_PROMPT, user_prompt,
+                                               mode_batch=mode_batch, batch_size=batch_size),
+            cache_prefix="reassign_",
+        ))
 
-    if to_call:
-        messages = [
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0])},
-            ]
-            for _, batch in to_call
-        ]
-        responses = litellm.batch_completion(
-            model=model, messages=messages, response_format=ReassignBatch if mode_batch else UnitReassignedDecision,
-            reasoning_effort="low", max_tokens=16000,
-            max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
-            **catgpt_call_kwargs(model),
-        )
-        for (i, batch), response in zip(to_call, responses):
-            if isinstance(response, Exception):
-                print(f"  lot {i}: échec ({response!r}), {len(batch)} entrée(s) laissée(s) de côté.")
-                results[i] = {}
-                continue
-            try:
-                total_cost += litellm.completion_cost(completion_response=response)
-            except Exception:
-                pass
-            content = response.choices[0].message.content
-            parsed = (ReassignBatch if mode_batch else UnitReassignedDecision).model_validate_json(content)
-            cache_file = _cache_path(model, SYSTEM_PROMPT,
-                                     build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0]),
-                                     mode_batch=mode_batch, batch_size=batch_size)
-            cache_file.write_text(parsed.model_dump_json(), encoding="utf-8")
-            results[i] = ({d.key: d for d in parsed.decisions} if mode_batch
-                          else {parsed.key: parsed})
+    def _on_error(i, _item, exc):
+        print(f"  lot {i}: échec ({exc!r}), {len(batches[i])} entrée(s) laissée(s) de côté.")
 
-    return [r or {} for r in results], total_cost
+    responses, total_cost = llm_client.call_batch_completion(
+        items, model=model,
+        response_model=ReassignBatch if mode_batch else UnitReassignedDecision,
+        reasoning_effort="low", max_tokens=16000,
+        max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
+        on_error=_on_error,
+    )
+    results = [
+        ({d.key: d for d in parsed.decisions} if mode_batch else {parsed.key: parsed})
+        if parsed is not None else {}
+        for parsed in responses
+    ]
+    return results, total_cost
 
 
 # ============================================================

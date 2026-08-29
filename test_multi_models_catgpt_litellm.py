@@ -132,8 +132,8 @@ class NoRegressionOnJsonSchemaModelsTests(_ProviderMapIsolation):
 
 class CatgptEndToEndTests(_ProviderMapIsolation):
     """Chemin réel (litellm.batch_completion/completion non mockés) —
-    seul `urllib.request.urlopen` est mocké, comme les tests de
-    pipeline/llm.py (test_llm_backends.py)."""
+    seul `urllib.request.urlopen` est mocké, même principe que
+    test_llm_client.py pour pipeline/llm_client.py."""
 
     def setUp(self):
         super().setUp()

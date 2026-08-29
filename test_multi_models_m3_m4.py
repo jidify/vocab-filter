@@ -40,15 +40,14 @@ class S3JudgeOccurrencePromptTests(unittest.TestCase):
     def test_unit_prompt_uses_task_slot_and_scalar_schema(self):
         task = _task("S3-judge-occurrence", batch=False, size=1, model="catgpt/judge-a")
         with patch.object(mwe_judge, "task_config", return_value=task), \
-             patch.object(mwe_judge.llm, "call_json", return_value=_occurrence_reply()) as call:
+             patch.object(mwe_judge.llm_client, "call", return_value=_occurrence_reply()) as call:
             got = mwe_judge.judge_occurrence("turn off", _occurrence(1), {})
 
         self.assertEqual(got["label"], "phrasal_verb")
-        self.assertEqual(call.call_args.kwargs["model"], "judge-a")
-        self.assertEqual(call.call_args.kwargs["backend"], "catgpt")
-        self.assertEqual(call.call_args.kwargs["cache_metadata"]["task_id"], "S3-judge-occurrence")
-        self.assertFalse(call.call_args.kwargs["cache_metadata"]["mode_batch"])
-        self.assertNotIn('"decisions"', call.call_args.args[0])
+        self.assertEqual(call.call_args.kwargs["model"], "catgpt/judge-a")
+        self.assertEqual(call.call_args.kwargs["cache_key_fields"]["extra"]["task_id"], "S3-judge-occurrence")
+        self.assertFalse(call.call_args.kwargs["cache_key_fields"]["extra"]["mode_batch"])
+        self.assertNotIn('"decisions"', call.call_args.kwargs["prompt"])
 
     def test_batch_prompt_returns_one_normalized_decision_per_occurrence(self):
         task = _task("S3-judge-occurrence", batch=True, size=3)
@@ -59,16 +58,16 @@ class S3JudgeOccurrencePromptTests(unittest.TestCase):
             {"occurrence_id": "m:3:0:7", **_occurrence_reply("idiome")},
         ]}
         with patch.object(mwe_judge, "task_config", return_value=task), \
-             patch.object(mwe_judge.llm, "call_json", return_value=reply) as call:
+             patch.object(mwe_judge.llm_client, "call", return_value=reply) as call:
             got = mwe_judge.judge_occurrences_batch(batch, {})
 
         self.assertEqual([got[occ["occurrence_id"]]["label"] for _, occ in batch],
                          ["phrasal_verb", "littéral", "idiome"])
-        prompt = call.call_args.args[0]
+        prompt = call.call_args.kwargs["prompt"]
         self.assertIn('"decisions"', prompt)
         self.assertIn("exactement une décision par occurrence_id", prompt)
-        self.assertTrue(call.call_args.kwargs["cache_metadata"]["mode_batch"])
-        self.assertEqual(call.call_args.kwargs["cache_metadata"]["batch_size"], 3)
+        self.assertTrue(call.call_args.kwargs["cache_key_fields"]["extra"]["mode_batch"])
+        self.assertEqual(call.call_args.kwargs["cache_key_fields"]["extra"]["batch_size"], 3)
 
     def test_batch_detects_missing_and_duplicate_ids_as_uncertain_failures(self):
         task = _task("S3-judge-occurrence", batch=True, size=3)
@@ -78,7 +77,7 @@ class S3JudgeOccurrencePromptTests(unittest.TestCase):
             {"occurrence_id": "m:1:0:7", **_occurrence_reply()},
         ]}
         with patch.object(mwe_judge, "task_config", return_value=task), \
-             patch.object(mwe_judge.llm, "call_json", return_value=reply):
+             patch.object(mwe_judge.llm_client, "call", return_value=reply):
             got = mwe_judge.judge_occurrences_batch(batch, {})
 
         self.assertTrue(all(item["label"] == "incertain" for item in got.values()))
@@ -160,13 +159,13 @@ class S3DefinitionClusterPromptTests(unittest.TestCase):
         occurrences = self._records()[0]["occurrences"][:1]
         with patch.object(mwe_judge, "task_config", return_value=task), \
              patch.object(mwe_judge, "definition_candidates", return_value=candidates), \
-             patch.object(mwe_judge.llm, "call_json", return_value=reply) as call:
+             patch.object(mwe_judge.llm_client, "call", return_value=reply) as call:
             got = mwe_judge.choose_cluster_definition("turn off", "VERB", occurrences, {})
 
         self.assertEqual(got["definition_candidate_id"], "c1")
-        self.assertEqual(call.call_args.kwargs["model"], "definitions")
-        self.assertFalse(call.call_args.kwargs["cache_metadata"]["mode_batch"])
-        self.assertNotIn('"decisions"', call.call_args.args[0])
+        self.assertEqual(call.call_args.kwargs["model"], "ollama/definitions")
+        self.assertFalse(call.call_args.kwargs["cache_key_fields"]["extra"]["mode_batch"])
+        self.assertNotIn('"decisions"', call.call_args.kwargs["prompt"])
 
     def test_batch_definition_prompt_updates_each_existing_cluster_without_reclustering(self):
         task = _task("S3-definition-cluster", batch=True, size=2)
@@ -183,13 +182,13 @@ class S3DefinitionClusterPromptTests(unittest.TestCase):
         records = self._records()
         with patch.object(mwe_judge, "task_config", return_value=task), \
              patch.object(mwe_judge, "definition_candidates", side_effect=candidates), \
-             patch.object(mwe_judge.llm, "call_json", return_value=reply) as call:
+             patch.object(mwe_judge.llm_client, "call", return_value=reply) as call:
             mwe_judge.assign_cluster_definitions(records, {})
 
         decisions = [item["occurrence_decision"] for item in records[0]["occurrences"]]
         self.assertEqual([item["definition_candidate_id"] for item in decisions], ["turn", "give"])
-        self.assertIn('"decisions"', call.call_args.args[0])
-        self.assertTrue(call.call_args.kwargs["cache_metadata"]["mode_batch"])
+        self.assertIn('"decisions"', call.call_args.kwargs["prompt"])
+        self.assertTrue(call.call_args.kwargs["cache_key_fields"]["extra"]["mode_batch"])
 
 
 if __name__ == "__main__":

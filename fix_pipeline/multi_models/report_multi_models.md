@@ -19,7 +19,7 @@ explicitement M8 avec « M0–M6 (M7 si fait) » comme pré-requis.
 | S6b-2 C (judge-dossier) | `batch_size=20` paramètre mort — aucun découpage réel, tout `residual` part dans un seul appel | `SENSE_FR_JUDGE_BATCH_SIZE=20` réellement appliqué (découpage effectif, comportement **nouveau**, assumé en M2 — voir §3) ; chemin unitaire testé |
 | `S6-translate-local`/`S6-backtranslate-local` | mécanisme de votes/rétro-traduction locale, aucun lien avec un registre | enregistrées (`batch_allowed: false`), branchées sur `task_config()` (M6) |
 | `require_frontier_model`/`ALLOWED_FRONTIER_MODELS` | liste blanche mono-modèle globale | liste blanche par tâche résolue (`task_config(task_id).model`), globale conservée en repli |
-| Alias `.env` `PROVIDER=chatgpt` | décoratif, aucune occurrence dans le code | actif : `pipeline.llm_tasks._global_model()` le mappe vers `catgpt` pour les 5 tâches à repli global (voir écart corrigé en M6, §4) |
+| Alias `.env` `PROVIDER=chatgpt` | décoratif, aucune occurrence dans le code | mappé par `pipeline.llm_tasks._global_model()` vers `catgpt` pour les 5 tâches à repli global — **mais inopérant par défaut** : rien dans ce dépôt ne charge `.env` (pas de `python-dotenv`), donc `PROVIDER` n'atteint le process que si l'utilisateur l'exporte lui-même (voir §4) |
 | Cache disque | clé sans `task_id` ni mode nulle part | `task_id` + `model` + `mode_batch` + `batch_size` effectif dans la clé, sur les 9 tâches |
 | CLI `run_pipeline.py --llm-model` | laissait croire qu'il couvrait tout le LLM du pipeline | aide + docstring `configure_llm` précisent : backend global de repli seulement (S3/S5/S6-\*-local), jamais les 4 tâches S6 LiteLLM |
 | README | backend Ollama/CatGPT pour S3/S5 seulement | + tableau des 9 `task_id`, exemples ollama/openai/catgpt, matrice de joignabilité réelle par client, invalidation de cache |
@@ -190,25 +190,64 @@ alors que les appels réels partaient vers CatGPT. Corrigé en M6
 toujours `PROVIDER=chatgpt` — pertinent pour la checklist « aucun défaut
 critique » : celui-ci a été trouvé et fermé, pas laissé ouvert.
 
-Point de vigilance non résolu (mineur, hors périmètre v1) : `.env`
-`PROVIDER=chatgpt` n'est chargé dans l'environnement du process que si le
-mécanisme de lancement de l'utilisateur le fait lui-même (`uv run` 0.8.15 ne
-charge pas `.env` automatiquement ; aucun `python-dotenv` dans ce dépôt). Le
-comportement dépend donc de la façon dont l'utilisateur lance le pipeline
-(shell profile, `direnv`, etc.) — à garder en tête en configurant S6-2 (§7).
+**État factuel, pas un détail mineur** : `.env` `PROVIDER=chatgpt` n'est
+chargé dans l'environnement du process que si le mécanisme de lancement de
+l'utilisateur le fait lui-même — `uv run` 0.8.15 ne charge pas `.env`
+automatiquement, et aucun `python-dotenv` (ni équivalent) n'existe dans ce
+dépôt (vérifié : aucune occurrence de `dotenv`/`load_dotenv` dans
+`pipeline/*.py` ni `pyproject.toml`). Vérifié aussi à l'exécution : un
+process lancé sans export explicite n'a `PROVIDER` ni aucune variable
+`VOCAB_LLM_*`/`CATGPT_*` définie. **Par défaut, la ligne `PROVIDER=chatgpt`
+de `.env` ne configure donc rien** — elle ne prend effet que si l'utilisateur
+l'exporte lui-même dans son shell (`direnv`, profil, etc.) avant de lancer le
+pipeline. À garder en tête en configurant S6-2 (§7) : le simple fait de
+poser `PROVIDER=chatgpt` dans `.env` ne suffit pas.
 
-## 5. M7 — reporté
+## 4bis. Deux clients LLM distincts, jamais nommés comme tels dans ce rapport
 
-`fix_pipeline/evaluate_s3_judges.py` (`FRONTIER_MODEL`/`LOCAL_MODEL` en dur,
-`_run_local_batch` toujours un prototype non branché sur `mwe_judge.run()`)
-et `pipeline/eval_frontier_ablation.py` (`DEFAULT_JUDGE_MODEL` en dur,
-volontairement hors `ALLOWED_FRONTIER_MODELS`) **n'ont pas été alignés sur le
-registre** dans ce chantier. Optionnel selon le plan (§5 Lot M7 :
-« optionnel mais recommandé » ; M8 pré-requis « M0–M6 (M7 si fait) »). Aucun
-changement fonctionnel de ces deux scripts n'a été fait par M0–M6 — ils
-continuent de fonctionner exactement comme avant, indépendamment du registre.
-À reprendre séparément si souhaité, en conservant l'indépendance juge/candidat
-de l'ablation (déjà actée, `config.py:325-335`).
+Ce rapport parle de « 3 providers », « 9 tâches », comme si un seul mécanisme
+d'appel LLM existait. En réalité il y en a **deux**, implémentés
+indépendamment :
+
+| | Client A | Client B |
+|---|---|---|
+| Fichier | `pipeline/llm.py` | LiteLLM (`litellm.completion`/`batch_completion`) |
+| Mécanique | stdlib `urllib`, JSON fait main | bibliothèque tierce, `response_format=<Pydantic>` |
+| Providers | `ollama`, `catgpt`, `openai` | `openai` (natif), `ollama` (via `OLLAMA_API_BASE`, propre à LiteLLM), `catgpt` (via l'adaptateur `pipeline/llm_litellm_catgpt.py`, `litellm.CustomLLM`) |
+| Tâches | `S3-judge-occurrence`, `S3-definition-cluster`, `S5-arbitrate`, `S6-translate-local`, `S6-backtranslate-local` | `S6-translate-frontier`, `S6-backtranslate`, `S6-judge-dossier`, `S6-reassign` |
+| catgpt disponible depuis | `1a8cec0` (2026-08-28, « Add CatGPT Gateway LLM backend ») | `6d12c0e` (2026-08-29, adaptateur LiteLLM→CatGPT, hors plan initial — voir `report_m9_catgpt_litellm_adapter.md`) |
+
+Conséquence concrète de cette confusion : `mwe_judge.run()` (Client A) sait
+parler à catgpt depuis le 28/08, **indépendamment** de l'adaptateur LiteLLM
+ajouté le 29/08 pour le Client B — les deux faits n'ont aucun rapport de
+cause à effet, mais le vocabulaire unifié du rapport M8 ne permettait pas de
+le voir sans relire le code des deux clients.
+
+**Tâche de suite (non planifiée ici)** : unifier le pipeline sur un seul
+client LLM. Il devra être basé sur LiteLLM, puisque l'adaptateur
+`pipeline/llm_litellm_catgpt.py` rend maintenant catgpt joignable de ce
+côté — ce qui manquait pour faire disparaître le Client A sans perdre
+catgpt sur les 5 tâches qui en dépendent encore.
+
+**Fermé depuis** — voir `report_u_unified_client.md` (Lots U1–U6) :
+`pipeline/llm_client.py` remplace les deux clients ci-dessus,
+`pipeline/llm.py` (Client A) supprimé après un gate de parité réel sur 50
+cas S3 (1 écart mesuré, accepté par décision explicite — voir ce rapport
+§4). Ajoute au passage `custom_prompt` (registre + `pipeline/prompt_variants.py`)
+et ferme le Lot M7 (§5 ci-dessous).
+
+## 5. M7 — fermé (Lot U6, voir `report_u_unified_client.md`)
+
+Reporté au moment de M8 (`FRONTIER_MODEL`/`LOCAL_MODEL`/`DEFAULT_JUDGE_MODEL`
+en dur dans `evaluate_s3_judges.py`/`eval_frontier_ablation.py`, aucun des
+deux scripts aligné sur le registre). Fermé pendant le chantier
+d'unification (Lot U6) : `evaluate_s3_judges.py` résout `LOCAL_MODEL`/
+`FRONTIER_MODEL` via `task_config()` ; les deux scripts routent leurs appels
+via `pipeline/llm_client.py`. Indépendance juge/candidat de l'ablation
+préservée (`config.py:333-336`) : `DEFAULT_CANDIDATE_MODEL`/
+`DEFAULT_JUDGE_MODEL` restent des constantes libres, jamais résolues via
+`task_config`/`ALLOWED_FRONTIER_MODELS` — seule la mécanique d'appel a
+changé, pas la logique de sélection du modèle juge.
 
 ## 6. Comment configurer S6-2 ensuite (plan §7)
 

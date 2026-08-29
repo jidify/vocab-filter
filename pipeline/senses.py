@@ -39,7 +39,7 @@ import wn
 from nltk.corpus import wordnet as nwn
 from lemminflect import getAllInflections, getAllInflectionsOOV
 
-from pipeline import atomic, config, inventory, llm
+from pipeline import atomic, config, inventory, llm_client
 from pipeline.corpus import Segment, load_segments
 from pipeline.llm_tasks import effective_batch_size, task_config
 
@@ -726,15 +726,17 @@ def _arbitration_prompt(word, pos, context_text, synsets) -> str:
 def arbitrate(word, pos, context_text, synsets, *, model: str | None = None):
     """Chemin unitaire explicite de S5-arbitrate."""
     task = task_config("S5-arbitrate")
+    resolved_model = model or task.model
     prompt = _arbitration_prompt(word, pos, context_text, synsets)
     try:
-        result = llm.call_json(
-            prompt, system=ARBITRATION_SYSTEM, model=model or task.bare_model,
-            backend=task.provider, timeout=120,
-            cache_metadata={"task_id": task.task_id, "model": task.model,
-                            "mode_batch": False, "batch_size": 1},
+        result = llm_client.call(
+            model=resolved_model, system=ARBITRATION_SYSTEM, prompt=prompt, timeout=120,
+            cache_key_fields=llm_client.build_cache_key(
+                model=resolved_model, system=ARBITRATION_SYSTEM, prompt=prompt,
+                extra={"task_id": task.task_id, "mode_batch": False, "batch_size": 1},
+            ),
         )
-    except llm.LLMError as exc:
+    except llm_client.LLMError as exc:
         return {"selected_sense": None, "confidence": 0.0, "error": str(exc)}
     return result
 
@@ -756,14 +758,16 @@ def arbitrate_batch(requests: list[tuple[str, str, str, str, list]],
         for index, (request_id, word, pos, context_text, synsets) in enumerate(requests, start=1)
     )
     prompt = ARBITRATION_BATCH_TEMPLATE.format(count=len(requests), items=items)
+    resolved_model = model or task.model
     try:
-        raw = llm.call_json(
-            prompt, system=ARBITRATION_BATCH_SYSTEM, model=model or task.bare_model,
-            backend=task.provider, timeout=120,
-            cache_metadata={"task_id": task.task_id, "model": task.model,
-                            "mode_batch": True, "batch_size": effective_batch_size(task)},
+        raw = llm_client.call(
+            model=resolved_model, system=ARBITRATION_BATCH_SYSTEM, prompt=prompt, timeout=120,
+            cache_key_fields=llm_client.build_cache_key(
+                model=resolved_model, system=ARBITRATION_BATCH_SYSTEM, prompt=prompt,
+                extra={"task_id": task.task_id, "mode_batch": True, "batch_size": effective_batch_size(task)},
+            ),
         )
-    except llm.LLMError as exc:
+    except llm_client.LLMError as exc:
         return {request_id: {"selected_sense": None, "confidence": 0.0, "error": str(exc)}
                 for request_id, *_ in requests}
 

@@ -68,23 +68,22 @@ class LlmTranslateVotesTaskSlotTests(unittest.TestCase):
         task = _task("S6-translate-local", model="catgpt/dict-translator")
         with patch("pipeline.sense_fr.llm_is_available", return_value=True), \
              patch.object(sense_fr, "task_config", return_value=task) as task_config_mock, \
-             patch.object(sense_fr.llm, "call_json",
+             patch.object(sense_fr.llm_client, "call",
                           return_value={"fr": "battre", "fr_alt": []}) as call:
             sense_fr.llm_translate_votes(["beat"], "v", "to hit repeatedly", [])
 
         task_config_mock.assert_called_with("S6-translate-local")
-        self.assertEqual(call.call_args.kwargs["model"], "dict-translator")
-        self.assertEqual(call.call_args.kwargs["backend"], "catgpt")
+        self.assertEqual(call.call_args.kwargs["model"], "catgpt/dict-translator")
 
     def test_cache_metadata_carries_task_id_and_unit_mode(self):
         task = _task("S6-translate-local")
         with patch("pipeline.sense_fr.llm_is_available", return_value=True), \
              patch.object(sense_fr, "task_config", return_value=task), \
-             patch.object(sense_fr.llm, "call_json",
+             patch.object(sense_fr.llm_client, "call",
                           return_value={"fr": "battre", "fr_alt": []}) as call:
             sense_fr.llm_translate_votes(["beat"], "v", "to hit repeatedly", [])
 
-        meta = call.call_args.kwargs["cache_metadata"]
+        meta = call.call_args.kwargs["cache_key_fields"]["extra"]
         self.assertEqual(meta["task_id"], "S6-translate-local")
         self.assertFalse(meta["mode_batch"])
         self.assertEqual(meta["batch_size"], 1)
@@ -95,21 +94,20 @@ class LlmBacktranslateTaskSlotTests(unittest.TestCase):
         task = _task("S6-backtranslate-local", model="catgpt/dict-backtranslator")
         with patch("pipeline.sense_fr.llm_is_available", return_value=True), \
              patch.object(sense_fr, "task_config", return_value=task) as task_config_mock, \
-             patch.object(sense_fr.llm, "call_json", return_value={"en": "to beat"}) as call:
+             patch.object(sense_fr.llm_client, "call", return_value={"en": "to beat"}) as call:
             sense_fr.llm_backtranslate("battre", "to hit repeatedly")
 
         task_config_mock.assert_called_with("S6-backtranslate-local")
-        self.assertEqual(call.call_args.kwargs["model"], "dict-backtranslator")
-        self.assertEqual(call.call_args.kwargs["backend"], "catgpt")
+        self.assertEqual(call.call_args.kwargs["model"], "catgpt/dict-backtranslator")
 
     def test_cache_metadata_carries_task_id_and_unit_mode(self):
         task = _task("S6-backtranslate-local")
         with patch("pipeline.sense_fr.llm_is_available", return_value=True), \
              patch.object(sense_fr, "task_config", return_value=task), \
-             patch.object(sense_fr.llm, "call_json", return_value={"en": "to beat"}) as call:
+             patch.object(sense_fr.llm_client, "call", return_value={"en": "to beat"}) as call:
             sense_fr.llm_backtranslate("battre", "to hit repeatedly")
 
-        meta = call.call_args.kwargs["cache_metadata"]
+        meta = call.call_args.kwargs["cache_key_fields"]["extra"]
         self.assertEqual(meta["task_id"], "S6-backtranslate-local")
         self.assertFalse(meta["mode_batch"])
         self.assertEqual(meta["batch_size"], 1)
@@ -131,7 +129,7 @@ class LlmIsAvailablePingsResolvedTaskBackendTests(unittest.TestCase):
     def test_pings_the_provider_resolved_by_task_config(self):
         task = _task("S6-translate-local", model="catgpt/gateway-model")
         with patch.object(sense_fr, "task_config", return_value=task), \
-             patch.object(sense_fr.llm, "is_available", return_value=True) as ping:
+             patch.object(sense_fr.llm_client, "is_available", return_value=True) as ping:
             self.assertTrue(sense_fr.llm_is_available())
         ping.assert_called_once_with(backend="catgpt")
 
