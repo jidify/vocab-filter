@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "provenance": "Q0-2 annotations kept outside production; segment-scoped gold from the corrected reference and manual context audit.",
+  "cases": [
+    {"word":"spa","segment_idx":159,"expected":"spa.n.01"},
+    {"word":"barely","segment_idx":635,"expected":"barely.r.02"},
+    {"word":"barely","segment_idx":646,"expected":"barely.r.02"},
+    {"word":"barely","segment_idx":889,"expected":"barely.r.02"},
+    {"word":"barely","segment_idx":2150,"expected":"barely.r.02"},
+    {"word":"barely","segment_idx":2294,"expected":"barely.r.02"},
+    {"word":"barely","segment_idx":2357,"expected":"barely.r.02"},
+    {"word":"barely","segment_idx":2375,"expected":"barely.r.02"},
+    {"word":"barely","segment_idx":2466,"expected":"barely.r.02"},
+    {"word":"touch","segment_idx":1725,"expected":"use.v.01"},
+    {"word":"touch","segment_idx":1942,"expected":"touch.v.01"},
+    {"word":"roll","segment_idx":2179,"expected":"wheel.v.03"},
+    {"word":"roll","segment_idx":2546,"expected":"roll.v.01"},
+    {"word":"plow","segment_idx":317,"expected":"plow_snow.v.01"},
+    {"word":"poke","segment_idx":412,"expected":"poke.v.02"},
+    {"word":"facility","segment_idx":794,"expected":"facilities.n.02"},
+    {"word":"haggard","segment_idx":2028,"expected":"haggard.s.01"}
+  ]
+}

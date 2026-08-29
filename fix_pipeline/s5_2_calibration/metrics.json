@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "n": 17,
+  "raw_top1_accuracy": 0.11764705882352941,
+  "legacy_margin_confusion": {
+    "correct_accept": 2,
+    "correct_review": 0,
+    "incorrect_accept": 13,
+    "incorrect_review": 2
+  },
+  "calibrated_policy_confusion": {
+    "correct_accept": 0,
+    "correct_review": 2,
+    "incorrect_accept": 0,
+    "incorrect_review": 15
+  },
+  "calibration_bins": [
+    {
+      "range": "[0.00,0.40]",
+      "count": 17,
+      "mean_confidence": 0.19705882352941176,
+      "accuracy": 0.11764705882352941
+    },
+    {
+      "range": "[0.40,0.55]",
+      "count": 0,
+      "mean_confidence": 0.0,
+      "accuracy": 0.0
+    },
+    {
+      "range": "[0.55,0.72]",
+      "count": 0,
+      "mean_confidence": 0.0,
+      "accuracy": 0.0
+    },
+    {
+      "range": "[0.72,1.00]",
+      "count": 0,
+      "mean_confidence": 0.0,
+      "accuracy": 0.0
+    }
+  ],
+  "cases": [
+    {
+      "word": "spa",
+      "segment_idx": 159,
+      "expected": "spa.n.01",
+      "prediction": "health_spa.n.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.971011,
+      "reasons": [
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "barely",
+      "segment_idx": 635,
+      "expected": "barely.r.02",
+      "prediction": "barely.r.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.978841,
+      "reasons": [
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "barely",
+      "segment_idx": 646,
+      "expected": "barely.r.02",
+      "prediction": "barely.r.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.974243,
+      "reasons": [
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "barely",
+      "segment_idx": 889,
+      "expected": "barely.r.02",
+      "prediction": "barely.r.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.954706,
+      "reasons": [
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "barely",
+      "segment_idx": 2150,
+      "expected": "barely.r.02",
+      "prediction": "barely.r.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.964536,
+      "reasons": [
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "barely",
+      "segment_idx": 2294,
+      "expected": "barely.r.02",
+      "prediction": "barely.r.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.916349,
+      "reasons": [
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "barely",
+      "segment_idx": 2357,
+      "expected": "barely.r.02",
+      "prediction": "barely.r.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.978103,
+      "reasons": [
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "barely",
+      "segment_idx": 2375,
+      "expected": "barely.r.02",
+      "prediction": "barely.r.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.980427,
+      "reasons": [
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "barely",
+      "segment_idx": 2466,
+      "expected": "barely.r.02",
+      "prediction": "barely.r.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.969189,
+      "reasons": [
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "touch",
+      "segment_idx": 1725,
+      "expected": "use.v.01",
+      "prediction": "touch.v.03",
+      "correct": false,
+      "legacy_review": true,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.999645,
+      "reasons": [
+        "bilingual_no_support",
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "touch",
+      "segment_idx": 1942,
+      "expected": "touch.v.01",
+      "prediction": "touch.v.01",
+      "correct": true,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.98644,
+      "reasons": [
+        "bilingual_no_support",
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "roll",
+      "segment_idx": 2179,
+      "expected": "wheel.v.03",
+      "prediction": "wheel.v.03",
+      "correct": true,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.995681,
+      "reasons": [
+        "bilingual_no_support",
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "roll",
+      "segment_idx": 2546,
+      "expected": "roll.v.01",
+      "prediction": "roll.v.03",
+      "correct": false,
+      "legacy_review": true,
+      "policy_review": true,
+      "confidence": 0.15,
+      "entropy": 0.988734,
+      "reasons": [
+        "model_disagreement",
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "plow",
+      "segment_idx": 317,
+      "expected": "plow_snow.v.01",
+      "prediction": "plow.v.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.934132,
+      "reasons": [
+        "bilingual_no_support",
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "poke",
+      "segment_idx": 412,
+      "expected": "poke.v.02",
+      "prediction": "intrude.v.03",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.977979,
+      "reasons": [
+        "bilingual_no_support",
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "facility",
+      "segment_idx": 794,
+      "expected": "facilities.n.02",
+      "prediction": "facility.n.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.933172,
+      "reasons": [
+        "bilingual_no_support",
+        "high_candidate_entropy"
+      ]
+    },
+    {
+      "word": "haggard",
+      "segment_idx": 2028,
+      "expected": "haggard.s.01",
+      "prediction": "bony.s.01",
+      "correct": false,
+      "legacy_review": false,
+      "policy_review": true,
+      "confidence": 0.2,
+      "entropy": 0.95012,
+      "reasons": [
+        "bilingual_no_support",
+        "high_candidate_entropy"
+      ]
+    }
+  ]
+}

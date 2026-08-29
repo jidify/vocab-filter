@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import unicodedata
 
@@ -41,8 +42,12 @@ from lemminflect import getAllInflections, getAllInflectionsOOV
 from pipeline import atomic, config, inventory, llm
 from pipeline.corpus import Segment, load_segments
 
-MARGIN_THRESHOLD = 0.15
-SENSE_RESOLUTION_VERSION = "joint-lemma-pos-sense-v1"
+SENSE_RESOLUTION_VERSION = "calibrated-sense-policy-v2"
+
+# Seuils issus du corpus Q0-2. La marge brute n'est plus une porte de
+# production : elle reste exposee dans les artefacts pour audit et pour la
+# comparaison historique, mais la decision porte sur une confiance composee.
+POLICY_ACCEPT_CONFIDENCE = 0.72
 
 _gloss_model = None
 _EN = None
@@ -161,6 +166,8 @@ def resolve_joint_occurrence(occurrence: dict, segments: list[Segment]) -> dict 
         kwargs = {"allow_arbitration": False}
         if occurrence.get("surface"):
             kwargs["target_surface"] = occurrence["surface"]
+        kwargs["pos_compatible"] = hypothesis["pos"] == occurrence.get("pos")
+        kwargs["structural_conflict"] = bool(occurrence.get("multi_token_candidates"))
         record = analyze_occurrence(
             hypothesis["lemma"], hypothesis["pos"], segments,
             occurrence["segment_idx"], **kwargs,
@@ -579,13 +586,100 @@ def arbitrate(word, pos, context_text, synsets):
     return result
 
 
+def _normalized_entropy(results: list[dict]) -> float:
+    """Entropie [0, 1] des scores, robuste aux logits GlossBERT negatifs."""
+    if len(results) <= 1:
+        return 0.0
+    raw = [float(row.get("final_score", 0.0)) for row in results]
+    peak = max(raw)
+    weights = [math.exp(max(-50.0, min(50.0, value - peak))) for value in raw]
+    total = sum(weights)
+    probabilities = [weight / total for weight in weights]
+    entropy = -sum(p * math.log(p) for p in probabilities if p > 0.0)
+    return entropy / math.log(len(probabilities))
+
+
+def calibrated_resolution_policy(
+    results: list[dict], *, located: bool, pos_compatible: bool = True,
+    has_bilingual: bool, structural_conflict: bool = False,
+    model_disagreement: bool = False,
+) -> dict:
+    """Politique S5-2 auditable, calibree sur les strates Q0-2.
+
+    Les signaux structurels sont des portes de surete. Les autres signaux
+    composent une confiance interpretable ; aucune marge isolee ne decide.
+    """
+    entropy = _normalized_entropy(results)
+    bilingual_support = bool(results and results[0].get("fr_score", 0.0) > 0.0)
+    all_zero = not any(float(r.get("final_score", 0.0)) for r in results)
+
+    confidence = 0.18
+    confidence += 0.20 if located else -0.30
+    confidence += 0.16 if pos_compatible else -0.35
+    confidence += 0.22 * (1.0 - entropy)
+    confidence += 0.16 if bilingual_support else (0.02 if has_bilingual else -0.04)
+    confidence += -0.18 if model_disagreement else 0.08
+    confidence += -0.45 if structural_conflict else 0.0
+    confidence += -0.25 if all_zero else 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    # Les portes empiriques plafonnent aussi la probabilite publiee : une
+    # confiance haute accompagnee d'une distribution quasi uniforme serait
+    # mal calibree, meme si localisation/POS sont corrects.
+    if entropy >= 0.75:
+        confidence = min(confidence, 0.20)
+    if model_disagreement:
+        confidence = min(confidence, 0.15)
+    if structural_conflict or not pos_compatible or not located:
+        confidence = min(confidence, 0.25)
+
+    reasons = []
+    if not located:
+        reasons.append("target_not_localized")
+    if not pos_compatible:
+        reasons.append("pos_incompatible")
+    if structural_conflict:
+        reasons.append("entity_or_compound_conflict")
+    if model_disagreement:
+        reasons.append("model_disagreement")
+    if not has_bilingual:
+        reasons.append("bilingual_unavailable")
+    elif not bilingual_support:
+        reasons.append("bilingual_no_support")
+    high_entropy = entropy >= 0.75
+    if high_entropy:
+        reasons.append("high_candidate_entropy")
+    if all_zero:
+        reasons.append("no_positive_evidence")
+
+    forced_review = not located or not pos_compatible or structural_conflict
+    needs_arbitration = (
+        forced_review or model_disagreement or all_zero or high_entropy
+        or confidence < POLICY_ACCEPT_CONFIDENCE
+    )
+    # Sans arbitre execute, toute decision qui requiert un arbitrage reste
+    # explicitement en revision. L'arbitre pourra seul lever ce drapeau.
+    needs_review = needs_arbitration
+    return {
+        "version": SENSE_RESOLUTION_VERSION,
+        "confidence": round(confidence, 6),
+        "entropy": round(entropy, 6),
+        "bilingual_support": bilingual_support,
+        "model_disagreement": model_disagreement,
+        "structural_conflict": structural_conflict,
+        "needs_arbitration": needs_arbitration,
+        "needs_review": needs_review,
+        "reasons": reasons,
+    }
+
+
 # ============================================================
 # Analyse d'une occurrence
 # ============================================================
 
 def analyze_occurrence(
     word: str, pos: str, segments: list[Segment], seg_idx: int, allow_arbitration: bool = True,
-    target_surface: str | None = None,
+    target_surface: str | None = None, *, pos_compatible: bool = True,
+    structural_conflict: bool = False,
 ) -> dict | None:
     synsets = get_synsets(word, pos)
     if not synsets:
@@ -648,7 +742,12 @@ def analyze_occurrence(
     fr_best = max(results, key=lambda r: r["fr_score"])["synset"] if any(r["fr_score"] for r in results) else None
     disagreement = bool(gloss_best and fr_best and gloss_best != fr_best)
 
-    needs_arbitration = margin < MARGIN_THRESHOLD or all_zero or disagreement
+    policy = calibrated_resolution_policy(
+        results, located=surface is not None, pos_compatible=pos_compatible,
+        has_bilingual=bool(french), structural_conflict=structural_conflict,
+        model_disagreement=disagreement,
+    )
+    needs_arbitration = policy["needs_arbitration"]
 
     record = {
         "word": word, "pos": pos, "segment_idx": seg_idx,
@@ -657,8 +756,9 @@ def analyze_occurrence(
         "candidates": results,
         "best_sense": results[0]["synset"],
         "margin": margin,
-        "needs_review": False,
+        "needs_review": policy["needs_review"],
         "arbitration": None,
+        "resolution_policy": policy,
     }
 
     if needs_arbitration and allow_arbitration:
@@ -667,7 +767,16 @@ def analyze_occurrence(
         selected = arb.get("selected_sense")
         if selected and selected != "aucun_sens_adapte" and any(r["synset"] == selected for r in results):
             record["best_sense"] = selected
-            record["needs_review"] = float(arb.get("confidence", 0)) < 0.6
+            arb_confidence = max(0.0, min(1.0, float(arb.get("confidence", 0))))
+            record["resolution_policy"]["arbitrator_confidence"] = arb_confidence
+            record["resolution_policy"]["confidence"] = round(
+                0.45 * policy["confidence"] + 0.55 * arb_confidence, 6
+            )
+            record["needs_review"] = (
+                policy["structural_conflict"]
+                or not pos_compatible
+                or record["resolution_policy"]["confidence"] < POLICY_ACCEPT_CONFIDENCE
+            )
         elif selected == "aucun_sens_adapte":
             record["best_sense"] = "aucun_sens_adapte"
             record["needs_review"] = True
