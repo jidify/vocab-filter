@@ -2,7 +2,15 @@
 
 ## Statut
 
-Repéré, documenté, **non corrigé**. Découvert le 2026-08-29 en relançant S3
+**Corrigé** — voir `report_s2_gates_idiomatch_overmatch.md` (portes A/C/D de
+`pipeline/mwe_gates.py`) pour l'implémentation, la mesure avant/après et les
+limites restantes. `know someone` retombe de 111 à 3 occurrences ; deux
+défauts additionnels du même détecteur (`I do`, `wing it`) trouvés et
+corrigés dans le même lot. La famille de sur-fusion par remplissage lexical
+(`come to`/`go to`, Correction S2-1) reste ouverte, hors périmètre de ce
+correctif.
+
+Repéré, documenté initialement sans correctif. Découvert le 2026-08-29 en relançant S3
 (`mwe_judge.run()`) pour de vrai sur *The Humans*, en observant les
 décisions renvoyées par le modèle sur des candidats manifestement absurdes.
 Rattaché à **Correction S2-1** de `fix_pipeline/plan_action_fix_pipeline.md`

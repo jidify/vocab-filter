@@ -121,29 +121,34 @@ def _spec_matches_token(spec: dict, token) -> bool:
     return False
 
 
-def _all_alignments(spec_list: list[dict], tokens: list) -> set[frozenset[int]]:
-    """Toutes les façons d'aligner `spec_list` sur TOUTE la séquence
-    `tokens` (bornes exactes : rien avant, rien après). Chaque solution
-    est l'ensemble des indices (dans `tokens`) considérés membres réels de
-    l'idiome — le remplissage générique (`_is_filler`) n'y figure jamais,
-    qu'il ait été consommé ou non."""
+def _iter_assignments(spec_list: list[dict], tokens: list) -> list[tuple[tuple[int, int], ...]]:
+    """Comme `_all_alignments` ci-dessous, mais chaque solution est la
+    liste COMPLÈTE des paires (indice de spec, indice de token) pour les
+    tokens membres, dans l'ordre du motif — pas seulement l'ensemble nu des
+    indices de tokens. Nécessaire à `pipeline/mwe_gates.py`, qui doit savoir
+    QUEL spec (slot ou ancre) a consommé quel token, information que
+    l'ensemble seul ne porte pas.
+
+    Même mémoïsation que l'original : le résultat pour un état (si, ti) ne
+    dépend que des specs restantes et des tokens à partir de ti, jamais du
+    chemin emprunté pour y arriver — donc réutilisable tel quel."""
 
     n_specs, n_tokens = len(spec_list), len(tokens)
-    memo: dict[tuple[int, int], set[frozenset[int]]] = {}
+    memo: dict[tuple[int, int], list[tuple[tuple[int, int], ...]]] = {}
 
-    def rec(si: int, ti: int) -> set[frozenset[int]]:
+    def rec(si: int, ti: int) -> list[tuple[tuple[int, int], ...]]:
         key = (si, ti)
         if key in memo:
             return memo[key]
         if si == n_specs:
-            result: set[frozenset[int]] = {frozenset()} if ti == n_tokens else set()
+            result: list[tuple[tuple[int, int], ...]] = [()] if ti == n_tokens else []
             memo[key] = result
             return result
 
         spec = spec_list[si]
         lo, hi = _op_bounds(spec)
         is_member = not _is_filler(spec)
-        results: set[frozenset[int]] = set()
+        results: list[tuple[tuple[int, int], ...]] = []
         for k in range(0, hi + 1):
             if ti + k > n_tokens:
                 break
@@ -151,13 +156,30 @@ def _all_alignments(spec_list: list[dict], tokens: list) -> set[frozenset[int]]:
                 break  # ce token ne matche plus le motif : k plus grand ne marchera pas
             if k < lo:
                 continue
-            consumed = frozenset(range(ti, ti + k)) if is_member else frozenset()
+            consumed = tuple((si, ti + j) for j in range(k)) if is_member else ()
             for rest in rec(si + 1, ti + k):
-                results.add(rest | consumed)
+                results.append(consumed + rest)
         memo[key] = results
         return results
 
     return rec(0, 0)
+
+
+def _all_alignments(spec_list: list[dict], tokens: list) -> set[frozenset[int]]:
+    """Toutes les façons d'aligner `spec_list` sur TOUTE la séquence
+    `tokens` (bornes exactes : rien avant, rien après). Chaque solution
+    est l'ensemble des indices (dans `tokens`) considérés membres réels de
+    l'idiome — le remplissage générique (`_is_filler`) n'y figure jamais,
+    qu'il ait été consommé ou non.
+
+    Réduction de `_iter_assignments` : c'est le nombre d'ensembles de
+    membres DISTINCTS qui compte ici, pas le nombre de dérivations —
+    plusieurs affectations complètes peuvent produire le même ensemble."""
+
+    return {
+        frozenset(ti for _, ti in assignment)
+        for assignment in _iter_assignments(spec_list, tokens)
+    }
 
 
 class AlignmentResult:

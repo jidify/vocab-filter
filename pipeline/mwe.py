@@ -20,7 +20,7 @@ from collections import Counter, defaultdict
 
 from idiomatch import Idiomatcher
 
-from pipeline import atomic, config, custom_lexicon, mwe_alignment
+from pipeline import atomic, config, custom_lexicon, mwe_alignment, mwe_gates
 from pipeline.corpus import load_segments
 
 _MATCHER = None
@@ -129,6 +129,12 @@ def get_matcher():
                 del idiomatcher_module.open
             else:
                 idiomatcher_module.open = previous_open
+        # Porte D (fix_pipeline/s2_fix/) : répare les entrées idiomatch dont
+        # l'ancre a été compilée sur un lemme spaCy erroné (voir
+        # mwe_gates.CORRUPT_ANCHOR_REPAIRS) AVANT d'ajouter les idiomes
+        # custom du projet ci-dessous — jamais corrompus par construction,
+        # rien à réparer pour eux.
+        mwe_gates.repair_corrupt_anchor_lemmas(_MATCHER)
         _MATCHER.add_idioms(_all_custom_idioms())
     return _MATCHER
 
@@ -166,6 +172,12 @@ def find_candidates(segments):
                     for i in sorted(alignment.member_indices)
                 ]
 
+            # Portes S2 (fix_pipeline/s2_fix/) : `None` si le candidat passe,
+            # sinon la famille de rejet — jamais omis, pour que run() puisse
+            # partitionner sans perdre trace de ce qui a été écarté et
+            # pourquoi (voir MWE_REJECTED_CANDIDATES_PATH).
+            rejected_by = mwe_gates.classify(m["idiom"], list(span), matcher.nlp, matcher.n)
+
             yield {
                 # Lot 0 — identité stable (plan Partie 2, point F) : "m:"
                 # distingue des occurrence_id "w:" des mots simples
@@ -188,6 +200,7 @@ def find_candidates(segments):
                 "n_tokens_lemma": len(m["idiom"].split()),
                 "member_char_spans": member_char_spans,
                 "ambiguous_alignment": alignment.ambiguous,
+                "rejected_by": rejected_by,
                 "source": "idiomatch",
                 # Lot 3 (point C) : seuls les candidats VPC signalés par le
                 # garde-fou directionnel du détecteur portent ce flag à True
@@ -358,6 +371,12 @@ def run() -> int:
     idiomatch_raw = list(find_candidates(segments))
     print(f"{len(idiomatch_raw)} occurrences idiomatch brutes.")
 
+    idiomatch_accepted = [c for c in idiomatch_raw if c["rejected_by"] is None]
+    idiomatch_rejected = [c for c in idiomatch_raw if c["rejected_by"] is not None]
+    if idiomatch_rejected:
+        print(f"{len(idiomatch_rejected)} écartée(s) par les portes S2 avant fusion "
+              f"({config.MWE_REJECTED_CANDIDATES_PATH.name}).")
+
     vpc_raw = load_vpc_candidates(segments)
     print(f"{len(vpc_raw)} occurrences VPC (Lot 2, {config.VPC_CANDIDATES_PATH.name}).")
 
@@ -365,8 +384,8 @@ def run() -> int:
     print(f"{len(rules_plus_raw)} occurrences rules_plus (Q0-3 Phase 6, "
           f"{config.RULES_PLUS_CANDIDATES_PATH.name}).")
 
-    raw = merge_candidate_sources(idiomatch_raw, vpc_raw, rules_plus_raw)
-    n_merged = len(idiomatch_raw) + len(vpc_raw) + len(rules_plus_raw) - len(raw)
+    raw = merge_candidate_sources(idiomatch_accepted, vpc_raw, rules_plus_raw)
+    n_merged = len(idiomatch_accepted) + len(vpc_raw) + len(rules_plus_raw) - len(raw)
     if n_merged:
         print(f"{n_merged} occurrence(s) détectée(s) par les deux sources (fusionnées).")
 
@@ -385,6 +404,9 @@ def run() -> int:
     )
 
     print(f"-> {config.MWE_CANDIDATES_PATH}")
+
+    atomic.atomic_write_jsonl(config.MWE_REJECTED_CANDIDATES_PATH, idiomatch_rejected)
+    print(f"-> {config.MWE_REJECTED_CANDIDATES_PATH} ({len(idiomatch_rejected)} lignes, audit)")
 
     top = Counter({idiom: len(occs) for idiom, occs in by_type.items()}).most_common(15)
     print("\nTop 15 par fréquence (à juger en S3, pas à faire confiance ici) :")

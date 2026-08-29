@@ -84,6 +84,12 @@ VPC_CANDIDATES_PATH = OUT_DIR / "vpc_candidates.jsonl"
 # produit que des candidats, aucune décision "rejected_*".
 RULES_PLUS_CANDIDATES_PATH = OUT_DIR / "rules_plus_candidates.jsonl"
 MWE_CANDIDATES_PATH = OUT_DIR / "mwe_candidates.jsonl"
+# Lot "portes S2" (fix_pipeline/s2_fix/) : candidats idiomatch écartés par
+# pipeline/mwe_gates.py::classify AVANT S3 (slot ouvert saturé sans lien
+# syntaxique, idiome tout-grammatical réalisé en emploi auxiliaire) — jamais
+# omis silencieusement, voir mwe.py::run(). VPC/rules_plus n'écrivent
+# jamais ici : les portes ne s'appliquent qu'à la source idiomatch.
+MWE_REJECTED_CANDIDATES_PATH = OUT_DIR / "mwe_rejected_candidates.jsonl"
 MWE_DECISIONS_PATH = OUT_DIR / "mwe_decisions.jsonl"
 MWE_SPANS_PATH = OUT_DIR / "mwe_confirmed_spans.jsonl"
 RESERVATION_REPORT_PATH = OUT_DIR / "reservation_report.json"

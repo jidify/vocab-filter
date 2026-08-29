@@ -53,6 +53,33 @@ def check_mwe_occurrence_senses():
     assert not missing, f"S3 occurrence judgment missing for heterogeneous 'let someone go': {missing}"
 
 
+def check_idiomatch_overmatch_gates():
+    """S2 (fix_pipeline/s2_fix/bug_idiomatch_slot_overmatch.md) : idiomatch
+    sur-généralise `know someone` (slot ouvert satisfait par n'importe quel
+    pronom, sans lien syntaxique) et `I do` (ancres tout-grammaticales
+    réalisées en emploi auxiliaire) ; `wing it` était indétectable et
+    collectait des faux `we ... it` (ancre compilée sur un lemme spaCy
+    erroné). Les portes de `pipeline/mwe_gates.py` corrigent les trois — ce
+    test échoue si l'une d'elles régresse, sans dépendre des comptes exacts
+    de ce livre (seulement des seuils très au-dessus du bruit corrigé)."""
+
+    by_idiom = {normalize(r["idiom"]): r for r in jsonl("mwe_candidates.jsonl")}
+    ceilings = {"know someone": 10, "i do": 20}
+    over_ceiling = {
+        idiom: by_idiom[idiom]["count"]
+        for idiom, ceiling in ceilings.items()
+        if idiom in by_idiom and by_idiom[idiom]["count"] > ceiling
+    }
+    ghost_wing_it = [
+        o["surface"] for o in by_idiom.get("wing it", {}).get("occurrences", [])
+        if normalize(o["surface"]).split()[0].startswith("we")
+    ]
+    assert not over_ceiling and not ghost_wing_it, (
+        "S2 gates failure: idiomatch slot/grammatical over-match not filtered before S3 "
+        f"(counts over ceiling: {over_ceiling}, wing-it ghost matches: {ghost_wing_it})"
+    )
+
+
 def check_mwe_recall():
     expected = {"let it go", "come back to earth", "get worked up", "at ease", "burn out", "put to rest", "steer clear of", "could care less", "tighten one's belt"}
     present = {normalize(r["canonical_form"]) for r in vocab_rows() if normalize(r["unit_type"]) == "mwe"}
@@ -137,6 +164,7 @@ def check_end_to_end_gate():
 STRATIFIED_CHECKS = {
     "mwe_fusionnees": check_mwe_merged_boundaries,
     "mwe_occurrences_heterogenes": check_mwe_occurrence_senses,
+    "sur_appariement_idiomatch": check_idiomatch_overmatch_gates,
     "mwe_manquees": check_mwe_recall,
     "mwe_polysemiques": check_mwe_polysemy,
     "pos_lemme": check_pos_lemma_alternatives,
@@ -152,6 +180,7 @@ STRATIFIED_CHECKS = {
 EXPECTED_CURRENT_OUTCOMES = {
     "mwe_fusionnees": ("known_failure", "S2 boundary failure"),
     "mwe_occurrences_heterogenes": ("known_failure", "S3 occurrence judgment missing"),
+    "sur_appariement_idiomatch": ("passes", "invariant satisfied"),
     "mwe_manquees": ("known_failure", "S2/S3 MWE recall failure"),
     "mwe_polysemiques": ("known_failure", "S3 sense clustering failure"),
     "pos_lemme": ("known_failure", "S1/S5 POS-lemma alternatives lost"),

@@ -4,6 +4,7 @@
   "cases": [
     {"id": "come_to_mixed_spans", "stratum": "mwe_fusionnees", "artifact": "selected_mwe.jsonl", "canonical_form": "come to", "observed_surfaces": ["come back to", "come home to", "come talk to", "comes to", "coming to"]},
     {"id": "let_go_heterogeneous", "stratum": "mwe_occurrences_heterogenes", "artifact": "mwe_decisions.jsonl", "canonical_form": "let someone go", "observed_surfaces": ["Let it go", "Let's go", "let him go", "let me go"]},
+    {"id": "idiomatch_overmatch_gates", "stratum": "sur_appariement_idiomatch", "artifact": "mwe_candidates.jsonl", "canonical_form": "know someone", "observed_surfaces": ["I know", "you know", "it is not known", "I've done", "we get it"]},
     {"id": "missing_mwe_families", "stratum": "mwe_manquees", "artifact": "mwe_candidates.jsonl", "observed_surfaces": ["come back to earth", "could care less", "burn out"]},
     {"id": "burn_out_contexts", "stratum": "mwe_polysemiques", "artifact": "mwe_candidates.jsonl", "canonical_form": "burn out", "observed_surfaces": ["burn out", "burns out", "burning out"]},
     {"id": "morphology_alternatives", "stratum": "pos_lemme", "artifact": "occurrences.jsonl", "observed_surfaces": ["frosting", "creeping", "facilities", "stressing", "bitch"]},
