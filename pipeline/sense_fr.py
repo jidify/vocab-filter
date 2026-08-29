@@ -57,6 +57,7 @@ from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
 
 from pipeline import config, inventory, llm, senses
+from pipeline.llm_tasks import task_config
 
 # ============================================================
 # Ressources lexicales statiques (omw-fr, WoNeF)
@@ -221,9 +222,18 @@ _llm_available: bool | None = None
 
 
 def llm_is_available() -> bool:
+    """Un seul ping mémoïsé pour tout le process, mais sur le backend
+    RÉSOLU par task_config("S6-translate-local") — pas config.LLM_BACKEND
+    brut, qui ignore l'alias .env PROVIDER=chatgpt->catgpt (plan §3.3) —
+    sinon ce ping peut interroger Ollama alors que les appels réels de
+    llm_translate_votes/llm_backtranslate partent vers CatGPT. S6-translate-
+    local et S6-backtranslate-local partagent global_model_fallback=True :
+    sans override dédié pour l'une des deux tâches seulement, elles
+    résolvent au même backend, donc un unique ping reste correct pour les
+    deux (voir sense_fr's docstring de module pour le compromis)."""
     global _llm_available
     if _llm_available is None:
-        _llm_available = llm.is_available()
+        _llm_available = llm.is_available(backend=task_config("S6-translate-local").provider)
     return _llm_available
 
 
@@ -233,10 +243,18 @@ def llm_translate_votes(
     """SENSE_FR_LLM_DRAWS tentatives de traduction, chacune avec une
     formulation différente. Renvoie la liste des (fr, fr_alt) obtenus
     (liste plus courte que SENSE_FR_LLM_DRAWS si le LLM est
-    indisponible ou renvoie une erreur sur certains tirages)."""
+    indisponible ou renvoie une erreur sur certains tirages).
+
+    Slot S6-translate-local (registre pipeline/llm_tasks.py, batch_allowed
+    False en v1 — voir fix_pipeline/multi_models/plan_multi_models.md §1) :
+    chemin unitaire uniquement, jamais de lot. Le mécanisme de plusieurs
+    tirages ci-dessus (SENSE_FR_LLM_DRAWS formulations) est un consensus
+    interne au modèle, PAS le lot au sens du plan (plusieurs cas métier
+    dans un même prompt) — ne pas confondre les deux."""
     if not llm_is_available():
         return []
 
+    task = task_config("S6-translate-local")
     votes = []
     body = TRANSLATE_TEMPLATE
     for i in range(config.SENSE_FR_LLM_DRAWS):
@@ -249,7 +267,12 @@ def llm_translate_votes(
             instruction=instruction,
         )
         try:
-            result = llm.call_json(prompt, system=TRANSLATE_SYSTEM, timeout=120)
+            result = llm.call_json(
+                prompt, system=TRANSLATE_SYSTEM, timeout=120,
+                model=task.bare_model, backend=task.provider,
+                cache_metadata={"task_id": task.task_id, "model": task.model,
+                                "mode_batch": False, "batch_size": 1},
+            )
         except llm.LLMError:
             continue
         fr = (result.get("fr") or "").strip()
@@ -261,11 +284,19 @@ def llm_translate_votes(
 
 
 def llm_backtranslate(fr_candidate: str, definition_en: str) -> str | None:
+    """Slot S6-backtranslate-local (registre pipeline/llm_tasks.py,
+    batch_allowed False en v1) : un candidat -> un appel, jamais de lot."""
     if not llm_is_available():
         return None
+    task = task_config("S6-backtranslate-local")
     prompt = BACKTRANSLATE_TEMPLATE.format(fr_candidate=fr_candidate, definition=definition_en or "?")
     try:
-        result = llm.call_json(prompt, system=BACKTRANSLATE_SYSTEM, timeout=120)
+        result = llm.call_json(
+            prompt, system=BACKTRANSLATE_SYSTEM, timeout=120,
+            model=task.bare_model, backend=task.provider,
+            cache_metadata={"task_id": task.task_id, "model": task.model,
+                            "mode_batch": False, "batch_size": 1},
+        )
     except llm.LLMError:
         return None
     en = (result.get("en") or "").strip()
@@ -826,9 +857,14 @@ def run(
     config.ensure_out_dir()
 
     if not llm_is_available():
-        llm_url = (config.CATGPT_BASE_URL if config.LLM_BACKEND == "catgpt"
+        # Même backend que celui réellement pingé par llm_is_available() —
+        # task_config("S6-translate-local") (honore l'alias PROVIDER=chatgpt),
+        # pas config.LLM_BACKEND brut, pour ne jamais afficher un backend/URL
+        # différent de celui qui a échoué.
+        resolved_backend = task_config("S6-translate-local").provider
+        llm_url = (config.CATGPT_BASE_URL if resolved_backend == "catgpt"
                    else config.OLLAMA_URL)
-        print(f"  (LLM {config.LLM_BACKEND} injoignable à {llm_url} : les acceptations "
+        print(f"  (LLM {resolved_backend} injoignable à {llm_url} : les acceptations "
               f"automatiques nécessitant un consensus LLM seront sautées ; "
               f"les concordances omw-fr/WoNeF pures restent possibles.)")
 

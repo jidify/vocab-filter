@@ -144,7 +144,19 @@ S3_JUDGE_BATCH_SIZE = 50  # validé séparément sur le corpus contrastif S3 ; j
 def configure_llm(*, backend: str | None = None, base_url: str | None = None,
                   api_token: str | None = None, model: str | None = None,
                   timeout: float | None = None) -> None:
-    """Applique les options LLM du CLI avant l'import des étapes."""
+    """Applique les options LLM globales du CLI (run_pipeline.py --llm-backend/
+    --llm-model/...) avant l'import des étapes.
+
+    Périmètre limité : seul le backend GLOBAL de repli change (LLM_BACKEND/
+    OLLAMA_MODEL/CATGPT_MODEL), consommé par pipeline.llm_tasks.task_config()
+    pour S3-judge-occurrence, S3-definition-cluster, S5-arbitrate,
+    S6-translate-local, S6-backtranslate-local (descripteurs
+    global_model_fallback=True) tant qu'aucun VOCAB_LLM_<TASK_ID> dédié n'est
+    posé. Les 4 tâches S6 routées par LiteLLM (S6-translate-frontier,
+    S6-backtranslate, S6-judge-dossier, S6-reassign) ignorent totalement ces
+    valeurs : leur modèle se règle uniquement via VOCAB_LLM_S6_* (voir le
+    tableau des task_id dans README.md et fix_pipeline/multi_models/
+    plan_multi_models.md §3.3-3.4)."""
     global LLM_BACKEND, OLLAMA_URL, OLLAMA_MODEL
     global CATGPT_BASE_URL, CATGPT_API_TOKEN, CATGPT_MODEL, CATGPT_TIMEOUT
     if backend is not None:

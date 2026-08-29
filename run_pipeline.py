@@ -109,10 +109,30 @@ def main() -> int:
              "'1-10', '1,4,7', combinable '1-3,7'. corpus/analyze/mwe/"
              "mwe_judge/select tournent toujours sur le livre entier.",
     )
-    parser.add_argument("--llm-backend", choices=["ollama", "catgpt"], default=None)
+    # --llm-backend/--llm-model ne couvrent QUE le backend global (ollama/catgpt),
+    # utilisé en repli par S3-judge-occurrence, S3-definition-cluster, S5-arbitrate,
+    # S6-translate-local et S6-backtranslate-local (registre pipeline/llm_tasks.py,
+    # tant qu'aucun VOCAB_LLM_<TASK_ID> dédié n'est posé pour la tâche). Les quatre
+    # tâches S6 routées par LiteLLM — S6-translate-frontier, S6-backtranslate,
+    # S6-judge-dossier, S6-reassign (sense_fr_frontier.py/sense_fr_adjudicate.py/
+    # sense_fr_reassign.py) — ne lisent JAMAIS ces deux options : leur modèle se
+    # configure exclusivement via les variables VOCAB_LLM_S6_* (voir le tableau des
+    # task_id dans README.md).
+    parser.add_argument(
+        "--llm-backend", choices=["ollama", "catgpt"], default=None,
+        help="Backend global de repli (S3/S5/S6-*-local uniquement, voir README.md "
+             "'Configuration multi-modèles par tâche') — sans effet sur S6-translate-"
+             "frontier/S6-backtranslate/S6-judge-dossier/S6-reassign.",
+    )
     parser.add_argument("--llm-base-url", default=None,
-                        help="URL Ollama ou URL /v1 de CatGPT-Gateway")
-    parser.add_argument("--llm-model", default=None)
+                        help="URL Ollama ou URL /v1 de CatGPT-Gateway (backend global de repli, "
+                             "même périmètre que --llm-backend)")
+    parser.add_argument(
+        "--llm-model", default=None,
+        help="Modèle du backend global de repli (S3/S5/S6-*-local uniquement, voir "
+             "README.md) — ne configure PAS le modèle des 4 tâches S6 frontière/"
+             "adjudication/reassign, chacune ayant son propre slot VOCAB_LLM_S6_*.",
+    )
     parser.add_argument("--catgpt-api-token", default=None)
     parser.add_argument("--catgpt-timeout", type=float, default=None)
     args = parser.parse_args()

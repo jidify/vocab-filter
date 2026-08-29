@@ -111,12 +111,25 @@ def call_json(
     return parsed
 
 
-def is_available() -> bool:
+def is_available(*, backend: str | None = None) -> bool:
+    """``backend`` explicite (``"ollama"``/``"catgpt"``/``"openai"``) pour
+    pinger le provider réellement résolu par un appelant (p.ex.
+    ``pipeline.llm_tasks.task_config(task_id).provider``, qui honore l'alias
+    ``.env`` ``PROVIDER=chatgpt``) plutôt que ``config.LLM_BACKEND`` seul, qui
+    l'ignore — sans ``backend``, comportement inchangé (repli sur
+    ``config.LLM_BACKEND``)."""
+    backend = backend or config.LLM_BACKEND
     try:
-        if config.LLM_BACKEND == "catgpt":
+        if backend == "catgpt":
             req = urllib.request.Request(
                 f"{config.CATGPT_BASE_URL}/models",
                 headers={"Authorization": f"Bearer {config.CATGPT_API_TOKEN}"},
+            )
+        elif backend == "openai":
+            base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+            req = urllib.request.Request(
+                f"{base_url}/models",
+                headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}"},
             )
         else:
             req = urllib.request.Request(f"{config.OLLAMA_URL}/api/tags")
