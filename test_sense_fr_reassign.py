@@ -15,7 +15,8 @@ from pipeline.sense_fr_reassign import (
 def _decision(**overrides) -> ReassignedDecision:
     base = dict(
         key="k", pos="n", sense_id=None, fr=["mot"],
-        translation_type="equivalence_directe", confidence="high", reason="r",
+        translation_type="equivalence_directe", sense_fit="ok", sense_fit_note="",
+        confidence="high", reason="r",
     )
     base.update(overrides)
     return ReassignedDecision(**base)
@@ -165,6 +166,69 @@ class ApplyDecisionTests(unittest.TestCase):
         self.assertIn(entry["key"], store)
         self.assertEqual(store[entry["key"]]["fr"], "tomber en panne")
         self.assertEqual(store[entry["key"]]["kind"], "mwe")
+        self.assertEqual(store[entry["key"]]["sense_fit"], "ok")
+
+    def test_mismatch_sense_fit_never_locks_an_mwe_even_though_it_would_otherwise_promote(self):
+        """Reproduit le bug réel `give out` : une expression figée ne peut
+        jamais être re-clée (classify_decision renvoie toujours "promu"),
+        donc SANS cette porte le module verrouillerait quand même la
+        traduction proposée malgré une definition_en incohérente."""
+        entry = {
+            "key": "mwe:give out:phrasal_verb", "kind": "mwe", "pos": None,
+            "lemmas_en": ["give out"], "occurrences": 1,
+            "definition_en": "To utter, publish; to announce, proclaim, report.",
+            "agreement": "sense_id_suspect", "status": "pending",
+        }
+        store = {entry["key"]: dict(entry)}
+        decision = _decision(
+            key=entry["key"], pos="mwe", sense_id=None, fr=["tomber en panne"],
+            sense_fit="mismatch",
+            sense_fit_note="La définition affichée parle d'annoncer ; le contexte montre "
+                            "un appareil qui cesse de fonctionner.",
+        )
+
+        group, row = apply_decision(entry, decision, [], "ctx", store)
+
+        self.assertEqual(group, "audit")
+        self.assertIsNotNone(row)
+        self.assertIn("verrouillage automatique refusé", row["note"])
+        # le magasin n'est PAS modifié : ni verrouillé, ni statut changé.
+        self.assertEqual(store[entry["key"]], entry)
+
+    def test_doubtful_sense_fit_never_locks_a_synset_reassignment(self):
+        entry = {
+            "key": "hang.v.01", "kind": "synset", "pos": "v", "lemmas_en": ["hang"],
+            "occurrences": 2, "agreement": "sense_id_douteux", "status": "pending",
+        }
+        store = {"hang.v.01": dict(entry)}
+        inventory = [{"sense_id": "cling.v.03", "pos": "v", "definition": "hold on tightly"}]
+        decision = _decision(
+            key="hang.v.01", pos="v", sense_id="cling.v.03", fr=["se cramponner"],
+            sense_fit="doubtful", sense_fit_note="incertain",
+        )
+
+        group, row = apply_decision(entry, decision, inventory, "ctx", store)
+
+        self.assertEqual(group, "audit")
+        self.assertNotIn("cling.v.03", store)  # jamais écrit
+        self.assertEqual(store["hang.v.01"], entry)  # entrée d'origine inchangée
+
+    def test_non_literal_translation_type_never_locks(self):
+        entry = {
+            "key": "beat.n.08", "kind": "synset", "pos": "n", "lemmas_en": ["beat"],
+            "occurrences": 30, "agreement": "sense_id_suspect", "status": "pending",
+        }
+        store = {"beat.n.08": dict(entry)}
+        inventory = [{"sense_id": "beat.n.08", "pos": "n", "definition": "..."}]
+        decision = _decision(
+            key="beat.n.08", pos="n", sense_id="beat.n.08", fr=["petite pause"],
+            translation_type="reformulation",
+        )
+
+        group, row = apply_decision(entry, decision, inventory, "ctx", store)
+
+        self.assertEqual(group, "audit")
+        self.assertEqual(store["beat.n.08"]["status"], "pending")
 
 
 if __name__ == "__main__":

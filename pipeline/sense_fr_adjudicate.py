@@ -85,6 +85,30 @@ WORDFREQ_MIN_ZIPF = 1.0
 DECIDED_STATUSES = {"validated", "auto_strong", "auto_corroborated", "auto_judged"}
 
 
+def eligible_candidates(store: dict[str, dict]) -> tuple[list[dict], list[dict]]:
+    """Renvoie (candidats, exclus_sense_fit). S6-1 : une entrée `pending`
+    à cause d'un sense_fit "mismatch"/"doubtful" ou d'un translation_type
+    non littéral (voir sense_fr.blocks_auto_lock) reste `pending` par
+    construction, mais son statut seul ne le montre pas — sans ce filtre,
+    Stage A pouvait la promouvoir en `auto_corroborated` dès que 2 preuves
+    lexicales HORS LIGNE corroborent la même traduction déjà signalée
+    incohérente avec sa définition, ce qui verrouille exactement la
+    contradiction que sense_fr_frontier.py avait pourtant repérée (cas réel
+    mesuré : `give out`/`turn off`, verrouillés en `auto_joint` par
+    pipeline/sense_fr_reassign.py avant l'introduction de cette porte).
+    Stage B/C reprennent `residual`, dérivé de `candidats` — l'exclusion
+    couvre donc les trois passes en un seul endroit."""
+    candidates, excluded = [], []
+    for e in store.values():
+        if e["status"] not in ("pending", "auto_llm"):
+            continue
+        if sense_fr.blocks_auto_lock(e.get("sense_fit"), e.get("translation_type")):
+            excluded.append(e)
+        else:
+            candidates.append(e)
+    return candidates, excluded
+
+
 # ============================================================
 # Stage A — signaux offline
 # ============================================================
@@ -269,9 +293,12 @@ def compute_signals(decided_snapshot: dict[str, dict], entry: dict, occurrences_
     return {
         "key": entry["key"],
         "resource_match": res_match,
-        # Informatifs seulement (déjà tranchés en amont par
-        # sense_fr_frontier.py, avant même que l'entrée puisse arriver
-        # ici en pending/auto_llm — voir la docstring du module) :
+        # Ne PAS lire "informatif seulement" comme "sans effet" : un
+        # sense_fit mismatch/doubtful ou un translation_type non littéral
+        # sont bien BLOQUANTS (voir decide_stage_a et
+        # eligible_candidates ci-dessous, plan §6 S6-1) — seulement pas
+        # recalculés ici, puisque tranchés en amont par
+        # sense_fr_frontier.py/sense_fr_reassign.py.
         "translation_type": entry.get("translation_type") or "",
         "sense_fit": entry.get("sense_fit") or "",
         # Mêmes phrases que celles transmises au juge Stage C
@@ -297,10 +324,15 @@ def compute_signals(decided_snapshot: dict[str, dict], entry: dict, occurrences_
 
 def decide_stage_a(entry: dict, signals: dict) -> tuple[str, str] | None:
     """(nouveau_statut, raison) si Stage A suffit à trancher, sinon None
-    (laissé à Stage B/C)."""
+    (laissé à Stage B/C). S6-1 : répète ici la porte déjà appliquée par
+    eligible_candidates (defense-in-depth) — decide_stage_a doit rester
+    sûre même appelée directement (comme le fait ce module de test) sans
+    passer par run()/eligible_candidates."""
     if entry["status"] not in ("pending", "auto_llm"):
         return None
     if not entry.get("fr"):
+        return None
+    if sense_fr.blocks_auto_lock(entry.get("sense_fit"), entry.get("translation_type")):
         return None
 
     if signals["n_corroborating_signals"] >= 2 and signals["deterministic_ok"]:
@@ -533,10 +565,12 @@ def run(
     # Phrases du LIVRE COURANT, jamais lues depuis le magasin permanent —
     # voir sense_fr.format_occurrences_en et la docstring de compute_signals.
     occurrences_by_sense = senses.load_occurrences_by_sense()
-    candidates = [e for e in store.values() if e["status"] in ("pending", "auto_llm")]
+    candidates, sense_fit_excluded = eligible_candidates(store)
     if limit is not None:
         candidates = candidates[:limit]
-    print(f"{len(candidates)} entrée(s) `pending`/`auto_llm` à arbitrer (Stage A).")
+    print(f"{len(candidates)} entrée(s) `pending`/`auto_llm` à arbitrer (Stage A)"
+          + (f", {len(sense_fit_excluded)} exclue(s) (sense_fit/translation_type "
+             f"incohérent, voir plan S6-1)" if sense_fit_excluded else "") + ".")
 
     # Instantané figé AVANT toute mutation (voir polysemy_collision) —
     # garantit que --dry-run et un run réel calculent EXACTEMENT les

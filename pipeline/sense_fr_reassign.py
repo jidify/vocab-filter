@@ -167,6 +167,19 @@ class ReassignedDecision(BaseModel):
     sense_id: str | None
     fr: list[str]  # 1 à 3 propositions, triées par fréquence d'usage RÉELLE
     translation_type: Literal["equivalence_directe", "reformulation", "explicitation"]
+    # S6-1 : ce module peut CONFIRMER une clé "mwe:..." (jamais re-clée,
+    # voir classify_decision) sans jamais toucher sa definition_en — sans
+    # ce champ, une definition_en fausse laissée en l'état par une passe
+    # précédente pouvait être verrouillée en `auto_joint` aux côtés d'une
+    # traduction qui la contredit ouvertement (cas réel : "give out"
+    # défini comme "to announce" mais traduit "tomber en panne", "turn
+    # off" défini comme "to dismiss" mais traduit "éteindre" — voir
+    # data/sense_fr.jsonl avant correction). Même sémantique que
+    # sense_fr_frontier.SenseTranslation.sense_fit : la définition
+    # AFFICHÉE (fiable ou non) correspond-elle à l'usage réel montré par
+    # les phrases fournies ?
+    sense_fit: Literal["ok", "doubtful", "mismatch"]
+    sense_fit_note: str
     confidence: Literal["high", "medium", "low"]
     reason: str  # justification courte pour l'audit humain, jamais affichée comme traduction
 
@@ -209,6 +222,16 @@ SYSTEM_PROMPT = (
     "condense/déplace l'information au point qu'aucun mot isolé ne "
     "correspond vraiment, \"explicitation\" si la traduction ajoute une "
     "précision nécessaire absente de l'anglais ;\n"
+    "- sense_fit : la \"définition actuelle\" affichée (elle-même signalée "
+    "PAS FIABLE) correspond-elle vraiment à l'usage montré par les phrases "
+    "fournies ? \"ok\" si oui, \"doubtful\" si c'est limite, \"mismatch\" si "
+    "les phrases montrent clairement un usage que cette définition ne "
+    "décrit pas — y compris pour une expression figée (\"mwe:...\") dont la "
+    "clé ne peut pas changer : dans ce cas ne masque jamais le problème en "
+    "traduisant quand même correctement, signale-le, un relecteur doit "
+    "corriger la définition séparément ;\n"
+    "- sense_fit_note : une phrase courte justifiant sense_fit (chaîne vide "
+    "si \"ok\" et évident) ;\n"
     "- confidence : \"low\" si le choix reste incertain même après relecture "
     "des phrases ;\n"
     "- reason : une phrase courte justifiant le choix de POS/sense_id, pour "
@@ -339,7 +362,7 @@ def _build_promoted_entry(entry: dict, decision: ReassignedDecision) -> dict:
         "status": "auto_joint",
         "agreement": "auto_joint_confirme",
         "translation_type": decision.translation_type,
-        "sense_fit": None, "sense_fit_note": "",
+        "sense_fit": decision.sense_fit, "sense_fit_note": decision.sense_fit_note,
         "decided_at": date.today().isoformat(), "decided_by": "auto_joint",
         "note": decision.reason,
     })
@@ -354,7 +377,24 @@ def apply_decision(
     ligne_d_audit_ou_None) — groupe in {"promu", "reassigne", "audit",
     "bloque"}. Isolé de run() pour rester testable sans appel réseau : c'est
     ici, et seulement ici, que la règle de non-écrasement d'une clé cible déjà
-    verrouillée (verify_fr_lock.LOCKED_STATUSES) est appliquée."""
+    verrouillée (verify_fr_lock.LOCKED_STATUSES) est appliquée.
+
+    S6-1 : la porte sense_fit/translation_type (sense_fr.blocks_auto_lock)
+    est vérifiée EN PREMIER, avant même de savoir si l'issue aurait été
+    "promu" ou "reassigne" — sans quoi une expression figée ("mwe:...",
+    qui ne peut jamais être re-clée, voir classify_decision) filerait tout
+    droit vers un verrouillage `auto_joint` dès que le modèle propose UNE
+    traduction, quelle que soit sa propre cohérence avec la définition
+    affichée (voir la docstring de ReassignedDecision.sense_fit pour le cas
+    réel qui a motivé cette porte)."""
+    block_reason = sense_fr.blocks_auto_lock(decision.sense_fit, decision.translation_type)
+    if block_reason:
+        return "audit", _audit_row(
+            entry, decision, decision.sense_id, contexte_en,
+            note=f"verrouillage automatique refusé ({block_reason}) : "
+                 f"{decision.sense_fit_note or decision.reason}",
+        )
+
     allowed = {c["sense_id"] for c in inventory}
     sense_id = decision.sense_id
     if sense_id is not None and entry["kind"] != "mwe" and sense_id not in allowed:
@@ -408,7 +448,7 @@ def _build_reassigned_entry(
         "status": "auto_joint",
         "agreement": f"auto_joint_reassigne_depuis:{entry['key']}",
         "translation_type": decision.translation_type,
-        "sense_fit": None, "sense_fit_note": "",
+        "sense_fit": decision.sense_fit, "sense_fit_note": decision.sense_fit_note,
         "source": None,
         "evidence": {
             "omw_fr": [], "wonef": [], "frontier_model": config.SENSE_FR_FRONTIER_MODEL,

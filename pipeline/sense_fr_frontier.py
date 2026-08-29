@@ -401,13 +401,12 @@ def build_entry(target: dict, translation: SenseTranslation | None) -> dict:
     # doivent jamais être verrouillés automatiquement, quelle que soit la
     # confiance du modèle ou l'accord des ressources), puis la confiance
     # déclarée, puis enfin la corroboration par ressource — inchangée par
-    # rapport à la version précédente de ce module.
-    if translation.sense_fit == "mismatch":
-        status, agreement = "pending", "sense_id_suspect"
-    elif translation.sense_fit == "doubtful":
-        status, agreement = "pending", "sense_id_douteux"
-    elif translation.translation_type != "equivalence_directe":
-        status, agreement = "pending", f"frontier_{translation.translation_type}"
+    # rapport à la version précédente de ce module. Porte partagée avec
+    # sense_fr_reassign.py et sense_fr_adjudicate.py (plan §6, S6-1) :
+    # voir sense_fr.blocks_auto_lock.
+    block_reason = sense_fr.blocks_auto_lock(translation.sense_fit, translation.translation_type)
+    if block_reason:
+        status, agreement = "pending", block_reason
     elif translation.confidence == "low":
         status, agreement = "pending", "frontier_confiance_faible"
     elif not omw and not wonef:

@@ -362,7 +362,12 @@ def collect_targets() -> dict[str, dict]:
             u["canonical_form"], u["pos"], u["sense_id"], kind="mwe"
         )
         targets[key] = {
-            "key": key, "kind": "mwe", "lemmas_en": [u["canonical_form"]],
+            # S6-1 : identité complète — u["pos"] (NOUN/VERB/ADJ/ADV/OTHER,
+            # voir mwe_judge.py) était calculé par S3/S4 mais se perdait ici
+            # avant d'atteindre S6 ; classify_mwe_key/collect_frontier_targets
+            # se retrouvaient avec pos=None pour toute MWE, quel que soit ce
+            # que S3-2/S4-1 avaient réellement déterminé.
+            "key": key, "kind": "mwe", "lemmas_en": [u["canonical_form"]], "pos": u.get("pos"),
             "occurrences": u["occurrences"], "definition_en": u["definition_en"],
             "mwe_label": u.get("label"),
         }
@@ -548,7 +553,7 @@ def classify_mwe_key(target: dict) -> dict:
     return {
         "key": target["key"], "kind": "mwe", "lemmas_en": lemmas_en,
         "occurrences": target["occurrences"],
-        "pos": None, "definition_en": definition_en,
+        "pos": target.get("pos"), "definition_en": definition_en,
         "fr": fr, "fr_alt": fr_alt,
         "status": "pending", "agreement": "mwe_sans_ressource",
         "evidence": {"llm_votes": {f: c for f, c in llm_vote_counts.items()}},
@@ -609,6 +614,42 @@ def format_occurrences_en(
     d'une traduction SUR LE LIVRE COURANT."""
     picked = senses.pick_diverse_occurrences(occurrences, limit) if occurrences else []
     return " || ".join(o["context"] for o in picked)
+
+
+# ============================================================
+# Contrôle bloquant de cohérence sens-définition-FR (plan §6, Correction
+# S6-1) — un seul endroit qui décide si un sense_fit/translation_type
+# autodéclaré interdit un verrouillage automatique, réutilisé par TOUT
+# module capable d'écrire un statut de verify_fr_lock.LOCKED_STATUSES :
+# pipeline/sense_fr_frontier.py (passe primaire), pipeline/sense_fr_reassign.py
+# (décision conjointe POS/sens, S6c) et pipeline/sense_fr_adjudicate.py
+# (Stage A/B/C, qui ne doivent jamais promouvoir en auto_corroborated/
+# auto_judged une entrée déjà signalée mismatch/doubtful par une passe
+# précédente, même si des ressources indépendantes corroborent par
+# ailleurs la même traduction fautive — voir le cas réel `give out`/
+# `turn off` dans data/sense_fr.jsonl, verrouillés en `auto_joint` par
+# pipeline/sense_fr_reassign.py AVANT que cette fonction n'existe et sans
+# jamais interroger sense_fit, alors même que leur definition_en
+# contredisait ouvertement leur `fr`).
+# ============================================================
+
+
+def blocks_auto_lock(sense_fit: str | None, translation_type: str | None) -> str | None:
+    """Renvoie une raison (agreement) courte si le verrouillage automatique
+    doit être refusé, sinon None. `sense_fit == "mismatch"/"doubtful"`
+    signale que la définition imposée ne correspond pas à l'usage réel
+    (auto-évaluation du modèle, jamais utilisée seule comme PREUVE
+    positive — voir le plan §5.5 — mais suffisante comme signal NÉGATIF
+    bloquant, par prudence) ; `translation_type != "equivalence_directe"`
+    signale une reformulation/explicitation, elle aussi incompatible avec
+    un verrouillage sans relecture humaine."""
+    if sense_fit == "mismatch":
+        return "sense_id_suspect"
+    if sense_fit == "doubtful":
+        return "sense_id_douteux"
+    if translation_type is not None and translation_type != "equivalence_directe":
+        return f"frontier_{translation_type}"
+    return None
 
 
 # ============================================================
