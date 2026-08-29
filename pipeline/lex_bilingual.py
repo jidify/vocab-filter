@@ -78,7 +78,7 @@ BILINGUAL_EXTRACT_PATH = config.DATA_DIR / "bilingual_en_fr.json"
 DBNARY_POS_BY_WN = {"n": "Noun", "v": "Verb", "a": "Adjective", "s": "Adjective", "r": "Adverb"}
 
 # Seuil de similarité LaBSE en dessous duquel on refuse de retenir un
-# candidat DBnary — PROVISOIRE, à affiner une fois pipeline/eval_sense_fr.py
+# candidat DBnary — PROVISOIRE, à affiner une fois tools/evaluation/eval_sense_fr.py
 # disponible (voir le plan). Calibré à la main sur 5 cas connus du magasin
 # (mesuré en développant ce module) : van.n.05 vs van__Noun__1 = 0.653
 # (vrai match) ; cancer.n.01 vs cancer__Noun__1 = 0.528 (vrai match) vs
