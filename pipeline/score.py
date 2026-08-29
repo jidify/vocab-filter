@@ -188,14 +188,23 @@ def build_records() -> list[dict]:
             key = (occ["word"], occ["pos"])
             type_meta = types_by_key.get(key, {})
 
-            if occ["best_sense"] == "aucun_sens_adapte":
-                continue
-
             best = next(
                 (c for c in occ["candidates"] if c["synset"] == occ["best_sense"]), None
             )
             if best is None:
-                continue
+                # Compatibilite avec les anciens senses.jsonl : S5-3 ne
+                # permet plus qu'une occurrence incertaine disparaisse parce
+                # que son candidat synthétique n'a pas encore ete materialise.
+                unresolved_id = senses._stable_recovery_id("unresolved.human_review", occ)
+                occ["best_sense"] = unresolved_id
+                occ["needs_review"] = True
+                occ["recovery"] = {
+                    "route": "human_review", "attempts": [],
+                    "action": "select another analysis or justify a custom sense",
+                }
+                best = {"synset": unresolved_id,
+                        "definition": "No candidate sense fits this occurrence; human lexical review required.",
+                        "fr_hits": []}
 
             correction = manual_corrections.get((occ["word"], occ["pos"], occ["best_sense"]))
             surface = occ["target_surface"] or occ["word"]
@@ -229,6 +238,14 @@ def build_records() -> list[dict]:
                 "segment_idx": occ["segment_idx"],
                 "needs_review": occ["needs_review"],
                 "margin": occ["margin"],
+                "context": occ.get("context"),
+                "candidate_senses": [c.get("synset") for c in occ.get("candidates", [])],
+                "recovery_route": (occ.get("recovery") or {}).get("route"),
+                "recovery_reason": "; ".join(
+                    f"{a.get('branch')}:{a.get('status')}"
+                    for a in (occ.get("recovery") or {}).get("attempts", [])
+                ) or None,
+                "review_action": (occ.get("recovery") or {}).get("action"),
             })
 
     if n_corrupt:
@@ -324,6 +341,8 @@ def aggregate_and_score(records: list[dict]) -> list[dict]:
         fr_hits = first["fr_hits"] or []
         official_fr, meaning_fr_official, fr_status = resolve_official_fr(sense_fr_store, sense_id)
         contexte_en = sense_fr.format_occurrences_en(occurrences_by_sense.get(sense_id, []))
+        if not contexte_en:
+            contexte_en = " | ".join(dict.fromkeys(o["context"] for o in occs if o.get("context")))
         # fr_opacity : préfère la traduction officielle validée quand
         # elle existe (fiable, contrairement à fr_hits — voir le plan).
         # meaning_fr, lui, reste calculé depuis fr_hits SEUL (voir plus
@@ -360,6 +379,10 @@ def aggregate_and_score(records: list[dict]) -> list[dict]:
             "sense_surprise": surprise,
             "confidence": 1.0 - sum(1 for o in occs if o["needs_review"]) / len(occs),
             "needs_review": any(o["needs_review"] for o in occs),
+            "candidate_senses": sorted({s for o in occs for s in o.get("candidate_senses", []) if s}),
+            "recovery_route": first.get("recovery_route"),
+            "recovery_reason": first.get("recovery_reason"),
+            "review_action": first.get("review_action"),
         })
 
     for u in units:

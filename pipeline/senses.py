@@ -42,12 +42,13 @@ from lemminflect import getAllInflections, getAllInflectionsOOV
 from pipeline import atomic, config, inventory, llm
 from pipeline.corpus import Segment, load_segments
 
-SENSE_RESOLUTION_VERSION = "calibrated-sense-policy-v2"
+SENSE_RESOLUTION_VERSION = "no-sense-recovery-v3"
 
 # Seuils issus du corpus Q0-2. La marge brute n'est plus une porte de
 # production : elle reste exposee dans les artefacts pour audit et pour la
 # comparaison historique, mais la decision porte sur une confiance composee.
 POLICY_ACCEPT_CONFIDENCE = 0.72
+CUSTOM_SENSE_MIN_CONFIDENCE = 0.85
 
 _gloss_model = None
 _EN = None
@@ -154,6 +155,81 @@ def controlled_analysis_inventory(occurrence: dict) -> list[dict]:
 def resolution_digest(inventory_digest: str) -> str:
     payload = f"{inventory_digest}\n{SENSE_RESOLUTION_VERSION}\n"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _stable_recovery_id(prefix: str, occurrence: dict, payload: str = "") -> str:
+    identity = "\n".join([
+        str(occurrence.get("canonical_form") or occurrence.get("word") or ""),
+        str(occurrence.get("pos") or ""), str(occurrence.get("segment_idx") or ""), payload,
+    ])
+    return f"{prefix}.{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}"
+
+
+def recover_no_sense(occurrence: dict, record: dict) -> dict:
+    """Bifurque un rejet WordNet sans jamais supprimer l'occurrence.
+
+    L'autre analyse lemme/POS a deja ete tentee par
+    ``resolve_joint_occurrence``. On examine ensuite les spans couvrants,
+    puis une definition custom strictement justifiee, sinon la revision.
+    """
+    attempts = [{"branch": "alternate_lemma_pos", "status": "exhausted"}]
+    covering = occurrence.get("multi_token_candidates") or []
+    if covering:
+        attempts.append({"branch": "mwe_or_compound", "status": "needs_review",
+                         "candidate_ids": [c.get("candidate_id") for c in covering]})
+        route = "mwe_or_compound"
+        definition = "Occurrence potentially covered by a multi-token unit; lexical identity unresolved."
+    else:
+        attempts.append({"branch": "mwe_or_compound", "status": "not_found"})
+        arbitration = record.get("arbitration") or {}
+        custom_definition = str(arbitration.get("custom_definition_en") or "").strip()
+        evidence = str(arbitration.get("evidence") or "").strip()
+        confidence = float(arbitration.get("confidence") or 0.0)
+        if custom_definition and evidence and confidence >= CUSTOM_SENSE_MIN_CONFIDENCE:
+            sense_id = _stable_recovery_id("custom.word", occurrence, custom_definition.casefold())
+            attempts.append({"branch": "custom_justified", "status": "selected",
+                             "evidence": evidence, "confidence": confidence})
+            record.update({"best_sense": sense_id, "needs_review": False})
+            record.setdefault("candidates", []).append({
+                "synset": sense_id, "definition": custom_definition, "synonyms": [],
+                "gloss_score": 0.0, "fr_score": 0.0, "fr_source": None,
+                "fr_hits": [], "final_score": confidence,
+            })
+            record["recovery"] = {"route": "custom_justified", "attempts": attempts,
+                                  "action": "none"}
+            return record
+        attempts.append({"branch": "custom_justified", "status": "insufficient_evidence"})
+        route = "human_review"
+        definition = "No candidate sense fits this occurrence; human lexical review required."
+
+    sense_id = _stable_recovery_id(f"unresolved.{route}", occurrence)
+    record.update({"best_sense": sense_id, "needs_review": True})
+    record.setdefault("candidates", []).append({
+        "synset": sense_id, "definition": definition, "synonyms": [],
+        "gloss_score": 0.0, "fr_score": 0.0, "fr_source": None,
+        "fr_hits": [], "final_score": 0.0,
+    })
+    attempts.append({"branch": "human_review", "status": "queued"})
+    record["recovery"] = {
+        "route": route, "attempts": attempts,
+        "action": "confirm covering MWE/compound" if covering else "select another analysis or justify a custom sense",
+    }
+    return record
+
+
+def unresolved_occurrence_record(occurrence: dict, segments: list[Segment]) -> dict:
+    """Trace une occurrence meme lorsqu'aucun inventaire WordNet ne s'ouvre."""
+    wide = build_wide_context_from_segments(segments, occurrence["segment_idx"])
+    by_idx, _ = _segment_lookup(segments)
+    base = {
+        "word": occurrence.get("canonical_form") or occurrence.get("lemma") or occurrence.get("surface"),
+        "pos": occurrence.get("pos"), "segment_idx": occurrence["segment_idx"],
+        "target_surface": occurrence.get("surface"), "context": wide["text"],
+        "french": by_idx[occurrence["segment_idx"]].fr or None, "candidates": [],
+        "best_sense": "aucun_sens_adapte", "margin": 0.0, "needs_review": True,
+        "arbitration": None,
+    }
+    return recover_no_sense(occurrence, base)
 
 
 def resolve_joint_occurrence(occurrence: dict, segments: list[Segment]) -> dict | None:
@@ -568,7 +644,7 @@ Sens candidats :
 {candidates}
 
 Réponds en JSON strict :
-{{"selected_sense": "<id du sens choisi ou 'aucun_sens_adapte'>", "usage_type": "<litteral|idiomatique|autre>", "contextual_meaning_fr": "<courte paraphrase française>", "evidence": "<indice textuel>", "confidence": <0.0-1.0>}}
+{{"selected_sense": "<id du sens choisi ou 'aucun_sens_adapte'>", "usage_type": "<litteral|idiomatique|autre>", "contextual_meaning_fr": "<courte paraphrase française>", "custom_definition_en": "<définition anglaise précise seulement si aucun sens ne convient, sinon chaîne vide>", "evidence": "<indice textuel>", "confidence": <0.0-1.0>}}
 """
 
 
@@ -783,6 +859,12 @@ def analyze_occurrence(
         else:
             record["needs_review"] = True
 
+    if record["best_sense"] == "aucun_sens_adapte":
+        recovery_input = {
+            "canonical_form": word, "word": word, "pos": pos,
+            "segment_idx": seg_idx, "surface": surface,
+        }
+        return recover_no_sense(recovery_input, record)
     return record
 
 
@@ -1151,6 +1233,8 @@ def run(segment_idxs: set[int] | None = None, top_k: int | None = None) -> int:
                 joint_input.setdefault("canonical_form", t["lemma"])
                 joint_input.setdefault("pos", t["wn_pos"])
                 record = resolve_joint_occurrence(joint_input, segments)
+                if record is None:
+                    record = unresolved_occurrence_record(joint_input, segments)
             else:
                 synsets = get_synsets(t["lemma"], t["wn_pos"])
                 if not synsets:

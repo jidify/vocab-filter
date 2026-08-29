@@ -15,6 +15,7 @@ CSV_FIELDS = [
     "occurrences", "book_count", "dispersion",
     "zipf_need", "aoa_component", "fr_opacity", "sense_surprise", "confidence",
     "score_comprehension", "score_reuse", "score_default", "needs_review",
+    "recovery_route", "recovery_reason", "candidate_senses", "review_action",
 ]
 
 
@@ -25,6 +26,7 @@ def write_csv(units: list[dict], path) -> None:
         for u in units:
             row = dict(u)
             row["surface_forms"] = "/".join(u["surface_forms"])
+            row["candidate_senses"] = "/".join(u.get("candidate_senses") or [])
             for field in ("zipf_need", "aoa_component", "fr_opacity", "sense_surprise",
                           "confidence", "score_comprehension", "score_reuse", "score_default"):
                 row[field] = round(row[field], 3)
@@ -43,7 +45,25 @@ def write_review_queue(units: list[dict], path) -> None:
         for u in reviewable:
             row = dict(u)
             row["surface_forms"] = "/".join(u["surface_forms"])
+            row["candidate_senses"] = "/".join(u.get("candidate_senses") or [])
             writer.writerow(row)
+
+
+def assert_no_uncertain_occurrence_lost(records: list[dict], units: list[dict]) -> None:
+    """Invariant S5-3 à granularité occurrence, avant toute écriture."""
+    from collections import Counter
+    expected = Counter(record["key"] for record in records if record.get("needs_review"))
+    exported = {
+        (unit["canonical_form"], unit["pos"], unit["sense_id"]): unit
+        for unit in units if unit.get("unit_type") == "word"
+    }
+    missing = {
+        key: count for key, count in expected.items()
+        if key not in exported or not exported[key].get("needs_review")
+        or exported[key].get("occurrences", 0) < count
+    }
+    if missing:
+        raise RuntimeError(f"invariant S5-3 viole, occurrences incertaines perdues: {missing}")
 
 
 def write_report(units: list[dict], path, coverage: dict) -> None:
@@ -118,6 +138,7 @@ def run() -> int:
     units = aggregate_and_score(records)
     units.extend(build_mwe_units())
     units.sort(key=lambda u: -u["score_default"])
+    assert_no_uncertain_occurrence_lost(records, units)
 
     coverage = senses.coverage_report()
 
