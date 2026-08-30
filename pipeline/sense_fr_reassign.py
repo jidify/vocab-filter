@@ -62,7 +62,6 @@ from __future__ import annotations
 
 import csv
 from datetime import date
-from pathlib import Path
 from typing import Literal
 
 import litellm
@@ -282,61 +281,80 @@ def build_user_prompt(batch: list[tuple[dict, list[dict], list[dict]]]) -> str:
 
 
 # ============================================================
-# Cache disque — clé et préfixe INCHANGÉS depuis avant l'unification
-# (Lot U3, fix_pipeline/multi_models/report_multi_models.md §4bis) : ce
-# cache correspond à des appels OpenAI déjà payés, il ne doit pas être
-# invalidé par le passage au client LLM unique. Seule la mécanique de
-# hash/lecture/écriture déménage dans pipeline/llm_client.py.
+# Appel en LOT, stockage en UNITAIRE (pipeline/llm_store.py) — plan de
+# décorrélation lot/stockage. Voir pipeline/sense_fr_frontier.py::_translate_units,
+# même motif ; remplace l'ancien cache disque par prompt de lot entier
+# (`pipeline_out/cache/reassign_*.json`, byte-figé avant ce lot).
 # ============================================================
 
-
-def _cache_key_fields(model: str, system: str, user: str, *, mode_batch: bool, batch_size: int | None) -> dict:
-    return {"task_id": "S6-reassign", "model": model,
-            "mode_batch": mode_batch, "batch_size": batch_size or (1 if not mode_batch else 0),
-            "system": system, "user": user}
+_REASSIGN_PROTOCOL = "s6-reassign-v1"
 
 
-def _cache_path(model: str, system: str, user: str, *, mode_batch: bool = True, batch_size: int | None = None) -> Path:
-    return llm_client.cache_path_for(
-        _cache_key_fields(model, system, user, mode_batch=mode_batch, batch_size=batch_size),
-        prefix="reassign_",
-    )
+def _target_payload(entry: dict, occs: list[dict], inventory: list[dict]) -> dict:
+    """Entrée SÉMANTIQUE d'une cible — inclut l'inventaire WordNet ouvert
+    (candidats montrés au modèle) : contrairement aux candidats de
+    traduction de sense_fr_frontier (ressources externes non fiables),
+    `inventory` détermine directement ce que le modèle peut choisir, donc il
+    doit invalider la clé s'il change."""
+    return {
+        "kind": entry["kind"], "lemmas_en": sorted(entry.get("lemmas_en", [])),
+        "pos": entry.get("pos"), "definition_en": entry.get("definition_en"),
+        "occurrences": sorted(
+            ({"context": o["context"], "target_surface": o["target_surface"]} for o in occs),
+            key=lambda o: o["context"],
+        ),
+        "inventory": sorted(
+            ({"sense_id": c["sense_id"], "pos": c["pos"], "definition": c["definition"]} for c in inventory),
+            key=lambda c: c["sense_id"],
+        ),
+    }
 
 
-def _translate_batches(
-    batches: list[list[tuple[dict, list[dict], list[dict]]]], model: str,
-    *, mode_batch: bool = True, batch_size: int | None = None,
-) -> tuple[list[dict[str, ReassignedDecision]], float]:
-    items: list[llm_client.BatchItem] = []
-    for batch in batches:
-        if not mode_batch and len(batch) != 1:
-            raise ValueError(
-                f"S6-reassign: mode unitaire attend exactement 1 item par lot, reçu {len(batch)}"
-            )
-        user_prompt = build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0])
-        items.append(llm_client.BatchItem(
-            system=SYSTEM_PROMPT, user=user_prompt,
-            cache_key_fields=_cache_key_fields(model, SYSTEM_PROMPT, user_prompt,
-                                               mode_batch=mode_batch, batch_size=batch_size),
-            cache_prefix="reassign_",
-        ))
-
-    def _on_error(i, _item, exc):
-        print(f"  lot {i}: échec ({exc!r}), {len(batches[i])} entrée(s) laissée(s) de côté.")
-
-    responses, total_cost = llm_client.call_batch_completion(
-        items, model=model,
-        response_model=ReassignBatch if mode_batch else UnitReassignedDecision,
-        reasoning_effort="low", max_tokens=16000,
-        max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
-        on_error=_on_error,
-    )
-    results = [
-        ({d.key: d for d in parsed.decisions} if mode_batch else {parsed.key: parsed})
-        if parsed is not None else {}
-        for parsed in responses
+def _translate_units(
+    items: list[tuple[dict, list[dict], list[dict]]], model: str,
+    *, batch_size: int, mode_batch: bool,
+) -> tuple[dict[str, ReassignedDecision], float]:
+    """Réassigne TOUTES les cibles en attente en un seul appel — appelle en
+    LOT, stocke en UNITAIRE. Renvoie ``{key: ReassignedDecision}`` pour les
+    cibles résolues (une cible en échec est simplement absente) et le coût
+    total en USD des seuls appels réellement effectués."""
+    units = [
+        llm_client.Unit(
+            unit_id=entry["key"], payload=_target_payload(entry, occs, inventory),
+            data=(entry, occs, inventory),
+        )
+        for entry, occs, inventory in items
     ]
-    return results, total_cost
+    if not units:
+        return {}, 0.0
+
+    def render_unit(unit: llm_client.Unit) -> tuple[str, str]:
+        return SYSTEM_PROMPT, build_unit_user_prompt(unit.data)
+
+    def render_batch(chunk: list[llm_client.Unit]) -> tuple[str, str]:
+        return SYSTEM_PROMPT, build_user_prompt([unit.data for unit in chunk])
+
+    def parse_unit(parsed: UnitReassignedDecision, _unit: llm_client.Unit) -> dict:
+        return parsed.model_dump()
+
+    def parse_batch(parsed: ReassignBatch, chunk: list[llm_client.Unit]) -> dict[str, dict]:
+        by_id = {d.key: d for d in parsed.decisions}
+        return {unit.unit_id: by_id[unit.unit_id].model_dump()
+               for unit in chunk if unit.unit_id in by_id}
+
+    def on_failure(unit: llm_client.Unit, reason: object) -> None:
+        print(f"  {unit.unit_id}: échec ({reason!r}), entrée laissée de côté.")
+
+    results, cost = llm_client.run_units(
+        units, task_id="S6-reassign", model=model, protocol=_REASSIGN_PROTOCOL,
+        render_unit=render_unit, render_batch=render_batch,
+        parse_unit=parse_unit, parse_batch=parse_batch,
+        response_model_unit=UnitReassignedDecision, response_model_batch=ReassignBatch,
+        batch_size=batch_size, mode_batch=mode_batch,
+        reasoning_effort="low", max_tokens=16000, max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
+        on_failure=on_failure, return_cost=True,
+    )
+    return {k: ReassignedDecision(**v) for k, v in results.items()}, cost
 
 
 # ============================================================
@@ -540,31 +558,33 @@ def run(model: str | None = None, dry_run: bool = False) -> int:
         inventory = [] if entry["kind"] == "mwe" else open_inventory(entry["lemmas_en"][0])
         items.append((entry, occs, inventory))
 
+    # Lot de décorrélation lot/stockage : un seul appel couvrant TOUTES les
+    # cibles, quel que soit leur nombre — _translate_units (via
+    # llm_client.run_units) fait le découpage en tranches de batch_size ET
+    # le cache unitaire ; plus de boucle manuelle par lot ici.
     batch_size = effective_batch_size(task)
-    batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
     mode_batch = use_batch_prompt(task, batch_size)
-    decisions_by_batch, cost = _translate_batches(batches, model, mode_batch=mode_batch, batch_size=batch_size)
+    decisions_by_key, cost = _translate_units(items, model, batch_size=batch_size, mode_batch=mode_batch)
 
     n_promu = n_reassigne = n_bloque = n_audit = 0
     audit_rows: list[dict] = []
 
-    for batch, decisions in zip(batches, decisions_by_batch):
-        for entry, occs, inventory in batch:
-            decision = decisions.get(entry["key"])
-            if decision is None:
-                continue  # échec de lot déjà signalé par _translate_batches
-            contexte_en = sense_fr.format_occurrences_en(occs)
-            group, audit_row = apply_decision(entry, decision, inventory, contexte_en, store, model=model)
-            if group == "promu":
-                n_promu += 1
-            elif group == "reassigne":
-                n_reassigne += 1
-            elif group == "bloque":
-                n_bloque += 1
-                audit_rows.append(audit_row)
-            else:
-                n_audit += 1
-                audit_rows.append(audit_row)
+    for entry, occs, inventory in items:
+        decision = decisions_by_key.get(entry["key"])
+        if decision is None:
+            continue  # échec déjà signalé par _translate_units
+        contexte_en = sense_fr.format_occurrences_en(occs)
+        group, audit_row = apply_decision(entry, decision, inventory, contexte_en, store, model=model)
+        if group == "promu":
+            n_promu += 1
+        elif group == "reassigne":
+            n_reassigne += 1
+        elif group == "bloque":
+            n_bloque += 1
+            audit_rows.append(audit_row)
+        else:
+            n_audit += 1
+            audit_rows.append(audit_row)
 
     print(f"Coût constaté (appels non-cachés uniquement) : ${cost:.4f}")
     print(f"Ventilation : {n_promu} promue(s) en auto_joint, {n_reassigne} réassignée(s) vers une autre clé, "

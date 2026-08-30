@@ -45,17 +45,35 @@ p, wn = mj._occurrence_prompt(idiom, occ, segments_by_idx)
   unitaire répété), donc ce n'est pas un bug fonctionnel — plutôt un coût
   caché.
 
+## Mise à jour — plan de décorrélation lot/stockage
+
+Le point 2 ci-dessous coûtait auparavant un rejeu complet de S3 (le prompt
+rendu faisait partie de la clé de cache, `pipeline_out/cache/`) : retirer le
+rappel de schéma unitaire aurait changé le texte de CHAQUE prompt, donc
+invalidé tout le cache d'un coup. Ce n'est plus vrai depuis le passage à
+`llm_client.run_units()`/`pipeline/llm_store.py` : la clé du magasin unitaire
+porte sur l'entrée SÉMANTIQUE de l'occurrence (`mwe_judge._occurrence_payload`),
+jamais sur le texte du prompt rendu — retirer ce rappel ne coûterait plus
+qu'un bump de `mwe_judge.S3_PROMPT_VERSION` (le vrai levier d'invalidation
+volontaire désormais), pas un rejeu accidentel. Le point 3 est également
+tranché : vérifié, la même redondance existe bien pour
+`S3-definition-cluster` (`DEFINITION_PROMPT_TEMPLATE`) et `S5-arbitrate`
+(`ARBITRATION_TEMPLATE`) — les 4 tâches S6 (prompts unitaire/lot distincts,
+`build_unit_user_prompt`/`build_user_prompt`) n'ont pas ce défaut.
+
 ## Pas encore fait
 
 1. Mesurer l'impact réel en tokens/latence du schéma répété à
    `batch_size=50` (comparer taille de prompt avec/sans le rappel de
    schéma unitaire dans chaque bloc).
 2. Si l'impact est significatif : faire en sorte que `_occurrence_prompt`
-   n'émette le rappel de schéma unitaire que pour le chemin `judge_occurrence`
-   (unitaire), pas pour `judge_occurrences_batch` — par exemple via un
-   paramètre `include_schema_reminder: bool = True` désactivé côté lot.
-3. Vérifier si la même redondance existe pour d'autres tâches en lot du
-   registre (`S3-definition-cluster`, `S5-arbitrate`, tâches S6) avant de
-   ne corriger qu'un seul cas isolé.
+   (et les équivalents `_definition_request`/`_arbitration_prompt`)
+   n'émettent le rappel de schéma unitaire que pour le chemin unitaire, pas
+   pour le chemin lot — par exemple via un paramètre
+   `include_schema_reminder: bool = True` désactivé côté lot. Bumper la
+   constante de version de la tâche concernée en même temps (voir
+   ci-dessus).
+3. ~~Vérifier si la même redondance existe pour d'autres tâches en lot~~ —
+   fait, voir ci-dessus.
 4. Décider si ça vaut la peine face au reste du plan `fix_pipeline` — pas
    un gate qualité nommé, juste un potentiel gain de coût/fiabilité.

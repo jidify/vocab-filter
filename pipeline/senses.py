@@ -723,27 +723,96 @@ def _arbitration_prompt(word, pos, context_text, synsets) -> str:
     )
 
 
+def _arbitration_payload(word: str, pos: str, context_text: str, synsets: list) -> dict:
+    """Entrée SÉMANTIQUE d'un arbitrage — payload du magasin LLM unitaire
+    (pipeline/llm_store.py), jamais le texte du prompt rendu."""
+    return {
+        "word": word, "pos": pos, "context": context_text,
+        "candidates": sorted(s.name() for s in synsets),
+    }
+
+
+_ARBITRATION_PROTOCOL = "s5-arbitrate-v1"
+
+
+def _arbitrate_units(
+    units: list["llm_client.Unit"], *, model: str, batch_size: int, mode_batch: bool,
+) -> dict[str, dict]:
+    """Cœur commun de `arbitrate`/`arbitrate_batch` — appelle en LOT, stocke
+    en UNITAIRE (pipeline/llm_store.py), même motif que S3-judge-occurrence
+    (voir pipeline/mwe_judge.py::_judge_occurrence_units). Renvoie TOUJOURS
+    une entrée par unité demandée."""
+    if not units:
+        return {}
+    task = task_config("S5-arbitrate")
+
+    def render_unit(unit: "llm_client.Unit") -> tuple[str, str]:
+        return ARBITRATION_SYSTEM, unit.data
+
+    def render_batch(chunk: list["llm_client.Unit"]) -> tuple[str, str]:
+        items = "\n\n".join(
+            f"{index}. request_id={unit.unit_id!r}\n{unit.data}"
+            for index, unit in enumerate(chunk, start=1)
+        )
+        return ARBITRATION_BATCH_SYSTEM, ARBITRATION_BATCH_TEMPLATE.format(count=len(chunk), items=items)
+
+    def parse_unit(result: object, _unit: "llm_client.Unit") -> dict:
+        if not isinstance(result, dict):
+            return {"selected_sense": None, "confidence": 0.0, "error": f"réponse LLM invalide: {result!r}"}
+        return result
+
+    def parse_batch(raw: object, chunk: list["llm_client.Unit"]) -> dict[str, dict]:
+        by_id = llm_client.dedupe_batch_items(
+            raw.get("decisions", []) if isinstance(raw, dict) else [], id_key="request_id",
+        )
+        return {
+            unit.unit_id: {k: v for k, v in by_id[unit.unit_id].items() if k != "request_id"}
+            for unit in chunk if unit.unit_id in by_id
+        }
+
+    failures: dict[str, dict] = {}
+
+    def on_failure(unit: "llm_client.Unit", reason: object) -> None:
+        if isinstance(reason, Exception):
+            failures[unit.unit_id] = {"selected_sense": None, "confidence": 0.0, "error": str(reason)}
+        else:
+            failures[unit.unit_id] = {
+                "selected_sense": None, "confidence": 0.0,
+                "error": f"réponse LLM invalide: request_id manquant ou dupliqué: {unit.unit_id}",
+            }
+
+    results = llm_client.run_units(
+        units, task_id=task.task_id, model=model, protocol=_ARBITRATION_PROTOCOL,
+        render_unit=render_unit, render_batch=render_batch,
+        parse_unit=parse_unit, parse_batch=parse_batch,
+        response_model_unit=None, response_model_batch=None,
+        batch_size=batch_size, mode_batch=mode_batch, timeout=120,
+        on_failure=on_failure,
+    )
+    results.update(failures)
+    return results
+
+
 def arbitrate(word, pos, context_text, synsets, *, model: str | None = None):
-    """Chemin unitaire explicite de S5-arbitrate."""
+    """Chemin unitaire explicite de S5-arbitrate. Pas d'identifiant externe
+    disponible ici (`analyze_occurrence` n'en porte pas) — unit_id dérivé du
+    contenu lui-même, pour la lisibilité du magasin LLM unitaire seulement ;
+    l'unicité réelle de la ligne vient de ``payload_sig``, pas de cet id."""
     task = task_config("S5-arbitrate")
     resolved_model = model or task.model
-    prompt = _arbitration_prompt(word, pos, context_text, synsets)
-    try:
-        result = llm_client.call(
-            model=resolved_model, system=ARBITRATION_SYSTEM, prompt=prompt, timeout=120,
-            cache_key_fields=llm_client.build_cache_key(
-                model=resolved_model, system=ARBITRATION_SYSTEM, prompt=prompt,
-                extra={"task_id": task.task_id, "mode_batch": False, "batch_size": 1},
-            ),
-        )
-    except llm_client.LLMError as exc:
-        return {"selected_sense": None, "confidence": 0.0, "error": str(exc)}
-    return result
+    unit_id = f"{word}:{pos}:{hashlib.sha256(context_text.encode('utf-8')).hexdigest()[:12]}"
+    unit = llm_client.Unit(
+        unit_id=unit_id, payload=_arbitration_payload(word, pos, context_text, synsets),
+        data=_arbitration_prompt(word, pos, context_text, synsets),
+    )
+    results = _arbitrate_units([unit], model=resolved_model, batch_size=1, mode_batch=False)
+    return results[unit.unit_id]
 
 
 def arbitrate_batch(requests: list[tuple[str, str, str, str, list]],
                     *, model: str | None = None) -> dict[str, dict]:
-    """Chemin lot de S5-arbitrate : un prompt, une décision par ``request_id``.
+    """Chemin lot de S5-arbitrate : UN prompt de lot couvrant exactement
+    ``requests``, une décision par ``request_id``.
 
     Chaque élément de ``requests`` est ``(request_id, word, pos, context_text, synsets)``."""
     task = task_config("S5-arbitrate")
@@ -753,45 +822,15 @@ def arbitrate_batch(requests: list[tuple[str, str, str, str, list]],
         raise ValueError(
             f"lot S5 arbitrage de {len(requests)} cas > batch_size={effective_batch_size(task)}"
         )
-    items = "\n\n".join(
-        f"{index}. request_id={request_id!r}\n{_arbitration_prompt(word, pos, context_text, synsets)}"
-        for index, (request_id, word, pos, context_text, synsets) in enumerate(requests, start=1)
-    )
-    prompt = ARBITRATION_BATCH_TEMPLATE.format(count=len(requests), items=items)
     resolved_model = model or task.model
-    try:
-        raw = llm_client.call(
-            model=resolved_model, system=ARBITRATION_BATCH_SYSTEM, prompt=prompt, timeout=120,
-            cache_key_fields=llm_client.build_cache_key(
-                model=resolved_model, system=ARBITRATION_BATCH_SYSTEM, prompt=prompt,
-                extra={"task_id": task.task_id, "mode_batch": True, "batch_size": effective_batch_size(task)},
-            ),
+    units = [
+        llm_client.Unit(
+            unit_id=request_id, payload=_arbitration_payload(word, pos, context_text, synsets),
+            data=_arbitration_prompt(word, pos, context_text, synsets),
         )
-    except llm_client.LLMError as exc:
-        return {request_id: {"selected_sense": None, "confidence": 0.0, "error": str(exc)}
-                for request_id, *_ in requests}
-
-    expected = {request_id for request_id, *_ in requests}
-    received: dict[str, dict] = {}
-    duplicates: set[str] = set()
-    for decision in raw.get("decisions", []) if isinstance(raw, dict) else []:
-        request_id = decision.get("request_id") if isinstance(decision, dict) else None
-        if request_id in received:
-            duplicates.add(request_id)
-        elif request_id in expected:
-            received[request_id] = decision
-
-    decisions: dict[str, dict] = {}
-    for request_id, *_ in requests:
-        if request_id not in received or request_id in duplicates:
-            decisions[request_id] = {
-                "selected_sense": None, "confidence": 0.0,
-                "error": f"réponse LLM invalide: request_id manquant ou dupliqué: {request_id}",
-            }
-        else:
-            decisions[request_id] = {k: v for k, v in received[request_id].items()
-                                     if k != "request_id"}
-    return decisions
+        for request_id, word, pos, context_text, synsets in requests
+    ]
+    return _arbitrate_units(units, model=resolved_model, batch_size=len(units), mode_batch=True)
 
 
 def _normalized_entropy(results: list[dict]) -> float:

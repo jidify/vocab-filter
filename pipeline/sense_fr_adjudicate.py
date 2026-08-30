@@ -62,7 +62,6 @@ Usage :
 from __future__ import annotations
 
 import csv
-import random
 from datetime import date
 from typing import Literal
 
@@ -409,23 +408,50 @@ JUDGE_SYSTEM = (
 )
 
 
-def _format_judge_item(
+def _judge_item_data(
     entry: dict, audits: dict[str, dict], occurrences_by_sense: dict[str, list[dict]],
-    rng: random.Random,
-) -> str:
-    """Une ligne de dossier — le MÊME format pour le chemin unitaire et le
-    chemin lot (voir la docstring de _judge_batch) : phrases réelles du
-    livre courant, POS, lemmes, et candidats mélangés (rng.shuffle) pour ne
-    jamais indiquer leur origine au juge, seul composant du dispositif
-    autorisé à réécrire fr/fr_alt."""
+) -> tuple[list[str], list[dict]]:
+    """Candidats (non mélangés — voir `_format_judge_item`) et occurrences
+    choisies pour une cible — factorisé pour que `_format_judge_item` (rendu
+    du prompt) et `_judge_payload` (entrée sémantique du magasin LLM
+    unitaire, pipeline/llm_store.py) restent construits à partir des MÊMES
+    données, jamais dupliquées séparément."""
     audit = audits.get(entry["key"], {})
     candidates = list({
         entry.get("fr"), *(entry.get("fr_alt") or []),
         *((audit.get("dbnary_fr") or "").split("; ") if audit.get("dbnary_fr") else []),
     } - {None, ""})
-    rng.shuffle(candidates)
     occs_all = occurrences_by_sense.get(entry["key"]) or []
     occs = senses.pick_diverse_occurrences(occs_all, config.SENSE_FR_FRONTIER_MAX_OCCURRENCES) if occs_all else []
+    return candidates, occs
+
+
+def _judge_payload(entry: dict, audits: dict[str, dict], occurrences_by_sense: dict[str, list[dict]]) -> dict:
+    candidates, occs = _judge_item_data(entry, audits, occurrences_by_sense)
+    return {
+        "pos": entry.get("pos") or "mwe", "lemmas_en": sorted(entry.get("lemmas_en", [])),
+        "definition_en": entry.get("definition_en"),
+        "occurrences": sorted(
+            ({"context": o["context"], "target_surface": o["target_surface"]} for o in occs),
+            key=lambda o: o["context"],
+        ),
+        "candidates": sorted(candidates),
+    }
+
+
+def _format_judge_item(
+    entry: dict, audits: dict[str, dict], occurrences_by_sense: dict[str, list[dict]],
+) -> str:
+    """Une ligne de dossier — le MÊME format pour le chemin unitaire et le
+    chemin lot (voir la docstring de _judge_units) : phrases réelles du
+    livre courant, POS, lemmes, et candidats mélangés pour ne jamais indiquer
+    leur origine au juge, seul composant du dispositif autorisé à réécrire
+    fr/fr_alt. Ordre déterministe dérivé de `entry["key"]`
+    (llm_client.presentation_order) — pas d'un `random.Random(42)` partagé
+    sur tout le lot, dont l'ordre pour UNE entrée dépendrait alors de sa
+    position dans le lot courant."""
+    candidates, occs = _judge_item_data(entry, audits, occurrences_by_sense)
+    candidates = llm_client.presentation_order(candidates, entry["key"])
     sentences = " || ".join(
         f'"{o["context"]}" (mot cible : {o["target_surface"]})' for o in occs
     )
@@ -438,15 +464,13 @@ def _format_judge_item(
 
 def build_judge_batch_prompt(
     entries: list[dict], audits: dict[str, dict], occurrences_by_sense: dict[str, list[dict]],
-    rng: random.Random,
 ) -> str:
-    lines = [_format_judge_item(e, audits, occurrences_by_sense, rng) for e in entries]
+    lines = [_format_judge_item(e, audits, occurrences_by_sense) for e in entries]
     return f"Sens à trancher ({len(entries)}) :\n" + "\n".join(lines) + "\nRéponds avec exactement une décision par clé dans verdicts[]."
 
 
 def build_judge_unit_prompt(
     entries: list[dict], audits: dict[str, dict], occurrences_by_sense: dict[str, list[dict]],
-    rng: random.Random,
 ) -> str:
     """Un vrai N=1 : MÊME dossier (phrases, POS, lemmes, candidats
     mélangés) qu'un item du chemin lot — voir _format_judge_item. Avant le
@@ -455,7 +479,7 @@ def build_judge_unit_prompt(
     en configuration `batch=false`."""
     if len(entries) != 1:
         raise ValueError(f"build_judge_unit_prompt attend exactement 1 entrée, reçu {len(entries)}")
-    line = _format_judge_item(entries[0], audits, occurrences_by_sense, rng)
+    line = _format_judge_item(entries[0], audits, occurrences_by_sense)
     return "Sens à trancher (1) :\n" + line + "\nRéponds avec un objet JSON unique (verdict), pas une liste verdicts[]."
 
 
@@ -480,30 +504,55 @@ def build_backtranslate_batch_prompt(entries: list[dict]) -> str:
     return "Entrées (" + str(len(entries)) + ") :\n" + "\n".join(lines) + "\nRéponds avec exactement une décision par clé dans guesses[]."
 
 
-def _backtranslate_batch(entries: list[dict], model: str, *, mode_batch: bool = True, batch_size: int = 40) -> dict[str, str]:
-    """Un appel par lot ; réutilise pipeline.sense_fr.backtranslation_matches
-    pour la comparaison (voisinage WordNet, pas de chaînes) — voir sa
-    docstring. Renvoie {key: traduction_anglaise_devinee}.
+_BACKTRANSLATE_PROTOCOL = "s6-backtranslate-v1"
 
-    Cache disque : clé et préfixe ``backtranslate_`` INCHANGÉS depuis avant
-    l'unification (Lot U3, report_multi_models.md §4bis) — ce cache
-    correspond à des appels OpenAI déjà payés."""
-    if not mode_batch and len(entries) != 1:
-        raise ValueError(
-            f"S6-backtranslate: mode unitaire attend exactement 1 entrée, reçu {len(entries)}"
-        )
 
-    system = BACKTRANSLATE_SYSTEM
-    user = build_backtranslate_batch_prompt(entries) if mode_batch else build_backtranslate_unit_prompt(entries)
-    response_model = _BatchGuesses if mode_batch else _Guess
-    parsed = llm_client.call(
-        model=model, system=system, prompt=user, response_model=response_model,
-        cache_key_fields={"task_id": "S6-backtranslate", "model": model, "mode_batch": mode_batch,
-                          "batch_size": batch_size if mode_batch else 1, "system": system, "user": user},
-        cache_prefix="backtranslate_",
+def _backtranslate_payload(entry: dict) -> dict:
+    return {"fr": entry.get("fr"), "definition_en": entry.get("definition_en")}
+
+
+def _backtranslate_units(
+    entries: list[dict], model: str, *, batch_size: int, mode_batch: bool,
+) -> dict[str, str]:
+    """Rétro-traduit TOUTES les entrées en attente en un seul appel — appelle
+    en LOT (`batch_size`), stocke en UNITAIRE (pipeline/llm_store.py, plan de
+    décorrélation lot/stockage). Réutilise pipeline.sense_fr.backtranslation_matches
+    pour la comparaison (voisinage WordNet, pas de chaînes, voir `run_stage_b`).
+    Renvoie {key: traduction_anglaise_devinée} pour les entrées résolues."""
+    units = [
+        llm_client.Unit(unit_id=e["key"], payload=_backtranslate_payload(e), data=e)
+        for e in entries
+    ]
+    if not units:
+        return {}
+
+    def render_unit(unit: llm_client.Unit) -> tuple[str, str]:
+        return BACKTRANSLATE_SYSTEM, build_backtranslate_unit_prompt([unit.data])
+
+    def render_batch(chunk: list[llm_client.Unit]) -> tuple[str, str]:
+        return BACKTRANSLATE_SYSTEM, build_backtranslate_batch_prompt([unit.data for unit in chunk])
+
+    def parse_unit(parsed: _Guess, _unit: llm_client.Unit) -> dict:
+        return {"en": parsed.en}
+
+    def parse_batch(parsed: _BatchGuesses, chunk: list[llm_client.Unit]) -> dict[str, dict]:
+        by_id = {g.key: g.en for g in parsed.guesses}
+        return {unit.unit_id: {"en": by_id[unit.unit_id]} for unit in chunk if unit.unit_id in by_id}
+
+    def on_failure(unit: llm_client.Unit, reason: object) -> None:
+        print(f"  {unit.unit_id}: échec ({reason!r}), entrée laissée de côté.")
+
+    results = llm_client.run_units(
+        units, task_id="S6-backtranslate", model=model, protocol=_BACKTRANSLATE_PROTOCOL,
+        render_unit=render_unit, render_batch=render_batch,
+        parse_unit=parse_unit, parse_batch=parse_batch,
+        response_model_unit=_Guess, response_model_batch=_BatchGuesses,
+        batch_size=batch_size, mode_batch=mode_batch,
         reasoning_effort="low", max_tokens=8000,
+        max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
+        on_failure=on_failure,
     )
-    return ({g.key: g.en for g in parsed.guesses} if mode_batch else {parsed.key: parsed.en})
+    return {k: v["en"] for k, v in results.items()}
 
 
 def run_stage_b(store: dict, targets: list[dict], model: str | None = None, batch_size: int | None = None) -> dict[str, dict]:
@@ -515,19 +564,15 @@ def run_stage_b(store: dict, targets: list[dict], model: str | None = None, batc
     if batch_size is None:
         batch_size = effective_batch_size(task)
     mode_batch = use_batch_prompt(task, batch_size)
-    if not mode_batch:
-        batch_size = 1
+    guesses = _backtranslate_units(targets, model, batch_size=batch_size, mode_batch=mode_batch)
     results: dict[str, dict] = {}
-    batches = [targets[i:i + batch_size] for i in range(0, len(targets), batch_size)]
-    for batch in batches:
-        guesses = _backtranslate_batch(batch, model, mode_batch=mode_batch, batch_size=batch_size)
-        for entry in batch:
-            en_guess = guesses.get(entry["key"])
-            if not en_guess:
-                continue
-            synset = _resolve_synset(entry)
-            ok = sense_fr.backtranslation_matches(en_guess, entry.get("lemmas_en", []), synset)
-            results[entry["key"]] = {"en": en_guess, "ok": ok}
+    for entry in targets:
+        en_guess = guesses.get(entry["key"])
+        if not en_guess:
+            continue
+        synset = _resolve_synset(entry)
+        ok = sense_fr.backtranslation_matches(en_guess, entry.get("lemmas_en", []), synset)
+        results[entry["key"]] = {"en": en_guess, "ok": ok}
     return results
 
 
@@ -536,47 +581,62 @@ def run_stage_b(store: dict, targets: list[dict], model: str | None = None, batc
 # ============================================================
 
 
-def _judge_batch(
-    store: dict, targets: list[dict], audits: dict[str, dict], model: str,
-    occurrences_by_sense: dict[str, list[dict]], *, mode_batch: bool = True, batch_size: int = 20,
+_JUDGE_PROTOCOL = "s6-judge-dossier-v1"
+
+
+def _judge_units(
+    targets: list[dict], audits: dict[str, dict], occurrences_by_sense: dict[str, list[dict]],
+    model: str, *, batch_size: int, mode_batch: bool,
 ) -> dict[str, dict]:
-    """Juge sur dossier, candidats MÉLANGÉS et NON ÉTIQUETÉS (pas de "le
-    modèle a dit", pas de "omw a dit") — seul composant du dispositif
-    autorisé à RÉÉCRIRE fr/fr_alt. Nécessite une clé API LiteLLM.
+    """Juge TOUTES les cibles en attente sur dossier en un seul appel —
+    appelle en LOT (`batch_size`), stocke en UNITAIRE (pipeline/llm_store.py,
+    plan de décorrélation lot/stockage). Candidats MÉLANGÉS et NON ÉTIQUETÉS
+    (pas de "le modèle a dit", pas de "omw a dit") — seul composant du
+    dispositif autorisé à RÉÉCRIRE fr/fr_alt. Nécessite une clé API LiteLLM.
 
     Reçoit aussi les phrases réelles du LIVRE COURANT
     (`occurrences_by_sense`, senses.load_occurrences_by_sense() — jamais
     lues depuis le magasin, voir sense_fr.format_occurrences_en) : sans
     elles, le juge travaillerait à l'aveugle sur des candidats français
     hors sol alors qu'il est le dernier recours pour un sens encore en
-    désaccord.
-
-    Cache disque : clé et préfixe ``judge_`` INCHANGÉS depuis avant
-    l'unification (Lot U3, report_multi_models.md §4bis) — ce cache
-    correspond à des appels OpenAI déjà payés."""
-    if not mode_batch and len(targets) != 1:
-        raise ValueError(
-            f"S6-judge-dossier: mode unitaire attend exactement 1 cible, reçu {len(targets)}"
+    désaccord."""
+    units = [
+        llm_client.Unit(
+            unit_id=entry["key"], payload=_judge_payload(entry, audits, occurrences_by_sense), data=entry,
         )
+        for entry in targets
+    ]
+    if not units:
+        return {}
 
-    rng = random.Random(42)  # ordre de présentation déterministe, pas d'indice de source
-    if mode_batch:
-        user = build_judge_batch_prompt(targets, audits, occurrences_by_sense, rng)
-        system = JUDGE_SYSTEM
-    else:
-        user = build_judge_unit_prompt(targets, audits, occurrences_by_sense, rng)
-        system = JUDGE_SYSTEM + " Réponds par un objet verdict unique, sans enveloppe verdicts[]."
+    def render_unit(unit: llm_client.Unit) -> tuple[str, str]:
+        user = build_judge_unit_prompt([unit.data], audits, occurrences_by_sense)
+        return JUDGE_SYSTEM + " Réponds par un objet verdict unique, sans enveloppe verdicts[].", user
 
-    response_model = _BatchVerdicts if mode_batch else _Verdict
-    parsed = llm_client.call(
-        model=model, system=system, prompt=user, response_model=response_model,
-        cache_key_fields={"task_id": "S6-judge-dossier", "model": model, "mode_batch": mode_batch,
-                          "batch_size": batch_size if mode_batch else 1, "system": system, "user": user},
-        cache_prefix="judge_",
+    def render_batch(chunk: list[llm_client.Unit]) -> tuple[str, str]:
+        entries = [unit.data for unit in chunk]
+        return JUDGE_SYSTEM, build_judge_batch_prompt(entries, audits, occurrences_by_sense)
+
+    def parse_unit(parsed: _Verdict, _unit: llm_client.Unit) -> dict:
+        return parsed.model_dump()
+
+    def parse_batch(parsed: _BatchVerdicts, chunk: list[llm_client.Unit]) -> dict[str, dict]:
+        by_id = {v.key: v for v in parsed.verdicts}
+        return {unit.unit_id: by_id[unit.unit_id].model_dump() for unit in chunk if unit.unit_id in by_id}
+
+    def on_failure(unit: llm_client.Unit, reason: object) -> None:
+        print(f"  {unit.unit_id}: échec ({reason!r}), cible laissée de côté.")
+
+    return llm_client.run_units(
+        units, task_id="S6-judge-dossier", model=model, protocol=_JUDGE_PROTOCOL,
+        render_unit=render_unit, render_batch=render_batch,
+        parse_unit=parse_unit, parse_batch=parse_batch,
+        response_model_unit=_Verdict, response_model_batch=_BatchVerdicts,
+        batch_size=batch_size, mode_batch=mode_batch,
         reasoning_effort="medium", max_tokens=16000,
+        max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
+        on_failure=on_failure,
     )
-    return ({v.key: v.model_dump() for v in parsed.verdicts} if mode_batch
-            else {parsed.key: parsed.model_dump()})
 
 
 def run_stage_c(
@@ -588,14 +648,8 @@ def run_stage_c(
     if batch_size is None:
         batch_size = effective_batch_size(task)
     mode_batch = use_batch_prompt(task, batch_size)
-    if not mode_batch:
-        batch_size = 1
-    output: dict[str, dict] = {}
-    for i in range(0, len(targets), batch_size):
-        batch = targets[i:i + batch_size]
-        output.update(_judge_batch(store, batch, audits, model, occurrences_by_sense,
-                                   mode_batch=mode_batch, batch_size=batch_size))
-    return output
+    return _judge_units(targets, audits, occurrences_by_sense, model,
+                        batch_size=batch_size, mode_batch=mode_batch)
 
 
 # ============================================================

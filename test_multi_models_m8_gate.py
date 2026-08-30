@@ -42,18 +42,17 @@ class LiteLlmProviderMatrixTests(unittest.TestCase):
     suite ; il manquait ollama, alors que pipeline.llm_tasks.ALLOWED_PROVIDERS
     l'autorise pour ces 4 tâches au même titre que pour les 5 autres.
 
-    Ces 4 chemins écrivent un cache disque réel (frontier/reassign via
-    _cache_path ; adjudicate inline) sous config.CACHE_DIR — voir la même
-    précaution dans test_multi_models_m2_s6.py::test_frontier_translate_batches_
-    batch_size_one_sends_unit_prompt. Répertoire temporaire dédié par test pour
-    ne jamais polluer pipeline_out/cache/ ni dépendre d'un run précédent qui
-    aurait déjà écrit ce cache (ce qui court-circuiterait silencieusement le
-    mock au run suivant, comme observé lors de l'écriture de ce lot)."""
+    Ces 4 chemins stockent désormais en unitaire via pipeline/llm_store.py
+    (plan de décorrélation lot/stockage — llm_client.run_units), pas un cache
+    disque par prompt de lot entier. Base isolée par test pour ne jamais
+    polluer data/llm_results.sqlite3 ni dépendre d'un run précédent."""
 
     def setUp(self):
-        self._tmp_cache = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp_cache.cleanup)
-        patcher = patch.object(config, "CACHE_DIR", Path(self._tmp_cache.name))
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch.object(
+            config, "LLM_RESULTS_DB_PATH", Path(self._tmp.name) / "llm_results.sqlite3",
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -61,33 +60,34 @@ class LiteLlmProviderMatrixTests(unittest.TestCase):
         item = (_target(), [], [])
         payload = {"sense_id": "x", "fr": ["battre"], "translation_type": "equivalence_directe",
                    "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high"}
-        with patch.object(frontier.litellm, "batch_completion",
+        with patch.object(frontier.llm_client.litellm, "batch_completion",
                           side_effect=lambda **kw: [Response(payload)]) as mocked:
-            got, _ = frontier._translate_batches(
-                [[item]], "ollama/mistral-small:24b", mode_batch=False, batch_size=1,
+            got, _ = frontier._translate_units(
+                [item], "ollama/mistral-small:24b", mode_batch=False, batch_size=1,
             )
         self.assertEqual(mocked.call_args.kwargs["model"], "ollama/mistral-small:24b")
-        self.assertEqual(got[0]["x"].fr, ["battre"])
+        self.assertEqual(got["x"].fr, ["battre"])
 
     def test_reassign_batch_completion_accepts_ollama_model(self):
         item = (_target(), [], [])
         decision = {"key": "x", "pos": "n", "sense_id": "x.n.01", "fr": ["mot"],
                     "translation_type": "equivalence_directe", "sense_fit": "ok",
                     "sense_fit_note": "", "confidence": "high", "reason": "ok"}
-        with patch.object(reassign.litellm, "batch_completion",
+        with patch.object(reassign.llm_client.litellm, "batch_completion",
                           side_effect=lambda **kw: [Response(decision)]) as mocked:
-            got, _ = reassign._translate_batches(
-                [[item]], "ollama/mistral-small:24b", mode_batch=False, batch_size=1,
+            got, _ = reassign._translate_units(
+                [item], "ollama/mistral-small:24b", mode_batch=False, batch_size=1,
             )
         self.assertEqual(mocked.call_args.kwargs["model"], "ollama/mistral-small:24b")
-        self.assertEqual(got[0]["x"].sense_id, "x.n.01")
+        self.assertEqual(got["x"].sense_id, "x.n.01")
 
     def test_adjudication_backtranslate_completion_accepts_ollama_model(self):
         one = {"key": "x", "en": "thing"}
-        with patch.object(litellm, "completion", return_value=Response(one)) as mocked:
-            got = adjudicate._backtranslate_batch(
+        with patch.object(adjudicate.llm_client.litellm, "batch_completion",
+                          side_effect=lambda **kw: [Response(one)]) as mocked:
+            got = adjudicate._backtranslate_units(
                 [{"key": "x", "fr": "mot", "definition_en": "thing"}],
-                "ollama/mistral-small:24b", mode_batch=False,
+                "ollama/mistral-small:24b", mode_batch=False, batch_size=1,
             )
         self.assertEqual(mocked.call_args.kwargs["model"], "ollama/mistral-small:24b")
         self.assertEqual(got, {"x": "thing"})
@@ -95,10 +95,11 @@ class LiteLlmProviderMatrixTests(unittest.TestCase):
     def test_adjudication_judge_completion_accepts_ollama_model(self):
         verdict = {"key": "x", "fr": "mot", "fr_alt": [], "confidence": "high",
                    "reason": "ok", "no_equivalent": False}
-        with patch.object(litellm, "completion", return_value=Response({"verdicts": [verdict]})) as mocked:
-            got = adjudicate._judge_batch(
-                {}, [{"key": "x", "fr": "mot", "definition_en": "thing"}], {},
-                "ollama/mistral-small:24b", {}, mode_batch=True,
+        with patch.object(adjudicate.llm_client.litellm, "batch_completion",
+                          side_effect=lambda **kw: [Response({"verdicts": [verdict]})]) as mocked:
+            got = adjudicate._judge_units(
+                [{"key": "x", "fr": "mot", "definition_en": "thing"}], {}, {},
+                "ollama/mistral-small:24b", batch_size=20, mode_batch=True,
             )
         self.assertEqual(mocked.call_args.kwargs["model"], "ollama/mistral-small:24b")
         self.assertEqual(got["x"]["fr"], "mot")

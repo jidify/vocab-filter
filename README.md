@@ -144,17 +144,39 @@ faisait l'ancien client) — un gate de parité sur 50 cas S3 réels a mesuré 1
 non-bloquant ; à surveiller si un désaccord modèle/gold apparaît après un
 changement de tâche vers `ollama/*`.
 
-### Invalidation du cache disque au changement de modèle/mode
+### Cache LLM : appel en lot, stockage unitaire
 
-La clé de cache de chaque appel LLM (`pipeline/llm_client.py::cache_path_for`,
-appelée avec la même structure de clé qu'avant l'unification pour les 4
-tâches S6 — préservée octet pour octet, voir §4bis) inclut `task_id`,
-`model`, `mode_batch` et la taille de lot effective, en plus du prompt exact.
-**Changer le modèle, le backend ou le mode (unitaire ↔ lot) d'une tâche
-invalide donc son cache disque existant** (`pipeline_out/cache/`) : le run
-suivant repaie les appels LLM déjà cachés pour cette tâche, même si le modèle
-choisi in fine est identique à l'ancien mais que la clé de cache, elle, a
-changé de forme. C'est un effet de bord attendu (comportement voulu par
-`fix_pipeline/multi_models/plan_multi_models.md` §4.3), pas une régression —
-mais il a un coût réel (temps + coût API) au run suivant et doit être anticipé
-avant de relancer un run de production après un changement de config.
+Les 7 tâches en lot du registre (S3-judge-occurrence, S3-definition-cluster,
+S5-arbitrate, S6-translate-frontier, S6-backtranslate, S6-judge-dossier,
+S6-reassign) passent par `llm_client.run_units()` (plan « décorréler l'appel
+en lot du stockage unitaire ») : l'appel réseau se fait en LOT (vitesse,
+`batch_size` réglable librement), mais chaque décision est stockée
+UNITAIREMENT dans `data/llm_results.sqlite3` (voir `pipeline/llm_store.py`),
+indexée par `task_id`, `model`, `protocol` et un identifiant métier
+(occurrence_id, sense_id, cluster_id, key, request_id selon la tâche) — la
+clé ne porte ni `batch_size` ni `mode_batch`, et jamais le texte du prompt
+rendu.
+
+**Conséquence directe : changer la taille de lot, ou repasser du lot à
+l'unitaire, ne repaie plus rien** pour les unités déjà décidées par ce
+modèle sous ce protocole — contrairement à l'ancien cache disque par prompt
+de lot entier (`pipeline_out/cache/`), où la clé incluait `mode_batch` et la
+taille de lot effective en plus du texte exact du prompt : un lot de 50
+recomposé en lots de 30 ne retombait jamais sur une entrée déjà vue, même si
+chaque occurrence individuelle avait déjà été jugée.
+
+**Ce qui invalide encore, volontairement** : changer de `model` (clé), ou
+changer le protocole d'une tâche (les constantes de version — p.ex.
+`mwe_judge.S3_PROMPT_VERSION`/`S3_DECISION_SCHEMA_VERSION`, ou les suffixes
+`*_PROTOCOL` de `sense_fr_frontier.py`/`sense_fr_reassign.py`/
+`sense_fr_adjudicate.py`/`senses.py` — à bumper explicitement quand le
+prompt ou le schéma de réponse change). C'est le seul levier d'invalidation
+volontaire désormais.
+
+`pipeline_out/cache/` (l'ancien cache disque) n'est plus alimenté par
+aucune de ces 7 tâches ; `S3-judge-type` (registre seul, sans appelant en
+production) et les 2 tâches locales `S6-*-local` restent sur `llm_client.call()`
+et son cache disque classique, hors périmètre de ce plan. Pour reprendre un
+ancien cache disque `pipeline_out/cache/` (S3 uniquement) vers le magasin
+unitaire, voir `tools/migrate_llm_cache.py` (`uv run python -m
+tools.migrate_llm_cache --model <provider/nom> --dry-run`).

@@ -170,14 +170,14 @@ class SensesTrancheMergeTests(unittest.TestCase):
 
 class SenseFrFrontierProtectedFilterTests(unittest.TestCase):
     """Lot 6 (Partie 3, point 31) : une cible déjà `validated`/`auto_joint`
-    ne doit jamais atteindre `_translate_batches` — donc jamais générer
+    ne doit jamais atteindre `_translate_units` — donc jamais générer
     d'appel LLM réel, ni même être mise en lot. Vérifié sur le VRAI
     `sense_fr_frontier.run()`, avec seulement `collect_frontier_targets` /
     `sense_fr.load_store` / `senses.load_occurrences_by_sense` /
-    `_translate_batches` doublés : aucun réseau, aucun coût, aucune écriture
+    `_translate_units` doublés : aucun réseau, aucun coût, aucune écriture
     disque (`dry_run=True`)."""
 
-    def test_protected_target_never_reaches_translate_batches(self):
+    def test_protected_target_never_reaches_translate_units(self):
         protected_target = {
             "key": "mwe:validated one:idiome", "kind": "mwe",
             "lemmas_en": ["validated one"], "occurrences": 3,
@@ -190,23 +190,23 @@ class SenseFrFrontierProtectedFilterTests(unittest.TestCase):
         }
         store = {"mwe:validated one:idiome": {"status": "validated", "fr": "déjà", "fr_alt": []}}
 
-        seen_batches: list[list] = []
+        seen_items: list = []
 
-        def fake_translate_batches(batches, model, *, mode_batch=True, batch_size=None):
-            seen_batches.extend(batches)
-            return [{} for _ in batches], 0.0
+        def fake_translate_units(items, model, *, batch_size, mode_batch):
+            seen_items.extend(items)
+            return {}, 0.0
 
         with mock.patch.object(
                 sense_fr_frontier, "collect_frontier_targets",
                 return_value=([protected_target, pending_target], [])), \
              mock.patch.object(sense_fr_frontier.sense_fr, "load_store", return_value=store), \
              mock.patch.object(senses, "load_occurrences_by_sense", return_value={}), \
-             mock.patch.object(sense_fr_frontier, "_translate_batches",
-                                side_effect=fake_translate_batches), \
+             mock.patch.object(sense_fr_frontier, "_translate_units",
+                                side_effect=fake_translate_units), \
              mock.patch.object(inventory, "verify_consumer", lambda *a, **k: "digest"):
             sense_fr_frontier.run(dry_run=True)
 
-        seen_keys = {t["key"] for batch in seen_batches for t, _occs, _cands in batch}
+        seen_keys = {t["key"] for t, _occs, _cands in seen_items}
         self.assertNotIn("mwe:validated one:idiome", seen_keys)
         self.assertIn("mwe:pending one:idiome", seen_keys)
 

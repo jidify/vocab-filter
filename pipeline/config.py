@@ -240,6 +240,15 @@ CUSTOM_LEXICON_PATH = DATA_DIR / "custom_lexicon.jsonl"
 MWE_TYPE_STORE_PATH = DATA_DIR / "mwe_type_decisions.jsonl"       # clé = idiome
 MWE_OCCURRENCE_STORE_PATH = DATA_DIR / "mwe_occurrence_decisions.jsonl"  # clé = occurrence_id
 
+# Magasin de RÉSULTATS D'APPEL LLM, unitaire — sous les magasins métier
+# ci-dessus, jamais mélangé avec eux (une décision métier reste en JSONL,
+# éditable à la main ; ceci ne contient que des réponses LLM brutes,
+# indexées par unité). Voir pipeline/llm_store.py. Permanent, versionné
+# comme le reste de data/, mais ignoré par git (.gitignore) : un binaire
+# SQLite ne produit pas de diff lisible en revue — c'est un artefact à
+# sauvegarder, pas à committer.
+LLM_RESULTS_DB_PATH = DATA_DIR / "llm_results.sqlite3"
+
 # wonef-precision.xml (voir WONEF_PRECISION_PATH ci-dessus) est absent
 # du dépôt : seule la variante f-score, compressée, est présente.
 WONEF_FSCORE_PATH = ROOT / "wonef-fscore.xml.bz2"

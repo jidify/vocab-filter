@@ -32,3 +32,9 @@ pipeline_out/
 
 # Identifiants (clés API des modèles frontière — voir sense_fr_frontier.py)
 .env
+
+# Magasin de résultats LLM (pipeline/llm_store.py) — permanent (data/) mais
+# binaire : pas de diff lisible en revue, artefact à sauvegarder hors git.
+data/llm_results.sqlite3
+data/llm_results.sqlite3-wal
+data/llm_results.sqlite3-shm

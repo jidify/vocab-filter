@@ -11,7 +11,13 @@ tâches S6 routées par LiteLLM. Trois volets couverts ici :
    injecté dans le message système envoyé au gateway, en `json_object`.
 3. Une erreur réseau ne fait pas planter tout le lot — même chemin de
    dégradation que pour ollama/openai (`isinstance(response, Exception)`).
-"""
+
+Réécrit pour le plan de décorrélation lot/stockage : frontier/adjudicate
+appellent désormais `llm_client.run_units` (`_translate_units`/
+`_backtranslate_units`, stockage unitaire via pipeline/llm_store.py) au lieu
+de `_translate_batches`/`_backtranslate_batch` (cache disque par prompt de
+lot entier) — mais `_completion_kwargs`/l'adaptateur catgpt, seuls objets de
+ce fichier, sont inchangés."""
 
 from __future__ import annotations
 
@@ -65,6 +71,22 @@ class _ProviderMapIsolation(unittest.TestCase):
             slice(None), self._orig_map))
 
 
+class _LlmStoreIsolation(unittest.TestCase):
+    """run_units (pipeline/llm_client.py) stocke chaque décision dans
+    pipeline/llm_store.py — isolé de la vraie data/llm_results.sqlite3, sur
+    le même principe que test_llm_store.py (remplace l'isolation CACHE_DIR
+    d'avant le plan de décorrélation lot/stockage)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch.object(
+            config, "LLM_RESULTS_DB_PATH", Path(self._tmp.name) / "llm_results.sqlite3",
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
 class CallKwargsTests(_ProviderMapIsolation):
     def test_catgpt_model_registers_provider_and_allows_reasoning_effort(self):
         kwargs = llm_litellm_catgpt.call_kwargs("catgpt/catgpt-browser")
@@ -85,33 +107,24 @@ class CallKwargsTests(_ProviderMapIsolation):
         self.assertEqual(litellm.custom_provider_map, before)
 
 
-class NoRegressionOnJsonSchemaModelsTests(_ProviderMapIsolation):
+class NoRegressionOnJsonSchemaModelsTests(_ProviderMapIsolation, _LlmStoreIsolation):
     """Invariant explicite du plan : les providers qui savent faire du
     json_schema natif (openai/*) doivent continuer à le recevoir
     exactement comme avant ce lot — aucun kwarg supplémentaire, aucun
     schéma dupliqué dans le prompt."""
 
     def setUp(self):
-        super().setUp()
-        # frontier._translate_batches / adjudicate._backtranslate_batch
-        # écrivent un vrai cache disque indexé sur {model, system, user} —
-        # isolé pour ne pas dépendre (ni interférer avec) un fichier déjà
-        # écrit par un autre test de la suite avec le même modèle/prompt
-        # (piège documenté dans test_multi_models_m8_gate.py).
-        self._tmp_cache = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp_cache.cleanup)
-        patcher = patch.object(config, "CACHE_DIR", Path(self._tmp_cache.name))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        _ProviderMapIsolation.setUp(self)
+        _LlmStoreIsolation.setUp(self)
 
     def test_frontier_openai_model_keeps_pydantic_response_format(self):
         item = (_target(), [], [])
         payload = {"sense_id": "x", "fr": ["battre"], "translation_type": "equivalence_directe",
                    "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high"}
-        with patch.object(frontier.litellm, "batch_completion",
+        with patch.object(frontier.llm_client.litellm, "batch_completion",
                           side_effect=lambda **kw: [Response(payload)]) as mocked:
-            frontier._translate_batches(
-                [[item]], "openai/gpt-5-mini", mode_batch=False, batch_size=1,
+            frontier._translate_units(
+                [item], "openai/gpt-5-mini", mode_batch=False, batch_size=1,
             )
         kwargs = mocked.call_args.kwargs
         self.assertIs(kwargs["response_format"], frontier.UnitTranslation)
@@ -119,29 +132,25 @@ class NoRegressionOnJsonSchemaModelsTests(_ProviderMapIsolation):
         self.assertNotIn("allowed_openai_params", kwargs)
 
     def test_adjudicate_backtranslate_openai_model_keeps_pydantic_response_format(self):
-        with patch.object(litellm, "completion",
-                          return_value=Response({"key": "x", "en": "thing"})) as mocked:
-            adjudicate._backtranslate_batch(
+        with patch.object(adjudicate.llm_client.litellm, "batch_completion",
+                          side_effect=lambda **kw: [Response({"key": "x", "en": "thing"})]) as mocked:
+            adjudicate._backtranslate_units(
                 [{"key": "x", "fr": "mot", "definition_en": "thing"}],
-                "openai/gpt-5-mini", mode_batch=False,
+                "openai/gpt-5-mini", mode_batch=False, batch_size=1,
             )
         kwargs = mocked.call_args.kwargs
         self.assertIs(kwargs["response_format"], adjudicate._Guess)
         self.assertNotIn("allowed_openai_params", kwargs)
 
 
-class CatgptEndToEndTests(_ProviderMapIsolation):
+class CatgptEndToEndTests(_ProviderMapIsolation, _LlmStoreIsolation):
     """Chemin réel (litellm.batch_completion/completion non mockés) —
     seul `urllib.request.urlopen` est mocké, même principe que
     test_llm_client.py pour pipeline/llm_client.py."""
 
     def setUp(self):
-        super().setUp()
-        self._tmp_cache = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp_cache.cleanup)
-        patcher = patch.object(config, "CACHE_DIR", Path(self._tmp_cache.name))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        _ProviderMapIsolation.setUp(self)
+        _LlmStoreIsolation.setUp(self)
 
     def test_frontier_catgpt_injects_schema_and_posts_json_object(self):
         items = [(_target("x"), [], []), (_target("y"), [], [])]
@@ -160,8 +169,8 @@ class CatgptEndToEndTests(_ProviderMapIsolation):
             return _FakeHTTPResponse({"choices": [{"message": {"content": _json.dumps(payload)}}]})
 
         with patch("pipeline.llm_litellm_catgpt.urllib.request.urlopen", side_effect=fake_urlopen):
-            got, _ = frontier._translate_batches(
-                [items], "catgpt/catgpt-browser", mode_batch=True, batch_size=2,
+            got, _ = frontier._translate_units(
+                items, "catgpt/catgpt-browser", mode_batch=True, batch_size=2,
             )
 
         self.assertEqual(captured["url"], f"{config.CATGPT_BASE_URL}/chat/completions")
@@ -170,17 +179,17 @@ class CatgptEndToEndTests(_ProviderMapIsolation):
         system_msg = next(m["content"] for m in captured["body"]["messages"] if m["role"] == "system")
         self.assertIn('"translations"', system_msg)
         self.assertIn('"translation_type"', system_msg)
-        self.assertEqual(got[0]["x"].fr, ["battre"])
-        self.assertEqual(got[0]["y"].fr, ["frapper"])
+        self.assertEqual(got["x"].fr, ["battre"])
+        self.assertEqual(got["y"].fr, ["frapper"])
 
     def test_frontier_catgpt_network_error_drops_batch_without_crashing(self):
         item = (_target(), [], [])
         with patch("pipeline.llm_litellm_catgpt.urllib.request.urlopen",
                    side_effect=urllib.error.URLError("connection refused")):
-            got, cost = frontier._translate_batches(
-                [[item]], "catgpt/catgpt-browser", mode_batch=False, batch_size=1,
+            got, cost = frontier._translate_units(
+                [item], "catgpt/catgpt-browser", mode_batch=False, batch_size=1,
             )
-        self.assertEqual(got, [{}])
+        self.assertEqual(got, {})
         self.assertEqual(cost, 0.0)
 
 

@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from pipeline import mwe_judge
+from pipeline import config, mwe_judge
 from pipeline.llm_tasks import TaskConfigError, TaskLlmConfig
 from pipeline.prompt_variants import PROMPT_VARIANTS, PromptOverride, PromptVariantError, render
 
@@ -28,6 +31,30 @@ def _occurrence(index: int = 1) -> dict:
     }
 
 
+def _completion_response(payload: dict):
+    """Réponse litellm.completion factice — S3-judge-occurrence n'utilise pas
+    de response_model Pydantic (JSON libre), donc un dict brut sérialisé."""
+    content = json.dumps(payload)
+    message = type("Message", (), {"content": content})()
+    choice = type("Choice", (), {"message": message})()
+    return type("Response", (), {"choices": [choice]})()
+
+
+class LlmStoreIsolatedTests(unittest.TestCase):
+    """run_units (pipeline/llm_client.py) stocke chaque décision dans
+    pipeline/llm_store.py — isolé de la vraie data/llm_results.sqlite3 comme
+    test_llm_store.py."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch.object(
+            config, "LLM_RESULTS_DB_PATH", Path(self._tmp.name) / "llm_results.sqlite3",
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
 class RenderTests(unittest.TestCase):
     def test_render_substitutes_known_placeholders(self):
         self.assertEqual(render("hello {name}", {"name": "world"}), "hello world")
@@ -46,7 +73,7 @@ class S3OccurrenceTagsCatalogTests(unittest.TestCase):
         self.assertNotIn('"reason"', variant.user_template)
 
 
-class JudgeOccurrenceCustomPromptTests(unittest.TestCase):
+class JudgeOccurrenceCustomPromptTests(LlmStoreIsolatedTests):
     def test_unit_path_uses_custom_system_and_template(self):
         custom = PROMPT_VARIANTS["s3-occurrence-tags"]
         task = _task("S3-judge-occurrence", custom_prompt=custom)
@@ -54,13 +81,15 @@ class JudgeOccurrenceCustomPromptTests(unittest.TestCase):
                  "contextual_paraphrase": "switch off", "confidence": 0.9,
                  "evidence": ["sens_specialise"], "wordnet_sense_id": None}
         with patch.object(mwe_judge, "task_config", return_value=task), \
-             patch.object(mwe_judge.llm_client, "call", return_value=reply) as call:
+             patch.object(mwe_judge.llm_client.litellm, "batch_completion",
+                          return_value=[_completion_response(reply)]) as call:
             got = mwe_judge.judge_occurrence("turn off", _occurrence(), {})
 
         self.assertEqual(got["label"], "phrasal_verb")
-        self.assertEqual(call.call_args.kwargs["system"], custom.system)
-        self.assertIn('"turn off"', call.call_args.kwargs["prompt"])
-        self.assertNotIn("indice linguistique observable", call.call_args.kwargs["prompt"])
+        sent_system, sent_user = call.call_args.kwargs["messages"][0]
+        self.assertEqual(sent_system["content"], custom.system)
+        self.assertIn('"turn off"', sent_user["content"])
+        self.assertNotIn("indice linguistique observable", sent_user["content"])
 
     def test_default_path_unaffected_when_no_custom_prompt(self):
         task = _task("S3-judge-occurrence", custom_prompt=None)
@@ -68,28 +97,36 @@ class JudgeOccurrenceCustomPromptTests(unittest.TestCase):
                  "contextual_paraphrase": "switch off", "confidence": 0.9,
                  "evidence": ["a free-text clue"], "wordnet_sense_id": None}
         with patch.object(mwe_judge, "task_config", return_value=task), \
-             patch.object(mwe_judge.llm_client, "call", return_value=reply) as call:
+             patch.object(mwe_judge.llm_client.litellm, "batch_completion",
+                          return_value=[_completion_response(reply)]) as call:
             got = mwe_judge.judge_occurrence("turn off", _occurrence(), {})
 
-        self.assertEqual(call.call_args.kwargs["system"], mwe_judge.OCC_SYSTEM_PROMPT)
+        sent_system, _sent_user = call.call_args.kwargs["messages"][0]
+        self.assertEqual(sent_system["content"], mwe_judge.OCC_SYSTEM_PROMPT)
         # texte libre non filtré hors variante "tags"
         self.assertEqual(got["evidence"], ["a free-text clue"])
 
     def test_batch_path_uses_custom_batch_system_and_template(self):
         custom = PROMPT_VARIANTS["s3-occurrence-tags"]
-        task = _task("S3-judge-occurrence", custom_prompt=custom, batch=True, size=1)
-        batch = [("turn off", _occurrence(1))]
+        task = _task("S3-judge-occurrence", custom_prompt=custom, batch=True, size=2)
+        batch = [("turn off", _occurrence(1)), ("turn off", _occurrence(2))]
         reply = {"decisions": [
             {"occurrence_id": "m:1:0:7", "label": "phrasal_verb", "canonical_form": "turn off",
              "pos": "VERB", "contextual_paraphrase": "switch off", "confidence": 0.9,
              "evidence": ["sens_specialise"], "wordnet_sense_id": None},
+            {"occurrence_id": "m:2:0:7", "label": "littéral", "canonical_form": "turn off",
+             "pos": "VERB", "contextual_paraphrase": "rotate away", "confidence": 0.8,
+             "evidence": ["sens_specialise"], "wordnet_sense_id": None},
         ]}
         with patch.object(mwe_judge, "task_config", return_value=task), \
-             patch.object(mwe_judge.llm_client, "call", return_value=reply) as call:
+             patch.object(mwe_judge.llm_client.litellm, "batch_completion",
+                          return_value=[_completion_response(reply)]) as call:
             got = mwe_judge.judge_occurrences_batch(batch, {})
 
         self.assertEqual(got["m:1:0:7"]["label"], "phrasal_verb")
-        self.assertEqual(call.call_args.kwargs["system"], custom.batch_system)
+        self.assertEqual(got["m:2:0:7"]["label"], "littéral")
+        sent_system, _sent_user = call.call_args.kwargs["messages"][0]
+        self.assertEqual(sent_system["content"], custom.batch_system)
 
 
 class TagsEvidenceValidationTests(unittest.TestCase):

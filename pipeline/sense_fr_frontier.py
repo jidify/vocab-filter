@@ -65,9 +65,7 @@ Usage :
 from __future__ import annotations
 
 import csv
-import random
 from datetime import date
-from pathlib import Path
 from typing import Literal
 
 import litellm
@@ -270,75 +268,92 @@ def _apertium_candidates(target: dict) -> list[str]:
     return out
 
 
-def collect_candidates(target: dict, rng: random.Random) -> list[str]:
+def collect_candidates(target: dict) -> list[str]:
+    """Masque l'origine des candidats (omw-fr/WoNeF/DBnary/Apertium) par un
+    ordre déterministe dérivé de `target["key"]` (llm_client.presentation_order)
+    — pas d'un `random.Random(42)` partagé sur tout le lot, dont l'ordre pour
+    UNE cible dépendrait alors de sa position dans le lot courant."""
     omw, wonef = _resources_for(target)
     pool = list(dict.fromkeys(omw + wonef + _dbnary_candidates(target) + _apertium_candidates(target)))
-    rng.shuffle(pool)
-    return pool
+    return llm_client.presentation_order(pool, target["key"])
 
 
 # ============================================================
-# Cache disque — clé et préfixe INCHANGÉS depuis avant l'unification
-# (Lot U3, fix_pipeline/multi_models/report_multi_models.md §4bis) : ce
-# cache correspond à des appels OpenAI déjà payés, il ne doit pas être
-# invalidé par le passage au client LLM unique. Seule la mécanique de
-# hash/lecture/écriture déménage dans pipeline/llm_client.py.
+# Appel en LOT, stockage en UNITAIRE (pipeline/llm_store.py) — plan de
+# décorrélation lot/stockage. Remplace l'ancien cache disque par prompt de
+# lot entier (`pipeline_out/cache/frontier_*.json`, byte-figé avant ce lot) :
+# le magasin unitaire ne connaît ni `batch_size` ni `mode_batch`, donc
+# changer la taille de lot d'un run à l'autre ne repaie plus une seule
+# traduction déjà décidée par ce modèle.
 # ============================================================
 
-
-def _cache_key_fields(model: str, system: str, user: str, *, mode_batch: bool, batch_size: int | None) -> dict:
-    return {"task_id": "S6-translate-frontier", "model": model,
-            "mode_batch": mode_batch, "batch_size": batch_size or (1 if not mode_batch else 0),
-            "system": system, "user": user}
+_FRONTIER_PROTOCOL = "s6-translate-frontier-v1"
 
 
-def _cache_path(model: str, system: str, user: str, *, mode_batch: bool = True, batch_size: int | None = None) -> Path:
-    return llm_client.cache_path_for(
-        _cache_key_fields(model, system, user, mode_batch=mode_batch, batch_size=batch_size),
-        prefix="frontier_",
-    )
+def _target_payload(target: dict, occs: list[dict], candidates: list[str]) -> dict:
+    """Entrée SÉMANTIQUE d'une cible — payload du magasin LLM unitaire,
+    jamais le texte du prompt rendu. Les occurrences sont triées pour que
+    l'ordre de sélection de `senses.pick_diverse_occurrences` n'entre pas
+    dans la clé (seul le CONTENU présenté au modèle doit invalider)."""
+    return {
+        "kind": target["kind"], "lemmas_en": sorted(target["lemmas_en"]),
+        "pos": target.get("pos"), "definition_en": target.get("definition_en"),
+        "occurrences": sorted(
+            ({"context": o["context"], "target_surface": o["target_surface"]} for o in occs),
+            key=lambda o: o["context"],
+        ),
+        "candidates": sorted(candidates),
+    }
 
 
-def _translate_batches(
-    batches: list[list[tuple[dict, list[dict], list[str]]]], model: str,
-    *, mode_batch: bool = True, batch_size: int | None = None,
-) -> tuple[list[dict[str, SenseTranslation]], float]:
-    """Traduit chaque lot (avec cache disque par lot, via
-    pipeline.llm_client). Renvoie la liste des {sense_id: SenseTranslation}
-    par lot (même ordre que `batches`) et le coût total en USD des SEULS
-    appels réellement effectués (un lot servi par le cache ne coûte rien)."""
-    items: list[llm_client.BatchItem] = []
-    for batch in batches:
-        if not mode_batch and len(batch) != 1:
-            raise ValueError(
-                f"S6-translate-frontier: mode unitaire attend exactement 1 item par lot, "
-                f"reçu {len(batch)}"
-            )
-        user_prompt = build_user_prompt(batch) if mode_batch else build_unit_user_prompt(batch[0])
-        items.append(llm_client.BatchItem(
-            system=SYSTEM_PROMPT, user=user_prompt,
-            cache_key_fields=_cache_key_fields(model, SYSTEM_PROMPT, user_prompt,
-                                               mode_batch=mode_batch, batch_size=batch_size),
-            cache_prefix="frontier_",
-        ))
-
-    def _on_error(i, _item, exc):
-        print(f"  lot {i}: échec ({exc!r}), {len(batches[i])} sens laissés de côté.")
-
-    responses, total_cost = llm_client.call_batch_completion(
-        items, model=model,
-        response_model=BatchTranslations if mode_batch else UnitTranslation,
-        reasoning_effort="low",  # recherche lexicale par item, pas du raisonnement long
-        max_tokens=16000,
-        max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
-        on_error=_on_error,
-    )
-    results = [
-        ({t.sense_id: t for t in parsed.translations} if mode_batch else {parsed.sense_id: parsed})
-        if parsed is not None else {}
-        for parsed in responses
+def _translate_units(
+    items: list[tuple[dict, list[dict], list[str]]], model: str,
+    *, batch_size: int, mode_batch: bool,
+) -> tuple[dict[str, SenseTranslation], float]:
+    """Traduit TOUTES les cibles en attente en un seul appel — appelle en
+    LOT (`batch_size`), stocke en UNITAIRE. Renvoie ``{sense_id/mwe_key:
+    SenseTranslation}`` pour les cibles résolues (une cible en échec est
+    simplement absente — `build_entry` reçoit `None` pour elle, même
+    contrat qu'avant) et le coût total en USD des SEULS appels réellement
+    effectués (un hit du magasin ne coûte rien)."""
+    units = [
+        llm_client.Unit(
+            unit_id=target["key"], payload=_target_payload(target, occs, candidates),
+            data=(target, occs, candidates),
+        )
+        for target, occs, candidates in items
     ]
-    return results, total_cost
+    if not units:
+        return {}, 0.0
+
+    def render_unit(unit: llm_client.Unit) -> tuple[str, str]:
+        return SYSTEM_PROMPT, build_unit_user_prompt(unit.data)
+
+    def render_batch(chunk: list[llm_client.Unit]) -> tuple[str, str]:
+        return SYSTEM_PROMPT, build_user_prompt([unit.data for unit in chunk])
+
+    def parse_unit(parsed: UnitTranslation, _unit: llm_client.Unit) -> dict:
+        return parsed.model_dump()
+
+    def parse_batch(parsed: BatchTranslations, chunk: list[llm_client.Unit]) -> dict[str, dict]:
+        by_id = {t.sense_id: t for t in parsed.translations}
+        return {unit.unit_id: by_id[unit.unit_id].model_dump()
+               for unit in chunk if unit.unit_id in by_id}
+
+    def on_failure(unit: llm_client.Unit, reason: object) -> None:
+        print(f"  {unit.unit_id}: échec ({reason!r}), sens laissé de côté.")
+
+    results, cost = llm_client.run_units(
+        units, task_id="S6-translate-frontier", model=model, protocol=_FRONTIER_PROTOCOL,
+        render_unit=render_unit, render_batch=render_batch,
+        parse_unit=parse_unit, parse_batch=parse_batch,
+        response_model_unit=UnitTranslation, response_model_batch=BatchTranslations,
+        batch_size=batch_size, mode_batch=mode_batch,
+        reasoning_effort="low",  # recherche lexicale par item, pas du raisonnement long
+        max_tokens=16000, max_workers=config.SENSE_FR_FRONTIER_MAX_WORKERS,
+        on_failure=on_failure, return_cost=True,
+    )
+    return {k: SenseTranslation(**v) for k, v in results.items()}, cost
 
 
 # ============================================================
@@ -501,7 +516,6 @@ def run(model: str | None = None, limit: int | None = None, dry_run: bool = Fals
           f"laissée(s) intacte(s), jamais mises en lot), modèle={model}.")
 
     occurrences_by_sense = senses.load_occurrences_by_sense()
-    rng = random.Random(42)  # ordre de présentation des candidats déterministe
 
     items: list[tuple[dict, list[dict], list[str]]] = []
     n_no_occurrence = 0
@@ -512,36 +526,24 @@ def run(model: str | None = None, limit: int | None = None, dry_run: bool = Fals
         else:
             occs = []
             n_no_occurrence += 1
-        candidates = collect_candidates(target, rng)
+        candidates = collect_candidates(target)
         items.append((target, occs, candidates))
 
     if n_no_occurrence:
         print(f"  {n_no_occurrence} cible(s) sans occurrence exploitable dans "
               f"{config.SENSES_PATH}/{config.SELECTED_MWE_PATH} — traduites glose seule.")
 
-    # Lots découpés PAR `kind` (synset / mwe), jamais mélangés : le cache
-    # disque est indexé sur le texte exact du prompt d'un lot entier
-    # (_cache_path ci-dessus). Sans ce découpage, ajouter du contexte aux
-    # MWE changerait le texte de TOUT lot qui mélange les deux (il y en a
-    # un seul, à la frontière synset/mwe de collect_targets — les MWE sont
-    # toujours en fin de liste) et forcerait à rejouer ce lot entier,
-    # synsets déjà décidés inclus. En les isolant, tout lot 100% synset de
-    # taille pleine (batch_size) reproduit un lot déjà vu -> cache disque,
-    # gratuit. EXCEPTION inévitable : le lot synset RESTANT (le nombre de
-    # synsets n'est pas un multiple de batch_size) n'a jamais existé seul
-    # dans le cache — il était fondu dans l'ancien lot mixte — donc lui
-    # sera rejoué au modèle comme les lots MWE. verify_fr_lock (voir
-    # data/sense_fr.lock.json) reste le filet de sécurité si ce lot
-    # change la traduction verrouillée d'un synset qu'il contient.
+    # Lot de décorrélation lot/stockage : un seul appel couvrant TOUTES les
+    # cibles, plus de découpage par `kind` (synset/mwe) — c'était un
+    # contournement du cache disque par prompt de lot entier (byte-figé sur
+    # le texte exact), devenu inutile : le magasin unitaire
+    # (pipeline/llm_store.py, via _translate_units) invalide par CIBLE, pas
+    # par lot, donc mélanger synsets et MWE dans une même tranche ne coûte
+    # plus rien aux autres cibles de la tranche. verify_fr_lock (voir
+    # data/sense_fr.lock.json) reste le filet de sécurité de dernier recours.
     batch_size = effective_batch_size(task)
-    items_by_kind: dict[str, list[tuple[dict, list[dict], list[str]]]] = {}
-    for item in items:
-        items_by_kind.setdefault(item[0]["kind"], []).append(item)
-    batches: list[list[tuple[dict, list[dict], list[str]]]] = []
-    for kind_items in items_by_kind.values():
-        batches.extend(kind_items[i:i + batch_size] for i in range(0, len(kind_items), batch_size))
     mode_batch = use_batch_prompt(task, batch_size)
-    translations_by_batch, cost = _translate_batches(batches, model, mode_batch=mode_batch, batch_size=batch_size)
+    translations_by_key, cost = _translate_units(items, model, batch_size=batch_size, mode_batch=mode_batch)
 
     # `store` a déjà été chargé plus haut pour le filtrage protégé — pas de
     # second appel à `sense_fr.load_store()` ici (Lot 6). `resolved` ne
@@ -549,14 +551,13 @@ def run(model: str | None = None, limit: int | None = None, dry_run: bool = Fals
     # revérifier `is_protected` dans cette boucle.
     n_by_status: dict[str, int] = {}
     n_suspect = 0
-    for batch, translations in zip(batches, translations_by_batch):
-        for target, _occs, _candidates in batch:
-            translation = translations.get(target["key"])
-            entry = build_entry(target, translation, model=model)
-            store[entry["key"]] = entry
-            n_by_status[entry["status"]] = n_by_status.get(entry["status"], 0) + 1
-            if entry.get("agreement") in SUSPECT_AGREEMENTS:
-                n_suspect += 1
+    for target, _occs, _candidates in items:
+        translation = translations_by_key.get(target["key"])
+        entry = build_entry(target, translation, model=model)
+        store[entry["key"]] = entry
+        n_by_status[entry["status"]] = n_by_status.get(entry["status"], 0) + 1
+        if entry.get("agreement") in SUSPECT_AGREEMENTS:
+            n_suspect += 1
 
     for target in unresolved:
         store[target["key"]] = {

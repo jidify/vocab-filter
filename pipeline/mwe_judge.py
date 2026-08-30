@@ -215,30 +215,48 @@ S3_PROMPT_VERSION = "s3-judge-prompt-5"
 S3_DECISION_SCHEMA_VERSION = "s3-decision-schema-3"
 
 
-def occurrence_context_signature(idiom: str, occ: dict, segments_by_idx: dict) -> str:
-    """Signature stable de toute donnée susceptible de changer le verdict."""
+def _occurrence_payload(idiom: str, occ: dict, segments_by_idx: dict) -> dict:
+    """Entrée SÉMANTIQUE d'une occurrence — tout ce qui peut faire changer
+    le verdict, jamais le texte du prompt rendu. Double usage : signature du
+    magasin métier (`occurrence_context_signature`, ci-dessous) ET payload
+    du magasin LLM unitaire (`pipeline/llm_store.py`, voir `run()` plus
+    bas) — les deux doivent invalider ensemble si la phrase, le span ou
+    l'indice syntaxique changent.
+
+    Corrigé (plan de décorrélation lot/stockage) : utilisait
+    ``getattr(segment, "text", "")``, qui renvoyait toujours ``""`` —
+    ``Segment`` (pipeline/corpus.py) n'a pas de champ ``text``, seulement
+    ``en``. Corriger une phrase du livre n'a donc jamais changé cette
+    signature avant ce lot."""
     segment = segments_by_idx.get(occ.get("segment_idx"))
-    sentence = getattr(segment, "text", "") if segment is not None else ""
-    payload = {
+    sentence = segment.en if segment is not None else ""
+    return {
         "canonical_form": idiom.casefold().strip(), "surface": occ.get("surface") or "",
         "sentence": sentence, "source": occ.get("source"),
         "member_char_spans": occ.get("member_char_spans"),
         "vpc_decision_reason": occ.get("vpc_decision_reason"),
     }
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def occurrence_context_signature(idiom: str, occ: dict, segments_by_idx: dict) -> str:
+    """Signature stable de toute donnée susceptible de changer le verdict —
+    utilisée par le magasin métier (`occurrence_store_key` ci-dessous)."""
+    raw = json.dumps(_occurrence_payload(idiom, occ, segments_by_idx),
+                     ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def occurrence_store_key(idiom: str, occurrence_id: str, *, model: str | None = None,
-                         backend: str | None = None, context_signature: str = "",
-                         mode_batch: bool = False, batch_size: int = 1) -> str:
-    """Clé protocolaire : les anciennes décisions sont auditables mais illisibles."""
+                         backend: str | None = None, context_signature: str = "") -> str:
+    """Clé protocolaire : les anciennes décisions sont auditables mais
+    illisibles. Ne porte plus ``mode_batch``/``batch_size`` (plan de
+    décorrélation lot/stockage) — changer la taille de lot ou le mode
+    unitaire/lot n'invalide plus ce magasin métier, exactement comme il
+    n'invalide plus le magasin LLM unitaire en dessous (llm_store.py)."""
     payload = {
         "prompt_version": S3_PROMPT_VERSION,
         "backend": backend or config.LLM_BACKEND,
         "model": model or config.llm_model(),
-        "mode_batch": mode_batch,
-        "batch_size": batch_size if mode_batch else 1,
         "schema_version": S3_DECISION_SCHEMA_VERSION,
         "canonical_form": idiom.casefold().strip(), "occurrence_id": occurrence_id,
         "context_signature": context_signature,
@@ -380,23 +398,39 @@ def definition_candidates(canonical_form: str, pos: str) -> list[dict]:
 def _definition_request(canonical_form: str, pos: str, occurrences: list[dict],
                         segments_by_idx: dict, *, cluster_id: str | None = None) -> dict:
     candidates = definition_candidates(canonical_form, pos)
-    occurrence_lines, occurrence_ids = [], []
+    occurrence_lines, occurrence_ids, payload_occurrences = [], [], []
     for occ in occurrences:
         occurrence_id = occ["occurrence_id"]
         occurrence_ids.append(occurrence_id)
         segment = segments_by_idx.get(occ.get("segment_idx"))
-        text = getattr(segment, "text", "") if segment is not None else ""
+        # Même bug corrigé qu'_occurrence_payload ci-dessus : `Segment` n'a
+        # pas de champ `text` (seulement `en`) — ce prompt envoyait donc la
+        # phrase vide au modèle pour CHAQUE occurrence depuis toujours.
+        text = segment.en if segment is not None else ""
         paraphrase = occ["occurrence_decision"].get("contextual_paraphrase", "")
         occurrence_lines.append(f'- {occurrence_id}: "{text}" | paraphrase: {paraphrase}')
+        payload_occurrences.append({"occurrence_id": occurrence_id, "sentence": text, "paraphrase": paraphrase})
     candidate_lines = [f'- {c["candidate_id"]}: {c["definition"]}' for c in candidates]
     prompt = DEFINITION_PROMPT_TEMPLATE.format(
         canonical_form=canonical_form, pos=pos, occurrences="\n".join(occurrence_lines),
         candidates="\n".join(candidate_lines) or "- (aucune entrée disponible)",
     )
+    cluster_id = cluster_id or f"{canonical_form}|{pos}|unit"
     return {
-        "cluster_id": cluster_id or f"{canonical_form}|{pos}|unit",
+        "cluster_id": cluster_id,
         "canonical_form": canonical_form, "pos": pos, "occurrences": occurrences,
         "candidates": candidates, "occurrence_ids": occurrence_ids, "prompt": prompt,
+        # Entrée SÉMANTIQUE — payload du magasin LLM unitaire
+        # (pipeline/llm_store.py), jamais le texte du prompt rendu. Porté ici
+        # (plutôt que recalculé depuis segments_by_idx en aval) car
+        # choose_cluster_definitions_batch n'a historiquement pas accès aux
+        # segments — seulement à ce dict déjà construit.
+        "payload": {
+            "cluster_id": cluster_id, "canonical_form": canonical_form, "pos": pos,
+            "occurrences": payload_occurrences,
+            "candidates": [{"candidate_id": c["candidate_id"], "definition": c["definition"]}
+                          for c in candidates],
+        },
     }
 
 
@@ -426,67 +460,87 @@ def _definition_selection(request: dict, result: object) -> dict:
             "definition_candidate_id": None, "definition_needs_review": True}
 
 
+def _choose_cluster_definitions(
+    requests: list[dict], *, task: TaskLlmConfig, model: str,
+    batch_size: int, mode_batch: bool,
+) -> dict[str, dict]:
+    """Cœur commun de `choose_cluster_definition`/`choose_cluster_definitions_batch`
+    /`assign_cluster_definitions` — même motif que `_judge_occurrence_units`
+    pour S3-judge-occurrence : appelle en LOT, stocke en UNITAIRE. Renvoie
+    TOUJOURS une entrée par cluster_id demandé (succès ou repli via
+    `_definition_selection(request, {})` — identique au comportement d'une
+    panne LLM avant ce lot)."""
+    if not requests:
+        return {}
+    units = [
+        llm_client.Unit(unit_id=request["cluster_id"], payload=request["payload"], data=request)
+        for request in requests
+    ]
+
+    def render_unit(unit: "llm_client.Unit") -> tuple[str, str]:
+        return DEFINITION_SYSTEM_PROMPT, unit.data["prompt"]
+
+    def render_batch(chunk: list["llm_client.Unit"]) -> tuple[str, str]:
+        items = "\n\n".join(
+            f"{index}. cluster_id={unit.unit_id!r}\n{unit.data['prompt']}"
+            for index, unit in enumerate(chunk, start=1)
+        )
+        return DEFINITION_BATCH_SYSTEM_PROMPT, DEFINITION_BATCH_PROMPT_TEMPLATE.format(
+            count=len(chunk), items=items,
+        )
+
+    def parse_unit(result: object, unit: "llm_client.Unit") -> dict:
+        return _definition_selection(unit.data, result)
+
+    def parse_batch(raw: object, chunk: list["llm_client.Unit"]) -> dict[str, dict]:
+        by_id = llm_client.dedupe_batch_items(
+            raw.get("decisions", []) if isinstance(raw, dict) else [], id_key="cluster_id",
+        )
+        return {
+            unit.unit_id: _definition_selection(unit.data, by_id[unit.unit_id])
+            for unit in chunk if unit.unit_id in by_id
+        }
+
+    fallbacks: dict[str, dict] = {}
+
+    def on_failure(unit: "llm_client.Unit", _reason: object) -> None:
+        fallbacks[unit.unit_id] = _definition_selection(unit.data, {})
+
+    results = llm_client.run_units(
+        units, task_id=task.task_id, model=model,
+        protocol=f"{S3_PROMPT_VERSION}:{S3_DECISION_SCHEMA_VERSION}:definition",
+        render_unit=render_unit, render_batch=render_batch,
+        parse_unit=parse_unit, parse_batch=parse_batch,
+        response_model_unit=None, response_model_batch=None,
+        batch_size=batch_size, mode_batch=mode_batch, timeout=120,
+        on_failure=on_failure,
+    )
+    results.update(fallbacks)
+    return results
+
+
 def choose_cluster_definition(canonical_form: str, pos: str, occurrences: list[dict],
                               segments_by_idx: dict, *, model: str | None = None) -> dict:
     """Chemin unitaire explicite de S3-definition-cluster."""
     task = task_config("S3-definition-cluster")
     resolved_model = model or task.model
     request = _definition_request(canonical_form, pos, occurrences, segments_by_idx)
-    try:
-        result = llm_client.call(
-            model=resolved_model, system=DEFINITION_SYSTEM_PROMPT, prompt=request["prompt"], timeout=120,
-            cache_key_fields=llm_client.build_cache_key(
-                model=resolved_model, system=DEFINITION_SYSTEM_PROMPT, prompt=request["prompt"],
-                extra=_s3_call_metadata(task, mode_batch=False, batch_size=1,
-                                        prompt_variant="definition-unit"),
-            ),
-        )
-    except llm_client.LLMError:
-        result = {}
-    return _definition_selection(request, result)
+    results = _choose_cluster_definitions([request], task=task, model=resolved_model,
+                                          batch_size=1, mode_batch=False)
+    return results[request["cluster_id"]]
 
 
 def choose_cluster_definitions_batch(requests: list[dict], *, model: str | None = None) -> dict[str, dict]:
-    """Chemin lot de S3-definition-cluster, contrôlé par cluster_id."""
+    """Chemin lot explicite de S3-definition-cluster, contrôlé par
+    cluster_id — UN prompt de lot couvrant exactement ``requests``."""
     task = task_config("S3-definition-cluster")
     if not requests:
         return {}
     if len(requests) > effective_batch_size(task):
         raise ValueError(f"lot S3 définition de {len(requests)} clusters > batch_size={effective_batch_size(task)}")
-    items = "\n\n".join(
-        f"{index}. cluster_id={request['cluster_id']!r}\n{request['prompt']}"
-        for index, request in enumerate(requests, start=1)
-    )
-    prompt = DEFINITION_BATCH_PROMPT_TEMPLATE.format(count=len(requests), items=items)
     resolved_model = model or task.model
-    try:
-        raw = llm_client.call(
-            model=resolved_model, system=DEFINITION_BATCH_SYSTEM_PROMPT, prompt=prompt, timeout=120,
-            cache_key_fields=llm_client.build_cache_key(
-                model=resolved_model, system=DEFINITION_BATCH_SYSTEM_PROMPT, prompt=prompt,
-                extra=_s3_call_metadata(task, mode_batch=True, batch_size=effective_batch_size(task),
-                                        prompt_variant="definition-batch"),
-            ),
-        )
-    except llm_client.LLMError:
-        raw = {}
-    expected = {request["cluster_id"] for request in requests}
-    received: dict[str, dict] = {}
-    duplicates: set[str] = set()
-    for decision in raw.get("decisions", []) if isinstance(raw, dict) else []:
-        cluster_id = decision.get("cluster_id") if isinstance(decision, dict) else None
-        if cluster_id in received:
-            duplicates.add(cluster_id)
-        elif cluster_id in expected:
-            received[cluster_id] = decision
-    return {
-        request["cluster_id"]: _definition_selection(
-            request,
-            received.get(request["cluster_id"], {})
-            if request["cluster_id"] not in duplicates else {},
-        )
-        for request in requests
-    }
+    return _choose_cluster_definitions(requests, task=task, model=resolved_model,
+                                       batch_size=len(requests), mode_batch=True)
 
 
 def assign_cluster_definitions(records: list[dict], segments_by_idx: dict) -> None:
@@ -505,17 +559,13 @@ def assign_cluster_definitions(records: list[dict], segments_by_idx: dict) -> No
         for (canonical_form, pos, sense_id), occurrences in clusters.items()
     ]
     size = effective_batch_size(task)
-    if use_batch_prompt(task, size):
-        selections = {}
-        for start in range(0, len(cluster_requests), size):
-            selections.update(choose_cluster_definitions_batch(cluster_requests[start:start + size]))
-    else:
-        selections = {
-            request["cluster_id"]: choose_cluster_definition(
-                request["canonical_form"], request["pos"], request["occurrences"], segments_by_idx
-            )
-            for request in cluster_requests
-        }
+    # Lot de décorrélation lot/stockage : plus de découpage manuel ici — un
+    # seul appel à _choose_cluster_definitions couvre tous les clusters,
+    # `llm_client.run_units` fait le découpage ET le cache unitaire.
+    selections = _choose_cluster_definitions(
+        cluster_requests, task=task, model=task.model,
+        batch_size=size, mode_batch=use_batch_prompt(task, size),
+    )
     for request in cluster_requests:
         selection = selections[request["cluster_id"]]
         for occ in request["occurrences"]:
@@ -656,13 +706,97 @@ def _normalize_occurrence_result(idiom: str, result: object, wn_candidates: list
     }
 
 
-def _s3_call_metadata(task: TaskLlmConfig, *, mode_batch: bool, batch_size: int,
-                      prompt_variant: str) -> dict:
-    return {
-        "task_id": task.task_id, "model": task.model, "mode_batch": mode_batch,
-        "batch_size": batch_size if mode_batch else 1, "prompt_variant": prompt_variant,
-        "protocol": S3_PROMPT_VERSION, "schema": S3_DECISION_SCHEMA_VERSION,
-    }
+def _occurrence_protocol(schema_variant: str) -> str:
+    return f"{S3_PROMPT_VERSION}:{S3_DECISION_SCHEMA_VERSION}:occurrence:{schema_variant}"
+
+
+def _occurrence_unit(idiom: str, occ: dict, segments_by_idx: dict,
+                     *, custom_prompt: PromptOverride | None) -> "llm_client.Unit":
+    """Une Unit S3-judge-occurrence : corps de prompt et candidats WordNet
+    précalculés une seule fois (``unit.data``), réutilisés tels quels que
+    cette occurrence finisse seule dans une tranche unitaire ou concaténée
+    dans une tranche en lot — jamais recalculés par tranche."""
+    prompt_body, wn_candidates = _occurrence_prompt(idiom, occ, segments_by_idx, custom_prompt=custom_prompt)
+    return llm_client.Unit(
+        unit_id=occ["occurrence_id"],
+        payload=_occurrence_payload(idiom, occ, segments_by_idx),
+        data=(idiom, wn_candidates, prompt_body),
+    )
+
+
+def _judge_occurrence_units(
+    units: list["llm_client.Unit"], *, task: TaskLlmConfig, model: str,
+    batch_size: int, mode_batch: bool,
+) -> dict[str, dict]:
+    """Cœur commun de `judge_occurrence`/`judge_occurrences_batch`/la boucle
+    de `run()` — appelle en LOT (``batch_size``), stocke en UNITAIRE
+    (pipeline/llm_store.py, via `llm_client.run_units`). Renvoie TOUJOURS une
+    entrée par unité demandée (succès ou repli `_occurrence_failure` — jamais
+    de clé manquante), pour ne pas changer le contrat des trois appelants."""
+    if not units:
+        return {}
+    custom = task.custom_prompt
+    schema_variant = custom.schema_variant if custom else "default"
+    system = custom.system if custom and custom.system else OCC_SYSTEM_PROMPT
+    batch_template = custom.batch_template if custom and custom.batch_template else OCC_BATCH_PROMPT_TEMPLATE
+    batch_system = custom.batch_system if custom and custom.batch_system else OCC_BATCH_SYSTEM_PROMPT
+
+    def render_unit(unit: "llm_client.Unit") -> tuple[str, str]:
+        _idiom, _wn, prompt_body = unit.data
+        return system, prompt_body
+
+    def render_batch(chunk: list["llm_client.Unit"]) -> tuple[str, str]:
+        numbered = "\n\n".join(
+            f"{index}. occurrence_id={unit.unit_id!r}\n{unit.data[2]}"
+            for index, unit in enumerate(chunk, start=1)
+        )
+        try:
+            prompt = render_prompt(batch_template, {"count": len(chunk), "items": numbered})
+        except PromptVariantError as exc:
+            raise TaskConfigError(f"S3-judge-occurrence: prompt personnalisé invalide : {exc}") from exc
+        return batch_system, prompt
+
+    def parse_unit(result: object, unit: "llm_client.Unit") -> dict:
+        idiom, wn_candidates, _prompt = unit.data
+        return _normalize_occurrence_result(idiom, result, wn_candidates, schema_variant=schema_variant)
+
+    def parse_batch(raw: object, chunk: list["llm_client.Unit"]) -> dict[str, dict]:
+        by_id = llm_client.dedupe_batch_items(
+            raw.get("decisions", []) if isinstance(raw, dict) else [], id_key="occurrence_id",
+        )
+        decisions: dict[str, dict] = {}
+        for unit in chunk:
+            item = by_id.get(unit.unit_id)
+            if item is None:
+                continue
+            idiom, wn_candidates, _prompt = unit.data
+            decisions[unit.unit_id] = _normalize_occurrence_result(
+                idiom, item, wn_candidates, schema_variant=schema_variant,
+            )
+        return decisions
+
+    failures: dict[str, dict] = {}
+
+    def on_failure(unit: "llm_client.Unit", reason: object) -> None:
+        idiom = unit.data[0]
+        if isinstance(reason, Exception):
+            failures[unit.unit_id] = _occurrence_failure(idiom, f"LLM indisponible: {reason}")
+        else:
+            failures[unit.unit_id] = _occurrence_failure(
+                idiom, f"réponse LLM invalide: occurrence_id manquant ou dupliqué "
+                       f"({reason}): {unit.unit_id}", invalid=True,
+            )
+
+    results = llm_client.run_units(
+        units, task_id=task.task_id, model=model, protocol=_occurrence_protocol(schema_variant),
+        render_unit=render_unit, render_batch=render_batch,
+        parse_unit=parse_unit, parse_batch=parse_batch,
+        response_model_unit=None, response_model_batch=None,
+        batch_size=batch_size, mode_batch=mode_batch, timeout=120,
+        on_failure=on_failure,
+    )
+    results.update(failures)
+    return results
 
 
 def judge_occurrence(idiom: str, occ: dict, segments_by_idx: dict,
@@ -671,90 +805,31 @@ def judge_occurrence(idiom: str, occ: dict, segments_by_idx: dict,
     (VOCAB_LLM_S3_JUDGE_OCCURRENCE=...;prompt=<nom>, pipeline/llm_tasks.py)
     remplace system/template quand posé — voir pipeline/prompt_variants.py."""
     task = task_config("S3-judge-occurrence")
-    custom = task.custom_prompt
     resolved_model = model or task.model
-    system = custom.system if custom and custom.system else OCC_SYSTEM_PROMPT
-    schema_variant = custom.schema_variant if custom else "default"
-    prompt, wn_candidates = _occurrence_prompt(idiom, occ, segments_by_idx, custom_prompt=custom)
-    try:
-        result = llm_client.call(
-            model=resolved_model, system=system, prompt=prompt, timeout=120,
-            cache_key_fields=llm_client.build_cache_key(
-                model=resolved_model, system=system, prompt=prompt,
-                extra=_s3_call_metadata(task, mode_batch=False, batch_size=1,
-                                        prompt_variant=f"occurrence-unit:{schema_variant}"),
-            ),
-        )
-    except llm_client.LLMError as exc:
-        return _occurrence_failure(idiom, f"LLM indisponible: {exc}")
-    return _normalize_occurrence_result(idiom, result, wn_candidates, schema_variant=schema_variant)
+    unit = _occurrence_unit(idiom, occ, segments_by_idx, custom_prompt=task.custom_prompt)
+    results = _judge_occurrence_units([unit], task=task, model=resolved_model,
+                                      batch_size=1, mode_batch=False)
+    return results[unit.unit_id]
 
 
 def judge_occurrences_batch(items: list[tuple[str, dict]], segments_by_idx: dict,
                             *, model: str | None = None) -> dict[str, dict]:
-    """Chemin lot S3 : un prompt, une décision contrôlée par occurrence_id.
-    Même prise en compte de ``task.custom_prompt`` que judge_occurrence."""
+    """Chemin lot S3 explicite : UN prompt de lot couvrant exactement
+    ``items``, une décision contrôlée par occurrence_id. Même prise en compte
+    de ``task.custom_prompt`` que judge_occurrence. Pour juger un nombre
+    quelconque d'occurrences en attente avec découpage/parallélisme internes,
+    voir `_judge_occurrence_units` (utilisée directement par `run()`)."""
     task = task_config("S3-judge-occurrence")
     if not items:
         return {}
     if len(items) > effective_batch_size(task):
         raise ValueError(f"lot S3 de {len(items)} occurrences > batch_size={effective_batch_size(task)}")
-
-    custom = task.custom_prompt
-    schema_variant = custom.schema_variant if custom else "default"
-    prompts: list[tuple[str, str, list]] = []
-    for idiom, occ in items:
-        prompt, wn_candidates = _occurrence_prompt(idiom, occ, segments_by_idx, custom_prompt=custom)
-        prompts.append((occ["occurrence_id"], prompt, wn_candidates))
-    numbered = "\n\n".join(
-        f"{index}. occurrence_id={occurrence_id!r}\n{prompt}"
-        for index, (occurrence_id, prompt, _) in enumerate(prompts, start=1)
-    )
-    batch_template = custom.batch_template if custom and custom.batch_template else OCC_BATCH_PROMPT_TEMPLATE
-    try:
-        prompt = render_prompt(batch_template, {"count": len(items), "items": numbered})
-    except PromptVariantError as exc:
-        raise TaskConfigError(f"S3-judge-occurrence: prompt personnalisé invalide : {exc}") from exc
-    batch_system = custom.batch_system if custom and custom.batch_system else OCC_BATCH_SYSTEM_PROMPT
     resolved_model = model or task.model
-    try:
-        raw = llm_client.call(
-            model=resolved_model, system=batch_system, prompt=prompt, timeout=120,
-            cache_key_fields=llm_client.build_cache_key(
-                model=resolved_model, system=batch_system, prompt=prompt,
-                extra=_s3_call_metadata(task, mode_batch=True, batch_size=effective_batch_size(task),
-                                        prompt_variant=f"occurrence-batch:{schema_variant}"),
-            ),
-        )
-    except llm_client.LLMError as exc:
-        return {occ["occurrence_id"]: _occurrence_failure(idiom, f"LLM indisponible: {exc}")
-                for idiom, occ in items}
-
-    expected_ids = [occ["occurrence_id"] for _, occ in items]
-    expected = set(expected_ids)
-    received: dict[str, dict] = {}
-    duplicates: set[str] = set()
-    for item in raw.get("decisions", []) if isinstance(raw, dict) else []:
-        occurrence_id = item.get("occurrence_id") if isinstance(item, dict) else None
-        if occurrence_id in received:
-            duplicates.add(occurrence_id)
-        elif occurrence_id in expected:
-            received[occurrence_id] = item
-
-    decisions: dict[str, dict] = {}
-    for idiom, occ in items:
-        occurrence_id = occ["occurrence_id"]
-        if occurrence_id not in received or occurrence_id in duplicates:
-            decisions[occurrence_id] = _occurrence_failure(
-                idiom, f"réponse LLM invalide: occurrence_id manquant ou dupliqué: {occurrence_id}",
-                invalid=True,
-            )
-            continue
-        wn_candidates = next(candidates for key, _, candidates in prompts if key == occurrence_id)
-        decisions[occurrence_id] = _normalize_occurrence_result(
-            idiom, received[occurrence_id], wn_candidates, schema_variant=schema_variant
-        )
-    return decisions
+    units = [_occurrence_unit(idiom, occ, segments_by_idx, custom_prompt=task.custom_prompt)
+            for idiom, occ in items]
+    results = _judge_occurrence_units(units, task=task, model=resolved_model,
+                                      batch_size=len(units), mode_batch=True)
+    return {occ["occurrence_id"]: results[occ["occurrence_id"]] for _, occ in items}
 
 
 LEXICALIZED_LABELS = {"idiome", "phrasal_verb", "semi_fige"}
@@ -898,11 +973,11 @@ def run() -> int:
     print(f"S3-judge-occurrence : {occurrence_task.model}, "
           f"prompt {'lot' if occurrence_batch_mode else 'unitaire'}.")
     lexicalized = 0
-    n_occ_llm_calls = 0
     n_occ_llm_failures = 0
     n_occ_escalated = 0
     records = []
     pending: list[tuple[str, dict, str]] = []
+    pending_units: list[llm_client.Unit] = []
     for entry in types:
         idiom = entry["idiom"]
         occurrences = []
@@ -911,8 +986,7 @@ def run() -> int:
             signature = occurrence_context_signature(idiom, occ, segments_by_idx)
             store_key = occurrence_store_key(
                 idiom, occ["occurrence_id"], model=occurrence_task.model,
-                backend=occurrence_task.provider, mode_batch=occurrence_batch_mode,
-                batch_size=occurrence_batch_size, context_signature=signature,
+                backend=occurrence_task.provider, context_signature=signature,
             )
             occ_cached = occurrence_store.get(store_key)
             prepared_occ = {**occ}
@@ -923,33 +997,29 @@ def run() -> int:
                 }
             else:
                 pending.append((idiom, prepared_occ, store_key))
+                pending_units.append(_occurrence_unit(
+                    idiom, prepared_occ, segments_by_idx, custom_prompt=occurrence_task.custom_prompt,
+                ))
             occurrences.append(prepared_occ)
 
         records.append({**entry, "occurrences": occurrences})
 
-    for start in range(0, len(pending), occurrence_batch_size):
-        pending_batch = pending[start:start + occurrence_batch_size]
-        if occurrence_batch_mode:
-            decisions = judge_occurrences_batch(
-                [(idiom, occ) for idiom, occ, _ in pending_batch], segments_by_idx,
-                model=occurrence_task.model,
-            )
-            n_occ_llm_calls += 1
+    # Lot de décorrélation lot/stockage : un seul appel couvrant TOUTES les
+    # occurrences en attente, quel que soit leur nombre — _judge_occurrence_units
+    # (via llm_client.run_units) fait le découpage en tranches de
+    # occurrence_batch_size ET le cache unitaire ; plus de boucle manuelle
+    # `for start in range(0, len(pending), occurrence_batch_size)` ici.
+    decisions_by_id = _judge_occurrence_units(
+        pending_units, task=occurrence_task, model=occurrence_task.model,
+        batch_size=occurrence_batch_size, mode_batch=occurrence_batch_mode,
+    )
+    for idiom, occ, store_key in pending:
+        occ_decision = decisions_by_id[occ["occurrence_id"]]
+        occ["occurrence_decision"] = occ_decision
+        if is_llm_failure(occ_decision):
+            n_occ_llm_failures += 1
         else:
-            decisions = {
-                occ["occurrence_id"]: judge_occurrence(
-                    idiom, occ, segments_by_idx, model=occurrence_task.model
-                )
-                for idiom, occ, _ in pending_batch
-            }
-            n_occ_llm_calls += len(pending_batch)
-        for idiom, occ, store_key in pending_batch:
-            occ_decision = decisions[occ["occurrence_id"]]
-            occ["occurrence_decision"] = occ_decision
-            if is_llm_failure(occ_decision):
-                n_occ_llm_failures += 1
-            else:
-                occurrence_store[store_key] = mwe_stores.build_entry(store_key, occ_decision)
+            occurrence_store[store_key] = mwe_stores.build_entry(store_key, occ_decision)
 
     for i, record in enumerate(records, start=1):
         occurrences = record["occurrences"]
@@ -974,8 +1044,8 @@ def run() -> int:
     print(f"{lexicalized}/{len(types)} groupes contiennent au moins une occurrence lexicalisée.")
     if n_occ_escalated:
         print(f"{n_occ_escalated} occurrence(s) jugée(s), toutes sources confondues "
-              f"({n_occ_llm_calls} appel(s) LLM d'occurrence, le reste déjà dans "
-              f"{config.MWE_OCCURRENCE_STORE_PATH.name}).")
+              f"({len(pending)} transmise(s) au juge — hors magasin métier "
+              f"{config.MWE_OCCURRENCE_STORE_PATH.name}, le reste déjà décidé).")
         if n_occ_llm_failures:
             print(f"  {n_occ_llm_failures} panne(s) LLM d'occurrence — pas mises en cache non plus.")
     print(f"-> {config.MWE_DECISIONS_PATH}")

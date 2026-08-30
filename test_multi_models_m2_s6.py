@@ -1,10 +1,21 @@
+"""Contrats hors réseau du lot M2 (prompts S6 unitaires et lots : frontier,
+reassign, backtranslate, judge-dossier).
+
+Réécrit pour le plan de décorrélation lot/stockage : les 4 tâches S6
+n'appellent plus `llm_client.call`/`call_batch_completion` (cache disque par
+prompt de lot entier, `_cache_path`/`_translate_batches`/`_judge_batch`/
+`_backtranslate_batch`) mais `llm_client.run_units` (cache unitaire, voir
+pipeline/llm_store.py, via `_translate_units`/`_judge_units`/
+`_backtranslate_units`) — les mocks ciblent donc `litellm.batch_completion`,
+et les anciennes clés de cache disque (`_cache_path`, préfixes de fichier)
+n'existent plus."""
+
 import json as _json
 import os
-import random
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
-
-import litellm
 
 from pipeline import config
 from pipeline import sense_fr_adjudicate as adjudicate
@@ -20,6 +31,21 @@ def _target(key="x"):
 class Response:
     def __init__(self, payload):
         self.choices = [type("Choice", (), {"message": type("Message", (), {"content": _json.dumps(payload)})()})()]
+
+
+class LlmStoreIsolatedTests(unittest.TestCase):
+    """run_units (pipeline/llm_client.py) stocke chaque décision dans
+    pipeline/llm_store.py — isolé de la vraie data/llm_results.sqlite3 comme
+    test_llm_store.py."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch.object(
+            config, "LLM_RESULTS_DB_PATH", Path(self._tmp.name) / "llm_results.sqlite3",
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class S6M2PromptTests(unittest.TestCase):
@@ -55,8 +81,8 @@ class S6M2PromptTests(unittest.TestCase):
     def test_judge_unit_prompt_carries_same_dossier_as_batch_for_one_item(self):
         # Régression du défaut n°1 (revue M2) : le chemin unitaire du juge
         # Stage C perdait les phrases réelles du livre, le POS, les lemmes
-        # et le mélange des candidats (rng.shuffle) présents dans le
-        # dossier du chemin lot — voir la docstring de _judge_batch.
+        # et le mélange des candidats présents dans le dossier du chemin
+        # lot — voir la docstring de _judge_units.
         entry = {
             "key": "x", "pos": "n", "lemmas_en": ["beat"],
             "fr": "battement", "fr_alt": ["coup"], "definition_en": "a rhythmic pulsation",
@@ -65,8 +91,8 @@ class S6M2PromptTests(unittest.TestCase):
             {"segment_idx": 0, "context": "The steady beat of the drum.", "target_surface": "beat"},
         ]}
         audits = {"x": {"dbnary_fr": "pulsation"}}
-        unit = adjudicate.build_judge_unit_prompt([entry], audits, occurrences_by_sense, random.Random(42))
-        batch = adjudicate.build_judge_batch_prompt([entry], audits, occurrences_by_sense, random.Random(42))
+        unit = adjudicate.build_judge_unit_prompt([entry], audits, occurrences_by_sense)
+        batch = adjudicate.build_judge_batch_prompt([entry], audits, occurrences_by_sense)
         for fragment in ("beat", "The steady beat of the drum", "battement", "coup", "pulsation", "rhythmic pulsation"):
             self.assertIn(fragment, unit, f"{fragment!r} absent du prompt unitaire")
         # même ligne de dossier qu'un lot d'un seul élément, hors enveloppe/consigne finale
@@ -78,7 +104,7 @@ class S6M2PromptTests(unittest.TestCase):
             {"key": "y", "pos": "n", "lemmas_en": [], "fr": "b", "fr_alt": [], "definition_en": "?"},
         ]
         with self.assertRaises(ValueError):
-            adjudicate.build_judge_unit_prompt(entries, {}, {}, random.Random(42))
+            adjudicate.build_judge_unit_prompt(entries, {}, {})
 
 
 class S6M2ModelProvenanceTests(unittest.TestCase):
@@ -117,12 +143,10 @@ class S6M2ModelProvenanceTests(unittest.TestCase):
         self.assertNotEqual(store["cling.v.03"]["evidence"]["frontier_model"], config.SENSE_FR_FRONTIER_MODEL)
 
 
-class S6M2BatchSizeOneSelectsUnitPathTests(unittest.TestCase):
-    def test_frontier_translate_batches_batch_size_one_sends_unit_prompt(self):
+class S6M2BatchSizeOneSelectsUnitPathTests(LlmStoreIsolatedTests):
+    def test_frontier_translate_units_batch_size_one_sends_unit_prompt(self):
         # Régression du défaut n°3 : batch=true;batch_size=1 doit basculer
         # sur le chemin unitaire, pas envoyer un prompt lot à un seul item.
-        # Modèle/clé dédiés à ce test : le cache disque est réel (voir
-        # frontier._cache_path) et partagé entre exécutions de la suite.
         item = (_target("batch-size-one-probe"), [], [])
         with patch.dict(os.environ, {"VOCAB_LLM_S6_TRANSLATE_FRONTIER": "openai/m2-probe;batch=true;batch_size=1"}, clear=False):
             task = task_config("S6-translate-frontier")
@@ -130,22 +154,16 @@ class S6M2BatchSizeOneSelectsUnitPathTests(unittest.TestCase):
             batch_size = frontier.effective_batch_size(task)
         self.assertFalse(mode_batch)
         self.assertEqual(batch_size, 1)
-        cache_file = frontier._cache_path(
-            "openai/m2-probe", frontier.SYSTEM_PROMPT, frontier.build_unit_user_prompt(item),
-            mode_batch=mode_batch, batch_size=batch_size,
-        )
-        cache_file.unlink(missing_ok=True)
-        with patch.object(frontier.litellm, "batch_completion", side_effect=lambda **kw: [Response({
+        with patch.object(frontier.llm_client.litellm, "batch_completion", side_effect=lambda **kw: [Response({
             "sense_id": "batch-size-one-probe", "fr": ["mot"], "translation_type": "equivalence_directe",
             "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high",
         })]) as mocked:
-            frontier._translate_batches([[item]], "openai/m2-probe", mode_batch=mode_batch, batch_size=batch_size)
-        cache_file.unlink(missing_ok=True)
-        self.assertIsNotNone(mocked.call_args, "cache disque périmé : le mock n'a pas été appelé")
+            frontier._translate_units([item], "openai/m2-probe", mode_batch=mode_batch, batch_size=batch_size)
+        self.assertIsNotNone(mocked.call_args)
         self.assertIs(mocked.call_args.kwargs["response_format"], frontier.UnitTranslation)
 
     def test_stage_b_batch_size_one_uses_unit_path(self):
-        with patch.object(adjudicate, "_backtranslate_batch", return_value={}) as mocked:
+        with patch.object(adjudicate, "_backtranslate_units", return_value={}) as mocked:
             adjudicate.run_stage_b({}, [{"key": "x", "fr": "mot", "definition_en": "thing"}],
                                     "openai/m", batch_size=1)
         self.assertFalse(mocked.call_args.kwargs["mode_batch"])
@@ -153,96 +171,95 @@ class S6M2BatchSizeOneSelectsUnitPathTests(unittest.TestCase):
     def test_stage_c_batch_size_one_uses_unit_path(self):
         calls = []
 
-        def fake_judge(store, batch, audits, model, occurrences, **kwargs):
+        def fake_judge(targets, audits, occurrences_by_sense, model, **kwargs):
             calls.append(kwargs["mode_batch"])
             return {}
 
-        with patch.object(adjudicate, "_judge_batch", side_effect=fake_judge):
+        with patch.object(adjudicate, "_judge_units", side_effect=fake_judge):
             adjudicate.run_stage_c({}, [{"key": "x", "fr": "mot", "definition_en": "thing"}], {}, "openai/m", {},
                                     batch_size=1)
         self.assertEqual(calls, [False])
 
 
 class S6M2UnitGuardTests(unittest.TestCase):
-    def test_backtranslate_unit_path_rejects_multiple_entries(self):
+    """Les gardes de taille (ValueError sur un chemin unitaire à N>1
+    entrées) restent portées par les fonctions de RENDU (build_*_unit_prompt),
+    pas par _translate_units/_judge_units/_backtranslate_units — ces
+    dernières délèguent tout découpage à llm_client.run_units."""
+
+    def test_judge_unit_prompt_rejects_multiple_entries(self):
         entries = [{"key": "x", "fr": "a", "definition_en": "?"}, {"key": "y", "fr": "b", "definition_en": "?"}]
         with self.assertRaises(ValueError):
-            adjudicate._backtranslate_batch(entries, "openai/m", mode_batch=False, batch_size=1)
+            adjudicate.build_judge_unit_prompt(entries, {}, {})
 
-    def test_judge_unit_path_rejects_multiple_entries(self):
+    def test_backtranslate_unit_prompt_uses_first_entry_only(self):
+        # build_backtranslate_unit_prompt (contrairement à build_judge_unit_prompt)
+        # a toujours pris entries[0] sans garde explicite — comportement
+        # inchangé par ce lot, juste documenté ici pour mémoire.
         entries = [{"key": "x", "fr": "a", "definition_en": "?"}, {"key": "y", "fr": "b", "definition_en": "?"}]
-        with self.assertRaises(ValueError):
-            adjudicate._judge_batch({}, entries, {}, "openai/m", {}, mode_batch=False, batch_size=1)
-
-    def test_frontier_translate_batches_unit_path_rejects_multiple_items(self):
-        batch = [(_target(), [], []), (_target("y"), [], [])]
-        with self.assertRaises(ValueError):
-            frontier._translate_batches([batch], "openai/m", mode_batch=False, batch_size=1)
-
-    def test_reassign_translate_batches_unit_path_rejects_multiple_items(self):
-        batch = [(_target(), [], []), (_target("y"), [], [])]
-        with self.assertRaises(ValueError):
-            reassign._translate_batches([batch], "openai/m", mode_batch=False, batch_size=1)
+        prompt = adjudicate.build_backtranslate_unit_prompt(entries)
+        self.assertIn("x", prompt)
+        self.assertNotIn("- y |", prompt)
 
 
-class S6M2CacheTests(unittest.TestCase):
-    def test_cache_keys_include_task_mode_and_effective_batch_size(self):
-        f_unit = frontier._cache_path("openai/m", "s", "u", mode_batch=False, batch_size=1)
-        f_batch = frontier._cache_path("openai/m", "s", "u", mode_batch=True, batch_size=2)
-        r_unit = reassign._cache_path("openai/m", "s", "u", mode_batch=False, batch_size=1)
-        r_batch = reassign._cache_path("openai/m", "s", "u", mode_batch=True, batch_size=2)
-        self.assertNotEqual(f_unit, f_batch)
-        self.assertNotEqual(r_unit, r_batch)
-
-    def test_cache_keys_distinguish_batch_size_at_same_mode(self):
-        f_20 = frontier._cache_path("openai/m", "s", "u", mode_batch=True, batch_size=20)
-        f_40 = frontier._cache_path("openai/m", "s", "u", mode_batch=True, batch_size=40)
-        r_20 = reassign._cache_path("openai/m", "s", "u", mode_batch=True, batch_size=20)
-        r_40 = reassign._cache_path("openai/m", "s", "u", mode_batch=True, batch_size=40)
-        self.assertNotEqual(f_20, f_40)
-        self.assertNotEqual(r_20, r_40)
-
+class S6M2CacheTests(LlmStoreIsolatedTests):
     def test_frontier_mock_calls_use_unit_and_batch_response_formats(self):
         item = (_target(), [], [])
         unit_payload = {"sense_id": "x", "fr": ["mot"], "translation_type": "equivalence_directe", "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high"}
         batch_payload = {"translations": [unit_payload, {**unit_payload, "sense_id": "y"}]}
-        with patch.object(frontier.litellm, "batch_completion", side_effect=lambda **kw: [Response(unit_payload)]):
-            got, _ = frontier._translate_batches([[item]], "openai/m", mode_batch=False, batch_size=1)
-        self.assertEqual(got[0]["x"].fr, ["mot"])
-        with patch.object(frontier.litellm, "batch_completion", side_effect=lambda **kw: [Response(batch_payload)]):
-            got, _ = frontier._translate_batches([[item, (_target("y"), [], [])]], "openai/m", mode_batch=True, batch_size=2)
-        self.assertEqual(set(got[0]), {"x", "y"})
+        with patch.object(frontier.llm_client.litellm, "batch_completion", side_effect=lambda **kw: [Response(unit_payload)]):
+            got, _ = frontier._translate_units([item], "openai/m", mode_batch=False, batch_size=1)
+        self.assertEqual(got["x"].fr, ["mot"])
+        with patch.object(frontier.llm_client.litellm, "batch_completion", side_effect=lambda **kw: [Response(batch_payload)]):
+            got, _ = frontier._translate_units([item, (_target("y"), [], [])], "openai/m", mode_batch=True, batch_size=2)
+        self.assertEqual(set(got), {"x", "y"})
 
     def test_adjudication_mock_paths_parse_scalar_and_envelope(self):
         one = {"key": "x", "en": "thing"}
-        with patch.object(litellm, "completion", return_value=Response(one)):
-            self.assertEqual(adjudicate._backtranslate_batch([{"key": "x", "fr": "mot", "definition_en": "thing"}], "openai/m", mode_batch=False), {"x": "thing"})
+        with patch.object(adjudicate.llm_client.litellm, "batch_completion",
+                          side_effect=lambda **kw: [Response(one)]):
+            self.assertEqual(
+                adjudicate._backtranslate_units(
+                    [{"key": "x", "fr": "mot", "definition_en": "thing"}], "openai/m",
+                    mode_batch=False, batch_size=1,
+                ),
+                {"x": "thing"},
+            )
         verdict = {"key": "x", "fr": "mot", "fr_alt": [], "confidence": "high", "reason": "ok", "no_equivalent": False}
-        with patch.object(litellm, "completion", return_value=Response({"verdicts": [verdict]})):
-            got = adjudicate._judge_batch({}, [{"key": "x", "fr": "mot", "definition_en": "thing"}], {}, "openai/m", {}, mode_batch=True)
+        with patch.object(adjudicate.llm_client.litellm, "batch_completion",
+                          side_effect=lambda **kw: [Response({"verdicts": [verdict]})]):
+            got = adjudicate._judge_units(
+                [{"key": "x", "fr": "mot", "definition_en": "thing"}], {}, {}, "openai/m",
+                batch_size=20, mode_batch=True,
+            )
         self.assertEqual(got["x"]["fr"], "mot")
 
     def test_stage_c_uses_real_configured_chunks(self):
         targets = [{"key": str(i), "fr": "mot", "definition_en": "thing"} for i in range(5)]
         calls = []
 
-        def fake_judge(store, batch, audits, model, occurrences, **kwargs):
-            calls.append((len(batch), kwargs["mode_batch"], kwargs["batch_size"]))
+        def fake_judge(targets, audits, occurrences_by_sense, model, **kwargs):
+            calls.append((len(targets), kwargs["mode_batch"], kwargs["batch_size"]))
             return {}
 
-        with patch.dict(os.environ, {"VOCAB_LLM_S6_JUDGE_DOSSIER": "openai/m;batch=true;batch_size=2"}, clear=False), patch.object(adjudicate, "_judge_batch", side_effect=fake_judge):
+        with patch.dict(os.environ, {"VOCAB_LLM_S6_JUDGE_DOSSIER": "openai/m;batch=true;batch_size=2"}, clear=False), \
+             patch.object(adjudicate, "_judge_units", side_effect=fake_judge):
             adjudicate.run_stage_c({}, targets, {}, None, {})
-        self.assertEqual(calls, [(2, True, 2), (2, True, 2), (1, True, 2)])
+        # Lot de décorrélation lot/stockage : un seul appel à _judge_units
+        # avec TOUTES les cibles — le découpage en tranches de 2 est
+        # désormais interne à llm_client.run_units, plus une responsabilité
+        # de run_stage_c.
+        self.assertEqual(calls, [(5, True, 2)])
 
     def test_reassign_mock_paths_parse_scalar_and_envelope(self):
         decision = {"key": "x", "pos": "n", "sense_id": "x.n.01", "fr": ["mot"], "translation_type": "equivalence_directe", "sense_fit": "ok", "sense_fit_note": "", "confidence": "high", "reason": "ok"}
         item = (_target(), [], [])
-        with patch.object(reassign.litellm, "batch_completion", side_effect=lambda **kw: [Response(decision)]):
-            got, _ = reassign._translate_batches([[item]], "openai/m", mode_batch=False, batch_size=1)
-        self.assertEqual(got[0]["x"].sense_id, "x.n.01")
-        with patch.object(reassign.litellm, "batch_completion", side_effect=lambda **kw: [Response({"decisions": [decision, {**decision, "key": "y"}]})]):
-            got, _ = reassign._translate_batches([[item, (_target("y"), [], [])]], "openai/m", mode_batch=True, batch_size=2)
-        self.assertEqual(set(got[0]), {"x", "y"})
+        with patch.object(reassign.llm_client.litellm, "batch_completion", side_effect=lambda **kw: [Response(decision)]):
+            got, _ = reassign._translate_units([item], "openai/m", mode_batch=False, batch_size=1)
+        self.assertEqual(got["x"].sense_id, "x.n.01")
+        with patch.object(reassign.llm_client.litellm, "batch_completion", side_effect=lambda **kw: [Response({"decisions": [decision, {**decision, "key": "y"}]})]):
+            got, _ = reassign._translate_units([item, (_target("y"), [], [])], "openai/m", mode_batch=True, batch_size=2)
+        self.assertEqual(set(got), {"x", "y"})
 
 
 if __name__ == "__main__":
