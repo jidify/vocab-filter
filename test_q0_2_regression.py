@@ -188,7 +188,7 @@ EXPECTED_CURRENT_OUTCOMES = {
     "composes_entites": ("known_failure", "S1/S5 compound/entity fragments"),
     "aucun_sens_adapte": ("known_failure", "S5/S7 silent disappearance"),
     "transparence": ("known_failure", "S7 transparent cognates retained"),
-    "pending": ("known_failure", "S6/S7 pending translations"),
+    "pending": ("passes", "invariant satisfied"),
     "ameliorations_hors_perimetre": ("passes", "invariant satisfied"),
     "end_to_end": ("known_failure", "Q0-1 final thresholds not met"),
 }

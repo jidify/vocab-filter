@@ -385,7 +385,16 @@ def aggregate_and_score(records: list[dict]) -> list[dict]:
             "fr_opacity": opacity,
             "sense_surprise": surprise,
             "confidence": 1.0 - sum(1 for o in occs if o["needs_review"]) / len(occs),
-            "needs_review": any(o["needs_review"] for o in occs),
+            # S6-2 (plan §6) : une traduction officielle encore `pending`/
+            # `rejected`/`no_equivalent` (meaning_fr_official vide, voir
+            # resolve_official_fr ci-dessus) doit rendre la ligne visible en
+            # révision, jamais silencieuse — sans ce terme, une occurrence par
+            # ailleurs pleinement confiante (needs_review=False côté S5) sortait
+            # de vocab.csv avec une case FR vide mais needs_review=False,
+            # absente de review_queue.csv (write_review_queue ne filtre que sur
+            # needs_review) : la ligne se présentait comme finalisée sans
+            # l'être (cas mesuré : 131 lignes, voir fix_pipeline/plan_action_fix_pipeline.md §6 S6-2).
+            "needs_review": any(o["needs_review"] for o in occs) or not meaning_fr_official,
             "candidate_senses": sorted({s for o in occs for s in o.get("candidate_senses", []) if s}),
             "recovery_route": first.get("recovery_route"),
             "recovery_reason": first.get("recovery_reason"),
@@ -471,7 +480,10 @@ def build_mwe_units() -> list[dict]:
             "fr_opacity": mwe_opacity,
             "sense_surprise": 0.5,
             "confidence": r["confidence"],
-            "needs_review": r["confidence"] < 0.6 or r.get("definition_needs_review", False),
+            # S6-2 : même correctif que le mot simple ci-dessus (aggregate_and_score) —
+            # une MWE dont la traduction officielle est encore vide ne doit
+            # jamais paraître finalisée dans vocab.csv.
+            "needs_review": r["confidence"] < 0.6 or r.get("definition_needs_review", False) or not meaning_fr_official,
             # S6-1 : distinct de "needs_review" ci-dessus (qui mélange confiance
             # ET fiabilité de la définition) — collect_targets() (pipeline/sense_fr.py)
             # a besoin du signal BRUT "définition non validée" seul, pour bloquer

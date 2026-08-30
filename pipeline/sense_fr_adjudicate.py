@@ -89,9 +89,9 @@ DECIDED_STATUSES = {"validated", "auto_strong", "auto_corroborated", "auto_judge
 
 
 def eligible_candidates(store: dict[str, dict]) -> tuple[list[dict], list[dict]]:
-    """Renvoie (candidats, exclus_sense_fit). S6-1 : une entrée `pending`
-    à cause d'un sense_fit "mismatch"/"doubtful" ou d'un translation_type
-    non littéral (voir sense_fr.blocks_auto_lock) reste `pending` par
+    """Renvoie (candidats, exclus). S6-1 : une entrée `pending` à cause
+    d'un sense_fit "mismatch"/"doubtful" ou d'un translation_type non
+    littéral (voir sense_fr.blocks_auto_lock) reste `pending` par
     construction, mais son statut seul ne le montre pas — sans ce filtre,
     Stage A pouvait la promouvoir en `auto_corroborated` dès que 2 preuves
     lexicales HORS LIGNE corroborent la même traduction déjà signalée
@@ -100,12 +100,28 @@ def eligible_candidates(store: dict[str, dict]) -> tuple[list[dict], list[dict]]
     mesuré : `give out`/`turn off`, verrouillés en `auto_joint` par
     pipeline/sense_fr_reassign.py avant l'introduction de cette porte).
     Stage B/C reprennent `residual`, dérivé de `candidats` — l'exclusion
-    couvre donc les trois passes en un seul endroit."""
+    couvre donc les trois passes en un seul endroit.
+
+    S6-2 (plan §6) : une entrée sans AUCUNE proposition (`fr is None`) est
+    aussi exclue ici, avant même sense_fit/translation_type. Ce n'est pas
+    un `pending` de TRADUCTION mais un `pending` STRUCTUREL — sense_id
+    WordNet introuvable (`agreement="sense_id_non_resolu"`, voir
+    sense_fr.classify_synset_key) ou bifurcation S5-3 `aucun_sens_adapte`
+    jamais rattachée à un sens (clés `unresolved.human_review.<hash>`,
+    voir senses.py::recover_no_sense). Sans cette porte, Stage C recevait
+    un dossier sans définition ni candidat pour un nom de personnage (ex.
+    "richard", "momo") ou une coquille ("wanna") et pouvait lui fabriquer
+    une traduction officielle — aucune ressource, aucun contexte ne
+    permettent de juger un sens qui n'existe pas. Reste `pending`, visible
+    dans sense_fr.pending_review_rows comme n'importe quelle autre entrée
+    `pending`, mais jamais soumise au juge."""
     candidates, excluded = [], []
     for e in store.values():
         if e["status"] not in ("pending", "auto_llm"):
             continue
-        if sense_fr.blocks_auto_lock(
+        if e.get("fr") is None:
+            excluded.append(e)
+        elif sense_fr.blocks_auto_lock(
             e.get("sense_fit"), e.get("translation_type"),
             definition_fr_fit=e.get("definition_fr_fit"),
             definition_needs_review=e.get("definition_needs_review", False),
@@ -647,6 +663,26 @@ def _judge_units(
     )
 
 
+def decide_stage_c(verdict: dict) -> tuple[str, str]:
+    """(nouveau_statut, raison) à partir d'un verdict Stage C — factorisé
+    hors de run() pour rester testable sans mock LLM (même motif que
+    decide_stage_a). S6-2 : `no_equivalent` applique la MÊME porte de
+    confiance que `auto_judged` — un verdict "aucun équivalent" à
+    confiance basse/moyenne n'est pas plus fiable qu'une traduction basse
+    confiance et ne doit pas verrouiller l'entrée hors de
+    sense_fr_review.csv (pending_review_rows ne filtre QUE
+    status=="pending"). `no_equivalent` à confiance haute reste un statut
+    TERMINAL par construction (pipeline/sense_fr_commit.py le documente
+    comme atteint normalement via une décision HUMAINE `decision=none`) ;
+    sans ce garde-fou, un LLM pouvait déclarer sans aucune confiance
+    requise qu'aucune traduction française n'existe jamais pour ce sens."""
+    if verdict["no_equivalent"] and verdict["confidence"] == "high":
+        return "no_equivalent", "stage_c:no_equivalent"
+    if verdict["confidence"] == "high":
+        return "auto_judged", "stage_c:judge_high_confidence"
+    return "pending", "stage_c:judge_low_confidence"
+
+
 def run_stage_c(
     store: dict, targets: list[dict], audits: dict[str, dict], model: str | None,
     occurrences_by_sense: dict[str, list[dict]], batch_size: int | None = None,
@@ -694,9 +730,13 @@ def run(
     candidates, sense_fit_excluded = eligible_candidates(store)
     if limit is not None:
         candidates = candidates[:limit]
+    n_structural = sum(1 for e in sense_fit_excluded if e.get("fr") is None)
+    n_incoherent = len(sense_fit_excluded) - n_structural
     print(f"{len(candidates)} entrée(s) `pending`/`auto_llm` à arbitrer (Stage A)"
-          + (f", {len(sense_fit_excluded)} exclue(s) (sense_fit/translation_type "
-             f"incohérent, voir plan S6-1)" if sense_fit_excluded else "") + ".")
+          + (f", {n_incoherent} exclue(s) (sense_fit/translation_type "
+             f"incohérent, voir plan S6-1)" if n_incoherent else "")
+          + (f", {n_structural} exclue(s) (pending structurel sans sens résolu, "
+             f"voir plan S6-2)" if n_structural else "") + ".")
 
     # Instantané figé AVANT toute mutation (voir polysemy_collision) —
     # garantit que --dry-run et un run réel calculent EXACTEMENT les
@@ -779,12 +819,7 @@ def run(
             audits[entry["key"]]["judge_fr"] = verdict["fr"]
             audits[entry["key"]]["judge_confidence"] = verdict["confidence"]
             audits[entry["key"]]["judge_reason"] = verdict["reason"]
-            if verdict["no_equivalent"]:
-                new_status, reason = "no_equivalent", "stage_c:no_equivalent"
-            elif verdict["confidence"] == "high":
-                new_status, reason = "auto_judged", "stage_c:judge_high_confidence"
-            else:
-                new_status, reason = "pending", "stage_c:judge_low_confidence"
+            new_status, reason = decide_stage_c(verdict)
             audits[entry["key"]]["decision"] = new_status
             audits[entry["key"]]["decided_by"] = f"auto_adjudicate/{reason}"
             if not dry_run:
