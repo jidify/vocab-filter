@@ -1,16 +1,19 @@
-"""Lot 3 — Magasin MWE à deux niveaux (plan Partie 2, point C).
+"""Lot 3 — Magasin MWE (plan Partie 2, point C).
 
 Une décision de TYPE (« "turn off" = phrasal_verb ») ne suffit pas pour
 distinguer "turn off the light" (lexicalisé) de "turn off the road" (littéral,
-même verbe+particule). Deux magasins permanents sous data/, sur le MÊME
-modèle que `data/sense_fr.jsonl` (voir `pipeline/sense_fr.py::load_store`/
-`write_store` et `pipeline/sense_fr_frontier.py::PROTECTED_STATUSES`) :
+même verbe+particule). Magasin permanent sous data/, sur le MÊME modèle que
+`data/sense_fr.jsonl` (voir `pipeline/sense_fr.py::load_store`/`write_store`
+et `pipeline/sense_fr_frontier.py::PROTECTED_STATUSES`) :
 
-- `data/mwe_type_decisions.jsonl` — ancien magasin de décisions globales,
-  conservé pour compatibilité/audit mais plus utilisé pour réserver un span.
 - `data/mwe_occurrence_decisions.jsonl` — clé = `occurrence_id|canon`. Toutes
   les sources passent par ce magasin ; le canon dans la clé empêche deux
   hypothèses lexicales concurrentes sur le même span de s'écraser.
+
+(L'ancien magasin de décisions de TYPE global, `data/mwe_type_decisions.jsonl`
+— une décision par idiome plutôt que par occurrence — a été supprimé : S3-1 l'a
+rendu mort, plus aucune réservation de span ne le consultait ; voir
+tools/migrate_sense_fr_mwe_keys.py pour la suppression du fichier.)
 
 Les deux sont consultés avant tout appel LLM (si une clé existe déjà — quel
 que soit son statut — on ne rejuge pas : c'est ce qui rend la reprise
@@ -52,14 +55,6 @@ def _load(path) -> dict[str, dict]:
 def _write(path, store: dict[str, dict]) -> None:
     config.ensure_data_dir()
     atomic.atomic_write_jsonl(path, (store[key] for key in sorted(store)))
-
-
-def load_type_store() -> dict[str, dict]:
-    return _load(config.MWE_TYPE_STORE_PATH)
-
-
-def write_type_store(store: dict[str, dict]) -> None:
-    _write(config.MWE_TYPE_STORE_PATH, store)
 
 
 def load_occurrence_store() -> dict[str, dict]:

@@ -122,7 +122,9 @@ class S6M2ModelProvenanceTests(unittest.TestCase):
         }
         translation = frontier.SenseTranslation(
             sense_id="x", fr=["mot"], translation_type="equivalence_directe",
-            sense_fit="ok", sense_fit_note="", source="reecrit", confidence="high",
+            sense_fit="ok", sense_fit_note="",
+            definition_fr_fit="ok", definition_fr_fit_note="",
+            source="reecrit", confidence="high",
         )
         entry = frontier.build_entry(target, translation, model="catgpt/dedicated")
         self.assertEqual(entry["evidence"]["frontier_model"], "catgpt/dedicated")
@@ -133,6 +135,7 @@ class S6M2ModelProvenanceTests(unittest.TestCase):
         decision = reassign.ReassignedDecision(
             key="hang.v.01", pos="v", sense_id="cling.v.03", fr=["s'accrocher"],
             translation_type="equivalence_directe", sense_fit="ok", sense_fit_note="",
+            definition_fr_fit="ok", definition_fr_fit_note="",
             confidence="high", reason="r",
         )
         inventory = [{"sense_id": "cling.v.03", "pos": "v", "definition": "..."}]
@@ -156,7 +159,9 @@ class S6M2BatchSizeOneSelectsUnitPathTests(LlmStoreIsolatedTests):
         self.assertEqual(batch_size, 1)
         with patch.object(frontier.llm_client.litellm, "batch_completion", side_effect=lambda **kw: [Response({
             "sense_id": "batch-size-one-probe", "fr": ["mot"], "translation_type": "equivalence_directe",
-            "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high",
+            "sense_fit": "ok", "sense_fit_note": "",
+            "definition_fr_fit": "ok", "definition_fr_fit_note": "",
+            "source": "reecrit", "confidence": "high",
         })]) as mocked:
             frontier._translate_units([item], "openai/m2-probe", mode_batch=mode_batch, batch_size=batch_size)
         self.assertIsNotNone(mocked.call_args)
@@ -205,7 +210,12 @@ class S6M2UnitGuardTests(unittest.TestCase):
 class S6M2CacheTests(LlmStoreIsolatedTests):
     def test_frontier_mock_calls_use_unit_and_batch_response_formats(self):
         item = (_target(), [], [])
-        unit_payload = {"sense_id": "x", "fr": ["mot"], "translation_type": "equivalence_directe", "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high"}
+        unit_payload = {
+            "sense_id": "x", "fr": ["mot"], "translation_type": "equivalence_directe",
+            "sense_fit": "ok", "sense_fit_note": "",
+            "definition_fr_fit": "ok", "definition_fr_fit_note": "",
+            "source": "reecrit", "confidence": "high",
+        }
         batch_payload = {"translations": [unit_payload, {**unit_payload, "sense_id": "y"}]}
         with patch.object(frontier.llm_client.litellm, "batch_completion", side_effect=lambda **kw: [Response(unit_payload)]):
             got, _ = frontier._translate_units([item], "openai/m", mode_batch=False, batch_size=1)
@@ -252,7 +262,12 @@ class S6M2CacheTests(LlmStoreIsolatedTests):
         self.assertEqual(calls, [(5, True, 2)])
 
     def test_reassign_mock_paths_parse_scalar_and_envelope(self):
-        decision = {"key": "x", "pos": "n", "sense_id": "x.n.01", "fr": ["mot"], "translation_type": "equivalence_directe", "sense_fit": "ok", "sense_fit_note": "", "confidence": "high", "reason": "ok"}
+        decision = {
+            "key": "x", "pos": "n", "sense_id": "x.n.01", "fr": ["mot"],
+            "translation_type": "equivalence_directe", "sense_fit": "ok", "sense_fit_note": "",
+            "definition_fr_fit": "ok", "definition_fr_fit_note": "",
+            "confidence": "high", "reason": "ok",
+        }
         item = (_target(), [], [])
         with patch.object(reassign.llm_client.litellm, "batch_completion", side_effect=lambda **kw: [Response(decision)]):
             got, _ = reassign._translate_units([item], "openai/m", mode_batch=False, batch_size=1)

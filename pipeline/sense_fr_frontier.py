@@ -87,6 +87,18 @@ class SenseTranslation(BaseModel):
     translation_type: Literal["equivalence_directe", "reformulation", "explicitation"]
     sense_fit: Literal["ok", "doubtful", "mismatch"]
     sense_fit_note: str
+    # S6-1 (plan §6) : axe DISTINCT de sense_fit — sense_fit demande "la
+    # définition colle-t-elle à l'USAGE montré par les phrases ?", jamais
+    # "ma propre traduction fr colle-t-elle à CETTE définition ?". Un
+    # sense_fit="ok" n'empêche pas une traduction qui contredit
+    # ouvertement la définition qu'on vient de lire (cas réels mesurés
+    # AVANT ce champ : "bring up" défini "amener d'une position basse à
+    # une position haute" mais traduit "évoquer" ; "check in" défini
+    # "annoncer son arrivée, ex. à l'hôtel" mais traduit "prendre des
+    # nouvelles de" — voir pipeline/sense_fr.blocks_auto_lock). Voir
+    # sense_fr.blocks_auto_lock pour la porte qui en découle.
+    definition_fr_fit: Literal["ok", "contradiction"]
+    definition_fr_fit_note: str
     source: Literal["choisi", "reecrit"]
     confidence: Literal["high", "medium", "low"]
 
@@ -112,6 +124,10 @@ SYSTEM_PROMPT = (
     "certains sens, tu recevras EN PLUS une ou plusieurs phrases RÉELLES d'un "
     "livre où le mot cible apparaît (mot cible indiqué séparément) — utilise-les "
     "en priorité : elles montrent l'usage réel, la glose seule ne le montre pas. "
+    "Pour certaines de ces phrases, tu recevras aussi la TRADUCTION FRANÇAISE "
+    "OFFICIELLE de cette phrase précise, publiée dans le livre bilingue — "
+    "regarde comment le mot cible y est effectivement rendu, sans pour autant "
+    "la recopier aveuglément (une phrase entière peut être reformulée). "
     "Pour certains sens, tu recevras aussi une liste de candidats de traduction "
     "MÉLANGÉS ET NON ÉTIQUETÉS provenant de plusieurs sources automatiques et "
     "humaines — aucune n'est fiable à 100%, ne fais confiance à aucune par "
@@ -138,6 +154,18 @@ SYSTEM_PROMPT = (
     "ce sens, réponds toujours \"ok\" (rien à vérifier) ;\n"
     "- sense_fit_note : une phrase courte justifiant sense_fit (chaîne vide si "
     "\"ok\" et évident) ;\n"
+    "- definition_fr_fit : QUESTION DIFFÉRENTE de sense_fit — ta PROPRE "
+    "traduction fr contredit-elle la définition donnée pour ce sense_id ? "
+    "\"contradiction\" si fr décrit clairement une autre idée que la "
+    "définition (ex. définition \"annoncer, publier\" mais fr \"tomber en "
+    "panne\"), même si par ailleurs sense_fit=\"ok\" (l'USAGE, lui, colle "
+    "bien au sens visé) — les deux jugements sont indépendants, ne les "
+    "confonds pas ; \"ok\" sinon. Si une traduction française officielle de "
+    "phrase est fournie et qu'elle contredit elle aussi la définition, "
+    "traite ça comme un indice supplémentaire de \"contradiction\", pas "
+    "comme une preuve à recopier telle quelle ;\n"
+    "- definition_fr_fit_note : une phrase courte justifiant definition_fr_fit "
+    "(chaîne vide si \"ok\" et évident) ;\n"
     "- source : \"choisi\" si fr[0] reprend un des candidats fournis pour ce "
     "sens (même avec une légère variante orthographique ou grammaticale), "
     "\"reecrit\" si tu proposes une traduction absente de la liste fournie, ou "
@@ -152,7 +180,12 @@ SYSTEM_PROMPT = (
 
 ITEM_HEADER = "- {sense_id} | {pos_label} | {lemmas} | {definition}"
 ITEM_OCCURRENCE = '    contexte : "{context}" || mot cible dans ce contexte : "{target_surface}"'
+ITEM_OCCURRENCE_FR = '        traduction officielle de cette phrase : "{french}"'
 ITEM_CANDIDATES = "    candidats connus (non fiables, mélangés, ordre sans signification) : {candidates}"
+ITEM_DEFINITION_UNRELIABLE = (
+    "    ATTENTION : cette définition n'a pas été validée en amont — "
+    "vérifie-la toi-même contre les phrases avant de t'y fier."
+)
 
 POS_LABELS = {"n": "nom", "v": "verbe", "a": "adjectif", "s": "adjectif", "r": "adverbe", "mwe": "expression"}
 
@@ -164,8 +197,12 @@ def _format_item(target: dict, occurrences: list[dict], candidates: list[str]) -
         lemmas="/".join(target["lemmas_en"]),
         definition=target.get("definition_en") or "?",
     )]
+    if target.get("definition_needs_review"):
+        lines.append(ITEM_DEFINITION_UNRELIABLE)
     for occ in occurrences:
         lines.append(ITEM_OCCURRENCE.format(context=occ["context"], target_surface=occ["target_surface"]))
+        if occ.get("french"):
+            lines.append(ITEM_OCCURRENCE_FR.format(french=occ["french"]))
     if candidates:
         lines.append(ITEM_CANDIDATES.format(candidates=" ; ".join(candidates)))
     return "\n".join(lines)
@@ -298,8 +335,14 @@ def _target_payload(target: dict, occs: list[dict], candidates: list[str]) -> di
     return {
         "kind": target["kind"], "lemmas_en": sorted(target["lemmas_en"]),
         "pos": target.get("pos"), "definition_en": target.get("definition_en"),
+        # S6-1 : ces deux champs changent le texte réellement envoyé au
+        # modèle (voir _format_item) — absents d'ici, un changement de l'un
+        # ou l'autre entre deux runs continuerait de servir une réponse
+        # périmée depuis le magasin LLM unitaire (pipeline/llm_store.py).
+        "definition_needs_review": target.get("definition_needs_review", False),
         "occurrences": sorted(
-            ({"context": o["context"], "target_surface": o["target_surface"]} for o in occs),
+            ({"context": o["context"], "target_surface": o["target_surface"],
+              "french": o.get("french")} for o in occs),
             key=lambda o: o["context"],
         ),
         "candidates": sorted(candidates),
@@ -392,10 +435,15 @@ def build_entry(target: dict, translation: SenseTranslation | None, *, model: st
     le livre courant."""
     key = target["key"]
     omw, wonef = _resources_for(target)
+    definition_needs_review = target.get("definition_needs_review", False)
     entry_base = {
         "key": key, "kind": target["kind"], "lemmas_en": target["lemmas_en"],
         "pos": target.get("pos"), "definition_en": target.get("definition_en"),
         "occurrences": target.get("occurrences", 0),
+        # S6-1 : persisté sur l'entrée (pas seulement lu depuis `target` à cet
+        # instant) pour que pipeline/verify_sense_coherence.py puisse auditer
+        # le magasin après coup, indépendamment de tout run courant.
+        "definition_needs_review": definition_needs_review,
     }
 
     if translation is None or not translation.fr:
@@ -403,6 +451,7 @@ def build_entry(target: dict, translation: SenseTranslation | None, *, model: st
             "fr": None, "fr_alt": [], "status": "pending",
             "agreement": "frontier_sans_reponse",
             "translation_type": None, "sense_fit": None, "sense_fit_note": "",
+            "definition_fr_fit": None, "definition_fr_fit_note": "",
             "source": None,
             "evidence": {"omw_fr": omw, "wonef": wonef, "frontier_model": None, "frontier_confidence": None},
             "decided_at": None, "decided_by": None, "note": "",
@@ -414,15 +463,20 @@ def build_entry(target: dict, translation: SenseTranslation | None, *, model: st
     proposed_stems = {senses.fr_stem(c) for c in translation.fr}
     overlap = bool(resource_stems & proposed_stems)
 
-    # Ordre des portes : d'abord la fidélité du SENS lui-même (sense_fit,
-    # translation_type — un sense_id douteux ou une reformulation ne
-    # doivent jamais être verrouillés automatiquement, quelle que soit la
-    # confiance du modèle ou l'accord des ressources), puis la confiance
-    # déclarée, puis enfin la corroboration par ressource — inchangée par
-    # rapport à la version précédente de ce module. Porte partagée avec
-    # sense_fr_reassign.py et sense_fr_adjudicate.py (plan §6, S6-1) :
-    # voir sense_fr.blocks_auto_lock.
-    block_reason = sense_fr.blocks_auto_lock(translation.sense_fit, translation.translation_type)
+    # Ordre des portes : d'abord la fiabilité de la définition elle-même
+    # (definition_needs_review, déterministe, calculée en amont par S3-3/S4
+    # — jamais par le modèle), puis la fidélité du SENS (sense_fit), puis
+    # la cohérence definition<->fr (definition_fr_fit — un axe DISTINCT de
+    # sense_fit, voir SenseTranslation.definition_fr_fit), puis
+    # translation_type, puis enfin la confiance déclarée et la
+    # corroboration par ressource — inchangé par rapport à la version
+    # précédente de ce module. Porte partagée avec sense_fr_reassign.py et
+    # sense_fr_adjudicate.py (plan §6, S6-1) : voir sense_fr.blocks_auto_lock.
+    block_reason = sense_fr.blocks_auto_lock(
+        translation.sense_fit, translation.translation_type,
+        definition_fr_fit=translation.definition_fr_fit,
+        definition_needs_review=definition_needs_review,
+    )
     if block_reason:
         status, agreement = "pending", block_reason
     elif translation.confidence == "low":
@@ -439,6 +493,8 @@ def build_entry(target: dict, translation: SenseTranslation | None, *, model: st
         "translation_type": translation.translation_type,
         "sense_fit": translation.sense_fit,
         "sense_fit_note": translation.sense_fit_note,
+        "definition_fr_fit": translation.definition_fr_fit,
+        "definition_fr_fit_note": translation.definition_fr_fit_note,
         "source": translation.source,
         "evidence": {
             "omw_fr": omw, "wonef": wonef,
@@ -485,7 +541,10 @@ def write_sense_id_suspects_csv(store: dict[str, dict], occurrences_by_sense: di
 # ============================================================
 
 
-def run(model: str | None = None, limit: int | None = None, dry_run: bool = False) -> int:
+def run(
+    model: str | None = None, limit: int | None = None, dry_run: bool = False,
+    canon: list[str] | None = None,
+) -> int:
     task = task_config("S6-translate-frontier")
     model = model or task.model
     config.require_frontier_model(model, "S6-translate-frontier")
@@ -508,6 +567,16 @@ def run(model: str | None = None, limit: int | None = None, dry_run: bool = Fals
     store = sense_fr.load_store()
     n_protected = sum(1 for t in resolved if is_protected(store.get(t["key"])))
     resolved = [t for t in resolved if not is_protected(store.get(t["key"]))]
+
+    # S6-1 : vérification ciblée sans tout relancer — `resolved` place les
+    # ~950 sens de mots AVANT les ~500 unités MWE (ordre d'insertion de
+    # collect_targets()), donc un simple `--limit` n'atteint jamais une MWE
+    # nommée sans traiter la quasi-totalité des mots en premier. `--canon`
+    # filtre par lemme AVANT `limit`, pour valider un sous-ensemble nommé
+    # (ex. look after/give out/turn off/work out, plan §6) à coût borné.
+    if canon:
+        canon_set = {c.casefold() for c in canon}
+        resolved = [t for t in resolved if any(l.casefold() in canon_set for l in t["lemmas_en"])]
 
     if limit is not None:
         resolved = resolved[:limit]
@@ -563,8 +632,10 @@ def run(model: str | None = None, limit: int | None = None, dry_run: bool = Fals
         store[target["key"]] = {
             "key": target["key"], "kind": "synset", "lemmas_en": target["lemmas_en"],
             "pos": None, "definition_en": None, "occurrences": target.get("occurrences", 0),
+            "definition_needs_review": target.get("definition_needs_review", False),
             "fr": None, "fr_alt": [], "status": "pending", "agreement": "sense_id_non_resolu",
             "translation_type": None, "sense_fit": None, "sense_fit_note": "",
+            "definition_fr_fit": None, "definition_fr_fit_note": "",
             "source": None,
             "evidence": {}, "decided_at": None, "decided_by": None, "note": "",
         }
@@ -613,5 +684,11 @@ if __name__ == "__main__":
         "--dry-run", action="store_true",
         help="Appelle le modèle et affiche le résultat/coût, mais n'écrit rien sur disque.",
     )
+    parser.add_argument(
+        "--canon", action="append", default=None,
+        help="Ne traite que les cibles dont un lemme_en correspond exactement (répétable, "
+             "insensible à la casse) — pour valider un sous-ensemble nommé (ex. --canon "
+             "'give out' --canon 'look after') sans tout relancer.",
+    )
     args = parser.parse_args()
-    raise SystemExit(run(model=args.model, limit=args.limit, dry_run=args.dry_run))
+    raise SystemExit(run(model=args.model, limit=args.limit, dry_run=args.dry_run, canon=args.canon))

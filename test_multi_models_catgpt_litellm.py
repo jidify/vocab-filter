@@ -120,7 +120,9 @@ class NoRegressionOnJsonSchemaModelsTests(_ProviderMapIsolation, _LlmStoreIsolat
     def test_frontier_openai_model_keeps_pydantic_response_format(self):
         item = (_target(), [], [])
         payload = {"sense_id": "x", "fr": ["battre"], "translation_type": "equivalence_directe",
-                   "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high"}
+                   "sense_fit": "ok", "sense_fit_note": "",
+                   "definition_fr_fit": "ok", "definition_fr_fit_note": "",
+                   "source": "reecrit", "confidence": "high"}
         with patch.object(frontier.llm_client.litellm, "batch_completion",
                           side_effect=lambda **kw: [Response(payload)]) as mocked:
             frontier._translate_units(
@@ -156,9 +158,13 @@ class CatgptEndToEndTests(_ProviderMapIsolation, _LlmStoreIsolation):
         items = [(_target("x"), [], []), (_target("y"), [], [])]
         payload = {"translations": [
             {"sense_id": "x", "fr": ["battre"], "translation_type": "equivalence_directe",
-             "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high"},
+             "sense_fit": "ok", "sense_fit_note": "",
+             "definition_fr_fit": "ok", "definition_fr_fit_note": "",
+             "source": "reecrit", "confidence": "high"},
             {"sense_id": "y", "fr": ["frapper"], "translation_type": "equivalence_directe",
-             "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high"},
+             "sense_fit": "ok", "sense_fit_note": "",
+             "definition_fr_fit": "ok", "definition_fr_fit_note": "",
+             "source": "reecrit", "confidence": "high"},
         ]}
         captured = {}
 

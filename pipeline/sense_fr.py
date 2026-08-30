@@ -383,8 +383,22 @@ def collect_targets() -> dict[str, dict]:
 
     for u in aggregate_and_score(build_records()):
         key = u["sense_id"]
+        # S6-1 : identité complète — un sense_id issu d'une correction
+        # manuelle (data/manual_corrections.jsonl::new_key, voir score.py::
+        # build_records) peut être une clé "mwe:..." plutôt qu'un vrai
+        # sense_id WordNet (ex. "mwe:pig smash:semi_fige", un jeu inventé
+        # par l'auteur, sans aucune entrée WordNet possible). Classer cette
+        # clé "kind": "synset" par défaut (comme avant ce correctif) fait
+        # échouer nwn.synset(key) plus loin (collect_frontier_targets /
+        # classify_synset_key) et route silencieusement l'entrée vers
+        # "sense_id_non_resolu" pour toujours, sans jamais appeler le
+        # modèle — cas réel mesuré : "beat"/"pig smash" bloqués ainsi
+        # (data/sense_fr.jsonl, status=pending, kind=synset AVANT ce
+        # correctif). kind doit suivre la forme de la clé, pas son origine.
+        kind = "mwe" if key.startswith("mwe:") else "synset"
         entry = targets.setdefault(key, {
-            "key": key, "kind": "synset", "lemmas_en": [], "occurrences": 0,
+            "key": key, "kind": kind, "lemmas_en": [], "occurrences": 0,
+            **({"pos": u.get("pos"), "definition_en": u.get("definition_en")} if kind == "mwe" else {}),
         })
         if u["canonical_form"] not in entry["lemmas_en"]:
             entry["lemmas_en"].append(u["canonical_form"])
@@ -403,6 +417,13 @@ def collect_targets() -> dict[str, dict]:
             "key": key, "kind": "mwe", "lemmas_en": [u["canonical_form"]], "pos": u.get("pos"),
             "occurrences": u["occurrences"], "definition_en": u["definition_en"],
             "mwe_label": u.get("label"),
+            # S6-1 : "définition validée" (plan §6) — calculé par S3-3/S4
+            # (select.py, voir sa définition_needs_review) et jusqu'ici
+            # jamais transmis à S6 ; sans ce champ, une définition que S4
+            # a lui-même signalée non fiable pouvait quand même fonder un
+            # verrouillage automatique dès que le modèle la trouvait
+            # cohérente avec sa propre traduction (voir sense_fr.blocks_auto_lock).
+            "definition_needs_review": u.get("definition_needs_review", False),
         }
 
     return targets
@@ -667,19 +688,55 @@ def format_occurrences_en(
 # ============================================================
 
 
-def blocks_auto_lock(sense_fit: str | None, translation_type: str | None) -> str | None:
+def blocks_auto_lock(
+    sense_fit: str | None, translation_type: str | None, *,
+    definition_fr_fit: str | None = None, definition_needs_review: bool = False,
+) -> str | None:
     """Renvoie une raison (agreement) courte si le verrouillage automatique
-    doit être refusé, sinon None. `sense_fit == "mismatch"/"doubtful"`
-    signale que la définition imposée ne correspond pas à l'usage réel
-    (auto-évaluation du modèle, jamais utilisée seule comme PREUVE
-    positive — voir le plan §5.5 — mais suffisante comme signal NÉGATIF
-    bloquant, par prudence) ; `translation_type != "equivalence_directe"`
-    signale une reformulation/explicitation, elle aussi incompatible avec
-    un verrouillage sans relecture humaine."""
+    doit être refusé, sinon None.
+
+    `sense_fit == "mismatch"/"doubtful"` signale que la définition imposée
+    ne correspond pas à l'USAGE réel (auto-évaluation du modèle, jamais
+    utilisée seule comme PREUVE positive — voir le plan §5.5 — mais
+    suffisante comme signal NÉGATIF bloquant, par prudence) ;
+    `translation_type != "equivalence_directe"` signale une reformulation/
+    explicitation, elle aussi incompatible avec un verrouillage sans
+    relecture humaine.
+
+    `definition_fr_fit == "contradiction"` (plan §6, S6-1) est un axe
+    DISTINCT de `sense_fit` : `sense_fit` demande "la définition colle-
+    t-elle à l'usage montré par les phrases ?", jamais "ma propre
+    traduction fr colle-t-elle à cette définition ?" — un modèle peut
+    répondre sense_fit="ok" (l'usage correspond bien au sens visé) tout en
+    proposant un fr qui contredit la définition qu'on lui a montrée (cas
+    réel mesuré, magasin AVANT ce correctif : `bring up` défini "to bring
+    from a lower to a higher position" mais traduit "évoquer" ; `check in`
+    défini "announce one's arrival at hotels or airports" mais traduit
+    "prendre des nouvelles de" ; `get a grip` défini "to take hold of, as
+    with the hand" mais traduit "reprends-toi" ; `keep up` défini "to
+    maintain; to preserve" mais traduit "m'empêche de dormir" — les
+    quatre verrouillés `auto_llm`, sense_fit="ok", AVANT ce correctif :
+    voir data/sense_fr.jsonl avant la migration tools/migrate_sense_fr_mwe_keys.py).
+    Sans cet axe séparé, "compensation silencieuse : mauvaise définition,
+    bonne traduction" (ou l'inverse) reste indétectable dès que le modèle
+    ne remet jamais lui-même sa propre définition en question.
+
+    `definition_needs_review` (plan §6 : "définition validée") est un
+    troisième axe, DÉTERMINISTE et calculé EN AMONT par S3-3/S4 — jamais
+    par le modèle appelé ici : quand la définition elle-même n'a pas été
+    validée (select.py::definition_needs_review, propagé par
+    collect_targets()), aucune confiance déclarée du modèle sur sense_fit
+    ou definition_fr_fit ne peut compenser une définition dont la fiabilité
+    est déjà, structurellement, mise en doute — voir le plan §0 : "une
+    grande marge ne vaut pas preuve absolue"."""
+    if definition_needs_review:
+        return "definition_non_validee"
     if sense_fit == "mismatch":
         return "sense_id_suspect"
     if sense_fit == "doubtful":
         return "sense_id_douteux"
+    if definition_fr_fit == "contradiction":
+        return "definition_fr_contradiction"
     if translation_type is not None and translation_type != "equivalence_directe":
         return f"frontier_{translation_type}"
     return None

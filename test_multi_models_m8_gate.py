@@ -59,7 +59,9 @@ class LiteLlmProviderMatrixTests(unittest.TestCase):
     def test_frontier_batch_completion_accepts_ollama_model(self):
         item = (_target(), [], [])
         payload = {"sense_id": "x", "fr": ["battre"], "translation_type": "equivalence_directe",
-                   "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high"}
+                   "sense_fit": "ok", "sense_fit_note": "",
+                   "definition_fr_fit": "ok", "definition_fr_fit_note": "",
+                   "source": "reecrit", "confidence": "high"}
         with patch.object(frontier.llm_client.litellm, "batch_completion",
                           side_effect=lambda **kw: [Response(payload)]) as mocked:
             got, _ = frontier._translate_units(
@@ -72,7 +74,9 @@ class LiteLlmProviderMatrixTests(unittest.TestCase):
         item = (_target(), [], [])
         decision = {"key": "x", "pos": "n", "sense_id": "x.n.01", "fr": ["mot"],
                     "translation_type": "equivalence_directe", "sense_fit": "ok",
-                    "sense_fit_note": "", "confidence": "high", "reason": "ok"}
+                    "sense_fit_note": "",
+                    "definition_fr_fit": "ok", "definition_fr_fit_note": "",
+                    "confidence": "high", "reason": "ok"}
         with patch.object(reassign.llm_client.litellm, "batch_completion",
                           side_effect=lambda **kw: [Response(decision)]) as mocked:
             got, _ = reassign._translate_units(

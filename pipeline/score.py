@@ -472,6 +472,12 @@ def build_mwe_units() -> list[dict]:
             "sense_surprise": 0.5,
             "confidence": r["confidence"],
             "needs_review": r["confidence"] < 0.6 or r.get("definition_needs_review", False),
+            # S6-1 : distinct de "needs_review" ci-dessus (qui mélange confiance
+            # ET fiabilité de la définition) — collect_targets() (pipeline/sense_fr.py)
+            # a besoin du signal BRUT "définition non validée" seul, pour bloquer
+            # un verrouillage automatique côté S6 indépendamment de tout ce que
+            # le modèle de traduction déclare lui-même (voir sense_fr.blocks_auto_lock).
+            "definition_needs_review": r.get("definition_needs_review", False),
         })
 
     for u in units:

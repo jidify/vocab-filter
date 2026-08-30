@@ -51,7 +51,9 @@ class BatchSizeDecorrelationTests(unittest.TestCase):
         items = [(_target(str(i)), [], []) for i in range(4)]
         payload = {"translations": [
             {"sense_id": str(i), "fr": ["mot"], "translation_type": "equivalence_directe",
-             "sense_fit": "ok", "sense_fit_note": "", "source": "reecrit", "confidence": "high"}
+             "sense_fit": "ok", "sense_fit_note": "",
+             "definition_fr_fit": "ok", "definition_fr_fit_note": "",
+             "source": "reecrit", "confidence": "high"}
             for i in range(4)
         ]}
         with patch.object(frontier.llm_client.litellm, "batch_completion",
@@ -68,6 +70,7 @@ class BatchSizeDecorrelationTests(unittest.TestCase):
         decisions = [
             {"key": str(i), "pos": "n", "sense_id": f"{i}.n.01", "fr": ["mot"],
              "translation_type": "equivalence_directe", "sense_fit": "ok", "sense_fit_note": "",
+             "definition_fr_fit": "ok", "definition_fr_fit_note": "",
              "confidence": "high", "reason": "ok"}
             for i in range(4)
         ]

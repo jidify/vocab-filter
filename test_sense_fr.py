@@ -46,6 +46,91 @@ class CollectTargetsMweIdentityTests(unittest.TestCase):
 
         self.assertIsNone(targets["mwe:wing it:idiome"]["pos"])
 
+    def test_mwe_target_carries_definition_needs_review_through(self):
+        fake_mwe_unit = {
+            "canonical_form": "get a grip", "pos": "OTHER", "sense_id": "mwe-custom-v1:x",
+            "unit_key": "mwe:get a grip:other:mwe-custom-v1:x", "occurrences": 1,
+            "definition_en": "To come to one's senses.", "label": "idiome",
+            "definition_needs_review": True,
+        }
+        with patch("pipeline.score.build_records", return_value=[]), \
+             patch("pipeline.score.aggregate_and_score", return_value=[]), \
+             patch("pipeline.score.build_mwe_units", return_value=[fake_mwe_unit]):
+            targets = sense_fr.collect_targets()
+
+        self.assertTrue(targets["mwe:get a grip:other:mwe-custom-v1:x"]["definition_needs_review"])
+
+    def test_defaults_definition_needs_review_to_false_when_absent(self):
+        fake_mwe_unit = {
+            "canonical_form": "give out", "pos": "VERB", "sense_id": "fail.v.04",
+            "unit_key": "mwe:give out:verb:fail.v.04", "occurrences": 1,
+            "definition_en": "To stop operating.", "label": "phrasal_verb",
+        }
+        with patch("pipeline.score.build_records", return_value=[]), \
+             patch("pipeline.score.aggregate_and_score", return_value=[]), \
+             patch("pipeline.score.build_mwe_units", return_value=[fake_mwe_unit]):
+            targets = sense_fr.collect_targets()
+
+        self.assertFalse(targets["mwe:give out:verb:fail.v.04"]["definition_needs_review"])
+
+
+class CollectTargetsManualCorrectionMweKindTests(unittest.TestCase):
+    """S6-1 : une clé "mwe:..." atteinte via une correction manuelle
+    (score.py::load_manual_corrections, ex. "mwe:pig smash:semi_fige", un
+    jeu inventé par l'auteur sans aucune entrée WordNet) doit être classée
+    kind="mwe", jamais kind="synset" par défaut — sinon
+    collect_frontier_targets() tente nwn.synset("mwe:pig smash:semi_fige"),
+    échoue, et la route silencieusement vers "sense_id_non_resolu" pour
+    toujours, sans jamais appeler le modèle (cas réel mesuré : "beat" et
+    "pig smash" bloqués ainsi dans data/sense_fr.jsonl avant ce correctif)."""
+
+    def test_mwe_style_sense_id_from_manual_correction_is_kind_mwe(self):
+        fake_word_unit = {
+            "canonical_form": "pig smash", "sense_id": "mwe:pig smash:semi_fige",
+            "occurrences": 1, "pos": None, "definition_en": "A game name invented by the author.",
+        }
+        with patch("pipeline.score.build_records", return_value=[]), \
+             patch("pipeline.score.aggregate_and_score", return_value=[fake_word_unit]), \
+             patch("pipeline.score.build_mwe_units", return_value=[]):
+            targets = sense_fr.collect_targets()
+
+        target = targets["mwe:pig smash:semi_fige"]
+        self.assertEqual(target["kind"], "mwe")
+        self.assertEqual(target["definition_en"], "A game name invented by the author.")
+
+    def test_real_wordnet_sense_id_stays_kind_synset(self):
+        fake_word_unit = {
+            "canonical_form": "attend", "sense_id": "attend.v.02",
+            "occurrences": 1, "pos": "v", "definition_en": "take charge of or deal with",
+        }
+        with patch("pipeline.score.build_records", return_value=[]), \
+             patch("pipeline.score.aggregate_and_score", return_value=[fake_word_unit]), \
+             patch("pipeline.score.build_mwe_units", return_value=[]):
+            targets = sense_fr.collect_targets()
+
+        self.assertEqual(targets["attend.v.02"]["kind"], "synset")
+
+
+class BlocksAutoLockExtendedAxesTests(unittest.TestCase):
+    def test_definition_fr_fit_contradiction_blocks_even_with_ok_sense_fit(self):
+        self.assertEqual(
+            sense_fr.blocks_auto_lock("ok", "equivalence_directe", definition_fr_fit="contradiction"),
+            "definition_fr_contradiction",
+        )
+
+    def test_definition_needs_review_blocks_even_with_ok_everything(self):
+        self.assertEqual(
+            sense_fr.blocks_auto_lock(
+                "ok", "equivalence_directe", definition_fr_fit="ok", definition_needs_review=True,
+            ),
+            "definition_non_validee",
+        )
+
+    def test_all_ok_and_reviewed_never_blocks(self):
+        self.assertIsNone(sense_fr.blocks_auto_lock(
+            "ok", "equivalence_directe", definition_fr_fit="ok", definition_needs_review=False,
+        ))
+
 
 class ClassifyMweKeyPosTests(unittest.TestCase):
     def test_uses_target_pos_instead_of_hardcoded_none(self):

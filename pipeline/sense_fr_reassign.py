@@ -178,6 +178,12 @@ class ReassignedDecision(BaseModel):
     # les phrases fournies ?
     sense_fit: Literal["ok", "doubtful", "mismatch"]
     sense_fit_note: str
+    # S6-1 (plan §6) : même axe DISTINCT de sense_fit que
+    # sense_fr_frontier.SenseTranslation.definition_fr_fit — la traduction
+    # fr proposée contredit-elle la définition affichée, indépendamment de
+    # savoir si l'USAGE colle au sens visé ? Voir sense_fr.blocks_auto_lock.
+    definition_fr_fit: Literal["ok", "contradiction"]
+    definition_fr_fit_note: str
     confidence: Literal["high", "medium", "low"]
     reason: str  # justification courte pour l'audit humain, jamais affichée comme traduction
 
@@ -234,6 +240,13 @@ SYSTEM_PROMPT = (
     "corriger la définition séparément ;\n"
     "- sense_fit_note : une phrase courte justifiant sense_fit (chaîne vide "
     "si \"ok\" et évident) ;\n"
+    "- definition_fr_fit : QUESTION DIFFÉRENTE de sense_fit — ta PROPRE "
+    "traduction fr contredit-elle la \"définition actuelle\" affichée (même "
+    "signalée pas fiable) ? \"contradiction\" si fr décrit clairement une "
+    "autre idée que cette définition, même si par ailleurs sense_fit=\"ok\" ; "
+    "\"ok\" sinon ;\n"
+    "- definition_fr_fit_note : une phrase courte justifiant definition_fr_fit "
+    "(chaîne vide si \"ok\" et évident) ;\n"
     "- confidence : \"low\" si le choix reste incertain même après relecture "
     "des phrases ;\n"
     "- reason : une phrase courte justifiant le choix de POS/sense_id, pour "
@@ -390,6 +403,8 @@ def _build_promoted_entry(entry: dict, decision: ReassignedDecision) -> dict:
         "agreement": "auto_joint_confirme",
         "translation_type": decision.translation_type,
         "sense_fit": decision.sense_fit, "sense_fit_note": decision.sense_fit_note,
+        "definition_fr_fit": decision.definition_fr_fit,
+        "definition_fr_fit_note": decision.definition_fr_fit_note,
         "decided_at": date.today().isoformat(), "decided_by": "auto_joint",
         "note": decision.reason,
     })
@@ -414,7 +429,10 @@ def apply_decision(
     traduction, quelle que soit sa propre cohérence avec la définition
     affichée (voir la docstring de ReassignedDecision.sense_fit pour le cas
     réel qui a motivé cette porte)."""
-    block_reason = sense_fr.blocks_auto_lock(decision.sense_fit, decision.translation_type)
+    block_reason = sense_fr.blocks_auto_lock(
+        decision.sense_fit, decision.translation_type,
+        definition_fr_fit=decision.definition_fr_fit,
+    )
     if block_reason:
         return "audit", _audit_row(
             entry, decision, decision.sense_id, contexte_en,
@@ -476,6 +494,8 @@ def _build_reassigned_entry(
         "agreement": f"auto_joint_reassigne_depuis:{entry['key']}",
         "translation_type": decision.translation_type,
         "sense_fit": decision.sense_fit, "sense_fit_note": decision.sense_fit_note,
+        "definition_fr_fit": decision.definition_fr_fit,
+        "definition_fr_fit_note": decision.definition_fr_fit_note,
         "source": None,
         "evidence": {
             "omw_fr": [], "wonef": [], "frontier_model": model or config.SENSE_FR_FRONTIER_MODEL,

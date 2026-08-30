@@ -233,11 +233,13 @@ MANUAL_CORRECTIONS_PATH = DATA_DIR / "manual_corrections.jsonl"
 # manuelle : plusieurs workflows, lexique piloté par les données".
 CUSTOM_LEXICON_PATH = DATA_DIR / "custom_lexicon.jsonl"
 
-# Lot 3 — magasin MWE à deux niveaux (plan Partie 2, point C), même modèle
-# que SENSE_FR_STORE_PATH : permanents, versionnés, réutilisés d'un livre à
-# l'autre, jamais écrasés pour une entrée `status: validated`. Voir
-# pipeline/mwe_judge.py.
-MWE_TYPE_STORE_PATH = DATA_DIR / "mwe_type_decisions.jsonl"       # clé = idiome
+# Lot 3 — magasin MWE (plan Partie 2, point C), même modèle que
+# SENSE_FR_STORE_PATH : permanent, versionné, réutilisé d'un livre à
+# l'autre, jamais écrasé pour une entrée `status: validated`. Voir
+# pipeline/mwe_judge.py. (L'ancien magasin de décisions de TYPE global,
+# data/mwe_type_decisions.jsonl, a été supprimé — S3-1 l'a rendu mort :
+# plus aucune réservation de span ne le consultait, voir
+# tools/migrate_sense_fr_mwe_keys.py.)
 MWE_OCCURRENCE_STORE_PATH = DATA_DIR / "mwe_occurrence_decisions.jsonl"  # clé = occurrence_id
 
 # Magasin de RÉSULTATS D'APPEL LLM, unitaire — sous les magasins métier
@@ -304,7 +306,16 @@ SENSE_FR_LLM_MIN_AGREE = 2  # sur SENSE_FR_LLM_DRAWS, pour retenir un consensus 
 # (context_evidence.model dans data/sense_fr.jsonl avant cette fusion).
 SENSE_FR_FRONTIER_MODEL = "openai/gpt-5-mini"
 SENSE_FR_FRONTIER_BATCH_SIZE = 40   # sens par appel — items alourdis par les phrases + candidats
-SENSE_FR_FRONTIER_MAX_WORKERS = 10  # lots traités en parallèle (litellm.batch_completion)
+# Lots traités en parallèle (litellm.batch_completion) — même motif que
+# CATGPT_TIMEOUT ci-dessus : env-overridable, pas seulement une constante en
+# dur. Nécessaire pour catgpt (passerelle locale, latence par appel bien plus
+# haute qu'un provider hébergé) : 10 lots simultanés de 40+ items contre un
+# timeout par appel de plusieurs minutes revient à ouvrir jusqu'à 10 requêtes
+# concurrentes vers le même service local — un run séquentiel
+# (SENSE_FR_FRONTIER_MAX_WORKERS=1) évite la saturation/les timeouts en
+# cascade que la valeur par défaut (pensée pour un provider hébergé
+# multi-tenant) ne pose pas côté catgpt.
+SENSE_FR_FRONTIER_MAX_WORKERS = int(os.getenv("SENSE_FR_FRONTIER_MAX_WORKERS", "10"))
 SENSE_FR_FRONTIER_MAX_OCCURRENCES = 2   # phrases distinctes présentées par sens (463/900 sens
                                          # du magasin actuel n'en ont de toute façon qu'une seule)
 

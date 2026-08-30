@@ -16,6 +16,7 @@ def _decision(**overrides) -> ReassignedDecision:
     base = dict(
         key="k", pos="n", sense_id=None, fr=["mot"],
         translation_type="equivalence_directe", sense_fit="ok", sense_fit_note="",
+        definition_fr_fit="ok", definition_fr_fit_note="",
         confidence="high", reason="r",
     )
     base.update(overrides)
@@ -193,6 +194,32 @@ class ApplyDecisionTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertIn("verrouillage automatique refusé", row["note"])
         # le magasin n'est PAS modifié : ni verrouillé, ni statut changé.
+        self.assertEqual(store[entry["key"]], entry)
+
+    def test_definition_fr_contradiction_blocks_even_with_ok_sense_fit(self):
+        """Axe DISTINCT de sense_fit (plan §6, S6-1) : la traduction fr
+        contredit la définition affichée alors même que sense_fit="ok"
+        (l'usage colle bien à un sens, mais pas à cette traduction)."""
+        entry = {
+            "key": "mwe:keep up:phrasal_verb", "kind": "mwe", "pos": None,
+            "lemmas_en": ["keep up"], "occurrences": 1,
+            "definition_en": "To maintain; to preserve.",
+            "agreement": "sense_id_suspect", "status": "pending",
+        }
+        store = {entry["key"]: dict(entry)}
+        decision = _decision(
+            key=entry["key"], pos="mwe", sense_id=None,
+            fr=["m'empêche de dormir"], sense_fit="ok",
+            definition_fr_fit="contradiction",
+            definition_fr_fit_note="La définition parle de maintenir/préserver, "
+                                    "pas d'empêcher de dormir.",
+        )
+
+        group, row = apply_decision(entry, decision, [], "ctx", store)
+
+        self.assertEqual(group, "audit")
+        self.assertIsNotNone(row)
+        self.assertIn("definition_fr_contradiction", row["note"])
         self.assertEqual(store[entry["key"]], entry)
 
     def test_doubtful_sense_fit_never_locks_a_synset_reassignment(self):

@@ -105,7 +105,11 @@ def eligible_candidates(store: dict[str, dict]) -> tuple[list[dict], list[dict]]
     for e in store.values():
         if e["status"] not in ("pending", "auto_llm"):
             continue
-        if sense_fr.blocks_auto_lock(e.get("sense_fit"), e.get("translation_type")):
+        if sense_fr.blocks_auto_lock(
+            e.get("sense_fit"), e.get("translation_type"),
+            definition_fr_fit=e.get("definition_fr_fit"),
+            definition_needs_review=e.get("definition_needs_review", False),
+        ):
             excluded.append(e)
         else:
             candidates.append(e)
@@ -335,7 +339,11 @@ def decide_stage_a(entry: dict, signals: dict) -> tuple[str, str] | None:
         return None
     if not entry.get("fr"):
         return None
-    if sense_fr.blocks_auto_lock(entry.get("sense_fit"), entry.get("translation_type")):
+    if sense_fr.blocks_auto_lock(
+        entry.get("sense_fit"), entry.get("translation_type"),
+        definition_fr_fit=entry.get("definition_fr_fit"),
+        definition_needs_review=entry.get("definition_needs_review", False),
+    ):
         return None
 
     if signals["n_corroborating_signals"] >= 2 and signals["deterministic_ok"]:

@@ -1,14 +1,18 @@
 """Contrôle bloquant de cohérence sens-définition-FR (plan §6, Correction
 S6-1) : aucune entrée VERROUILLÉE de `data/sense_fr.jsonl`
 (pipeline.verify_fr_lock.LOCKED_STATUSES) ne doit porter un `sense_fit`
-"mismatch"/"doubtful", un `translation_type` non littéral, ni — cas plus
-insidieux — un statut qui ne peut être produit QUE par un module tenu de
-calculer ce signal (`auto_joint`, pipeline/sense_fr_reassign.py) tout en
-laissant `sense_fit` à `null` : cela signale une entrée verrouillée AVANT
-que cette porte n'existe, jamais vérifiée (cas réel mesuré : `give out` et
-`turn off` dans data/sense_fr.jsonl, dont la `definition_en` contredisait
-ouvertement le `fr` verrouillé — voir sense_fr.blocks_auto_lock et le
-correctif appliqué à ces deux clés).
+"mismatch"/"doubtful", un `definition_fr_fit` "contradiction" (la
+traduction fr contredit sa PROPRE définition — axe DISTINCT de sense_fit,
+voir sense_fr.blocks_auto_lock), un `definition_needs_review` vrai (la
+définition elle-même n'a jamais été validée en amont par S3-3/S4), un
+`translation_type` non littéral, ni — cas plus insidieux — un statut qui
+ne peut être produit QUE par un module tenu de calculer ce signal
+(`auto_joint`, pipeline/sense_fr_reassign.py) tout en laissant `sense_fit`
+à `null` : cela signale une entrée verrouillée AVANT que cette porte
+n'existe, jamais vérifiée (cas réel mesuré : `give out` et `turn off`
+dans data/sense_fr.jsonl, dont la `definition_en` contredisait ouvertement
+le `fr` verrouillé — voir sense_fr.blocks_auto_lock et le correctif
+appliqué à ces deux clés).
 
 `pipeline/sense_fr.py` (chemin ollama historique, classify_synset_key /
 classify_mwe_key) ne renseigne jamais `sense_fit` : son acceptation
@@ -59,22 +63,42 @@ def find_violations(store: dict[str, dict]) -> list[dict]:
 
         sense_fit = entry.get("sense_fit")
         translation_type = entry.get("translation_type")
+        definition_fr_fit = entry.get("definition_fr_fit")
+        definition_needs_review = entry.get("definition_needs_review", False)
 
         if sense_fit is None:
             if entry.get("status") in STATUSES_REQUIRING_SENSE_FIT:
                 violations.append({
                     "key": entry["key"], "status": entry["status"],
                     "sense_fit": sense_fit, "translation_type": translation_type,
+                    "definition_fr_fit": definition_fr_fit,
                     "fr": entry.get("fr"), "definition_en": entry.get("definition_en"),
                     "reason": "jamais vérifié (sense_fit absent d'un statut qui doit le porter)",
                 })
             continue  # hors périmètre (chemin sans sense_fit, voir la docstring du module)
 
-        block_reason = sense_fr.blocks_auto_lock(sense_fit, translation_type)
+        # `definition_fr_fit` absent (entrée écrite avant ce champ) n'est PAS
+        # traité comme une violation ici, même via `decided_by` : un balayage
+        # par provenance seul (`decided_by in {"auto_frontier", "auto_joint"}`)
+        # flanque ~743 entrées sur ce magasin (mesuré) — la quasi-totalité des
+        # sens de MOTS déjà correctement décidés, jamais réexaminés — ce qui
+        # viole le plafond de 5% de la file de révision (plan §0) pour un
+        # gain nul sur ces entrées déjà correctes. Un cas RÉEL repéré ainsi
+        # (`mwe:check in:phrasal_verb`/`mwe:keep up:phrasal_verb`, fr
+        # contredisant leur definition_en, non régénérables par le S1-S5
+        # courant) a été routé en pending PONCTUELLEMENT — voir
+        # tools/migrate_sense_fr_mwe_keys.py — plutôt que par une règle
+        # générale ici.
+        block_reason = sense_fr.blocks_auto_lock(
+            sense_fit, translation_type,
+            definition_fr_fit=definition_fr_fit,
+            definition_needs_review=definition_needs_review,
+        )
         if block_reason:
             violations.append({
                 "key": entry["key"], "status": entry["status"],
                 "sense_fit": sense_fit, "translation_type": translation_type,
+                "definition_fr_fit": definition_fr_fit,
                 "fr": entry.get("fr"), "definition_en": entry.get("definition_en"),
                 "reason": block_reason,
             })
@@ -119,8 +143,8 @@ def run(fix: bool = False) -> int:
     print(f"{len(violations)} entrée(s) verrouillée(s) sans cohérence sens-définition-FR vérifiée :")
     for v in violations:
         print(f"  - {v['key']} (status={v['status']}, sense_fit={v['sense_fit']!r}, "
-              f"translation_type={v['translation_type']!r}, raison={v['reason']}) "
-              f"-> fr={v['fr']!r} | definition_en={v['definition_en']!r}")
+              f"translation_type={v['translation_type']!r}, definition_fr_fit={v.get('definition_fr_fit')!r}, "
+              f"raison={v['reason']}) -> fr={v['fr']!r} | definition_en={v['definition_en']!r}")
 
     if not fix:
         print("Relancer avec --fix pour repasser ces entrées en `pending` (relecture humaine "

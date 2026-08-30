@@ -21,6 +21,19 @@ class BlocksAutoLockTests(unittest.TestCase):
     def test_ok_and_literal_never_blocks(self):
         self.assertIsNone(blocks_auto_lock("ok", "equivalence_directe"))
 
+    def test_definition_fr_contradiction_blocks(self):
+        self.assertEqual(
+            blocks_auto_lock("ok", "equivalence_directe", definition_fr_fit="contradiction"),
+            "definition_fr_contradiction",
+        )
+
+    def test_definition_needs_review_blocks_regardless_of_other_axes(self):
+        self.assertEqual(
+            blocks_auto_lock("ok", "equivalence_directe", definition_fr_fit="ok",
+                              definition_needs_review=True),
+            "definition_non_validee",
+        )
+
     def test_mismatch_blocks(self):
         self.assertEqual(blocks_auto_lock("mismatch", "equivalence_directe"), "sense_id_suspect")
 
@@ -74,6 +87,38 @@ class FindViolationsTests(unittest.TestCase):
             key="work_out", status="auto_llm", sense_fit="ok",
             definition_en="To calculate.", fr="calculer",
         )}
+        self.assertEqual(find_violations(store), [])
+
+    def test_definition_fr_contradiction_on_auto_status_is_a_violation(self):
+        # "bring up" post-correctif : sense_fit="ok" (usage compatible avec
+        # UN sens de bring up) mais definition_fr_fit="contradiction" (fr
+        # contredit la définition affichée) — doit être détecté même si
+        # sense_fit seul ne le voit pas.
+        store = {"a": _entry(key="a", status="auto_llm", sense_fit="ok",
+                              definition_fr_fit="contradiction")}
+        violations = find_violations(store)
+        self.assertEqual([v["key"] for v in violations], ["a"])
+        self.assertEqual(violations[0]["reason"], "definition_fr_contradiction")
+
+    def test_definition_needs_review_on_auto_status_is_a_violation(self):
+        store = {"a": _entry(key="a", status="auto_llm", sense_fit="ok",
+                              definition_fr_fit="ok", definition_needs_review=True)}
+        violations = find_violations(store)
+        self.assertEqual([v["key"] for v in violations], ["a"])
+        self.assertEqual(violations[0]["reason"], "definition_non_validee")
+
+    def test_pre_existing_entry_without_definition_fr_fit_is_not_retroactively_flagged(self):
+        # Champ nouveau, non rétroactif — y compris pour une entrée dont le
+        # `decided_by` prouve qu'elle vient d'un module qui calcule ce champ
+        # aujourd'hui (sense_fr_frontier.py) : un balayage par provenance
+        # seul flanquerait la quasi-totalité du magasin déjà correctement
+        # décidé (mesuré : 743 entrées), bien au-delà du plafond de 5% de
+        # révision (plan §0), pour un gain nul sur les traductions déjà
+        # correctes. Voir tools/migrate_sense_fr_mwe_keys.py pour le
+        # traitement PONCTUEL des cas réels repérés par inspection directe.
+        store = {"a": _entry(key="a", status="auto_llm", sense_fit="ok",
+                              decided_by="auto_frontier")}
+        self.assertNotIn("definition_fr_fit", store["a"])
         self.assertEqual(find_violations(store), [])
 
     def test_validated_status_is_never_flagged_even_with_stale_mismatch(self):

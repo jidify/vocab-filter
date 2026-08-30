@@ -1133,6 +1133,12 @@ def load_occurrences_by_sense() -> dict[str, list[dict]]:
             by_sense.setdefault(best, []).append({
                 "context": context, "target_surface": target,
                 "segment_idx": occ.get("segment_idx", 0),
+                # S6-1 (plan §6 : "traduction de phrase") — occ["french"] est
+                # déjà écrit par ce module (voir plus haut, "french": by_idx[...].fr
+                # or None) mais était jeté ici avant d'atteindre S6 ; sense_fr_frontier
+                # s'en sert comme preuve supplémentaire, indépendante du modèle,
+                # pour son contrôle de cohérence définition-FR.
+                "french": occ.get("french"),
             })
     if n_corrupt:
         print(f"  ({n_corrupt} ligne(s) corrompue(s) ignorée(s) dans {config.SENSES_PATH})")
@@ -1179,6 +1185,12 @@ def load_mwe_occurrences_by_key() -> dict[str, list[dict]]:
                     surface_by_occurrence[span["occurrence_id"]] = span["surface"]
 
     segments = load_segments()
+    # S6-1 (plan §6 : "traduction de phrase") — même index mémoïsé que
+    # build_wide_context_from_segments (_segment_lookup), réutilisé ici pour
+    # retrouver la phrase FRANÇAISE officielle du segment cible : une MWE
+    # n'avait jusqu'ici aucun équivalent au champ "french" déjà porté par
+    # les occurrences MOT (voir load_occurrences_by_sense ci-dessus).
+    by_idx, _ = _segment_lookup(segments)
     by_key: dict[str, list[dict]] = {}
     for u in mwe_units:
         key = u.get("unit_key") or inventory.make_unit_key(
@@ -1195,9 +1207,11 @@ def load_mwe_occurrences_by_key() -> dict[str, list[dict]]:
             if not wide["text"]:
                 continue
             surface = surface_by_occurrence.get(occurrence_id, u["canonical_form"])
+            segment = by_idx.get(seg_idx)
             occs.append({
                 "context": wide["text"], "target_surface": surface,
                 "segment_idx": seg_idx,
+                "french": (segment.fr or None) if segment is not None else None,
             })
         by_key[key] = occs
 
