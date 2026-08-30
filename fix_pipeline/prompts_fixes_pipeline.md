@@ -98,15 +98,18 @@ Lis le plan global, surtout **§5, Correction S5-4**, S1-2/S4-2 et **§8**. Bran
 
 ## Prompt S6-1 — traduction d'un sens verrouillé
 
-Lis le plan global, surtout **§6, Correction S6-1**, les schémas S3/S5 et **§8**. Fais consommer à S6 une identité complète et des occurrences homogènes. Ajoute un contrôle bloquant de cohérence sens–définition–FR. Valide `look after`, `give out`, `turn off`, `work out` et les autres définitions corrigées. Ne verrouille jamais automatiquement un mismatch/doubtful.
+Lis le plan global, surtout **§6, Correction S6-1**, les schémas S3/S5 et **§8**. Fais consommer à S6 une identité complète et des occurrences homogènes. Ajoute un contrôle bloquant de cohérence sens–définition–FR. Valide `look after`, `give out`, `turn off`, `work out` et les autres définitions corrigées. Ne verrouille jamais automatiquement un mismatch/doubtful.  
+Le modele à utiliser est "catgpt" en mode batch d'une taille de 50 element - le timeout des appels a catgpt doit être de 1200s.
 
 ## Prompt S6-2 — résidu pending
 
-Lis le plan global, surtout **§6, Correction S6-2**, les statuts du magasin FR et **§8**. Résous par preuves indépendantes ou route en révision toutes les traductions pending. Le CSV final ne doit jamais contenir de traduction officielle vide. Couvre `fit`, `watering`, `flush`, `overtone`, `settle`, `sound`; mesure les 99 blancs initiaux et démontre leur destination exacte.
+Lis le plan global, surtout **§6, Correction S6-2**, les statuts du magasin FR et **§8**. Résous par preuves indépendantes ou route en révision toutes les traductions pending. Le CSV final ne doit jamais contenir de traduction officielle vide. Couvre `fit`, `watering`, `flush`, `overtone`, `settle`, `sound`; mesure les 99 blancs initiaux et démontre leur destination exacte.  
+Le modele à utiliser est "catgpt" en mode batch d'une taille de 50 element - le timeout des appels a catgpt doit être de 1200s.
 
 ## Prompt S6-3 — métrique de traduction sans fuite
 
 Lis le plan global, surtout **§6, Correction S6-3**, Q0-1 et **§8**. Ajoute l'évaluation souple des traductions après génération, en distinguant synonymie acceptable et contresens. Produis résultats par statut/source/modèle, avec échantillon auditable. Vérifie que le benchmark n'est importé par aucun module de production.
+Le modele à utiliser est "catgpt" en mode batch d'une taille de 50 element - le timeout des appels a catgpt doit être de 1200s.
 
 ## Prompt S7-1 — filtre pédagogique par sens
 
