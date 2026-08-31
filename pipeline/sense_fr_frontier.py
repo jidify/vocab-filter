@@ -71,7 +71,7 @@ from typing import Literal
 import litellm
 from nltk.corpus import wordnet as nwn
 from nltk.corpus.reader.wordnet import WordNetError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from pipeline import config, inventory, lex_bilingual, llm_client, sense_fr, senses
 from pipeline.llm_tasks import effective_batch_size, task_config, use_batch_prompt
@@ -82,11 +82,33 @@ from pipeline.llm_tasks import effective_batch_size, task_config, use_batch_prom
 
 
 class SenseTranslation(BaseModel):
-    sense_id: str
-    fr: list[str]  # 1 à 3 propositions, triées par fréquence d'usage RÉELLE
-    translation_type: Literal["equivalence_directe", "reformulation", "explicitation"]
-    sense_fit: Literal["ok", "doubtful", "mismatch"]
-    sense_fit_note: str
+    """Les `description=` ci-dessous ne sont PAS de la documentation morte :
+    pour un modèle sans sortie structurée native (catgpt — voir
+    pipeline/llm_litellm_catgpt.py::_inject_schema), c'est le SEUL texte que
+    le modèle voit encore attaché à chaque champ au moment de générer sa
+    réponse — le schéma JSON brut, sans `description`, est injecté en TOUT
+    dernier, après le SYSTEM_PROMPT en langue naturelle ci-dessous, qui
+    explique pourtant déjà la nuance en détail. Mesuré réellement (2026-08-31,
+    validation --limit 50 --dry-run avant bascule catgpt) : sans description
+    sur le schéma, catgpt a répondu definition_fr_fit="doubtful" (valeur
+    valide de sense_fit seulement) sur 1 item, invalidant tout le lot de 50
+    (parsing pydantic tout-ou-rien). openai/* n'a jamais ce problème (sortie
+    contrainte au niveau du token, description ignorée) — ne pas retirer ces
+    description sous prétexte qu'elles sont redondantes avec le prompt."""
+
+    sense_id: str = Field(description="Recopié à l'identique depuis l'item reçu, jamais le mot anglais.")
+    fr: list[str] = Field(description="1 à 3 traductions de CE sens précis, triées par fréquence d'usage RÉELLE.")
+    translation_type: Literal["equivalence_directe", "reformulation", "explicitation"] = Field(
+        description="equivalence_directe si fr[0] est un vrai équivalent lexical substituable ; "
+                     "reformulation si le passage condense/déplace/explicite au point qu'aucun mot "
+                     "isolé ne correspond ; explicitation si fr ajoute une précision absente de l'anglais."
+    )
+    sense_fit: Literal["ok", "doubtful", "mismatch"] = Field(
+        description="Le sens WordNet IMPOSÉ (sa définition) correspond-il à l'USAGE réel montré par "
+                     "les phrases fournies ? ok / doubtful / mismatch. Ne concerne PAS ta propre "
+                     "traduction fr — voir definition_fr_fit pour ça, un axe différent."
+    )
+    sense_fit_note: str = Field(description="Justification courte de sense_fit (vide si \"ok\" et évident).")
     # S6-1 (plan §6) : axe DISTINCT de sense_fit — sense_fit demande "la
     # définition colle-t-elle à l'USAGE montré par les phrases ?", jamais
     # "ma propre traduction fr colle-t-elle à CETTE définition ?". Un
@@ -97,10 +119,20 @@ class SenseTranslation(BaseModel):
     # "annoncer son arrivée, ex. à l'hôtel" mais traduit "prendre des
     # nouvelles de" — voir pipeline/sense_fr.blocks_auto_lock). Voir
     # sense_fr.blocks_auto_lock pour la porte qui en découle.
-    definition_fr_fit: Literal["ok", "contradiction"]
-    definition_fr_fit_note: str
-    source: Literal["choisi", "reecrit"]
-    confidence: Literal["high", "medium", "low"]
+    definition_fr_fit: Literal["ok", "contradiction"] = Field(
+        description="QUESTION DIFFÉRENTE de sense_fit : ta PROPRE traduction fr contredit-elle la "
+                     "définition donnée (pas les phrases, la définition) ? SEULEMENT deux valeurs "
+                     "possibles ici : ok ou contradiction — jamais \"doubtful\", qui n'existe que "
+                     "pour sense_fit et n'est pas une valeur valide de ce champ-ci."
+    )
+    definition_fr_fit_note: str = Field(description="Justification courte de definition_fr_fit (vide si \"ok\" et évident).")
+    source: Literal["choisi", "reecrit"] = Field(
+        description="choisi si fr[0] reprend un des candidats fournis pour ce sens, reecrit sinon."
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="low si la définition est ambiguë, le sense_id trop générique/rare, ou si aucune "
+                     "traduction ne semble vraiment naturelle."
+    )
 
 
 class BatchTranslations(BaseModel):
