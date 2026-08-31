@@ -29,6 +29,14 @@ Colonnes ajoutées au passage, à titre informatif (non filtrantes) :
 non interchangeable — écart absolu moyen mesuré de 0,31 point sur ce
 périmètre, voir échanges précédents).
 
+**AoA : pas encore de seuil défini pour cette chaîne.** `aoa_test` reste
+purement informatif ici — aucune borne min/max n'a été tranchée pour
+filtrer dessus (contrairement à `filter_book_vocab.py`, où `MIN_AOA`/
+`MAX_AOA` existent et filtrent réellement, mais pour un usage
+indépendant, pas pour produire `vocab_filtered.csv`). Non bloquant :
+`vocab_filtered.csv` reste valide sans ce seuil, à ajouter plus tard si
+besoin.
+
 ## Entonnoir (mots simples uniquement, 2476 lignes de départ)
 
 | Étape | Sortie | Effet |
