@@ -38,6 +38,8 @@ POC/traitement_word/claude/word_contexts.csv
 POC/traitement_word/claude/cognates_removed.csv
 POC/traitement_word/claude/mwe_exclusions.csv
 POC/traitement_word/claude/lemmas_not_in_*.csv
+POC/traitement_word/claude/word_analysis.csv
+POC/traitement_word/claude/tests/word_analysis_test.csv
 POC/traitement_word/codex/vocab_words.csv
 
 # Identifiants (clés API des modèles frontière — voir sense_fr_frontier.py)
