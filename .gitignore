@@ -25,10 +25,20 @@ stemdict.txt
 word-prevalence.txt
 kuperman-aoa.csv
 idioms_match.txt
+DATASETS/tmp/
 
 # Sorties générées par le pipeline (pipeline/*.py) — regénérables via
 # run_pipeline.py, pas versionnées (mêmes conventions que ci-dessus).
 pipeline_out/
+
+# Sorties des scripts de test hors pipeline (REVIEW_FIX_PIPELINE/, POC/) —
+# regénérables en une commande, cf. le docstring de chaque script.
+REVIEW_FIX_PIPELINE/dedup_tests/extractions/
+POC/traitement_word/claude/word_contexts.csv
+POC/traitement_word/claude/cognates_removed.csv
+POC/traitement_word/claude/mwe_exclusions.csv
+POC/traitement_word/claude/lemmas_not_in_*.csv
+POC/traitement_word/codex/vocab_words.csv
 
 # Identifiants (clés API des modèles frontière — voir sense_fr_frontier.py)
 .env
