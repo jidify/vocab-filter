@@ -69,6 +69,14 @@ Filtres supplémentaires (hors rapport, ajoutés pour ce script) :
      entier déjà passé par S1, hors de portée d'un appel phrase par
      phrase isolé comme ici.
 
+Contexte de phrase courte (hors chaîne de filtrage ci-dessus) : si la phrase
+contenant l'occurrence du lemme mesure moins de MIN_SENTENCE_WORDS mots, la
+phrase précédente et la phrase suivante de la même ligne du livre (quand
+elles existent) sont incluses avec elle dans le texte exporté (colonne
+`phrases`), pour donner assez de matière au lecteur. N'affecte que le texte
+de contexte affiché, pas la détection MWE (filtre 5, rejouée sur ce texte
+étendu) ni aucun autre filtre.
+
 Pas de filtre AoA (le rapport le documente comme informatif, sans seuil
 tranché) et pas de wordlist.txt (absent de cette chaîne) — mais AoA
 (DATASETS/kuperman-aoa.csv, colonne Rating.Mean) est exporté à titre
@@ -124,6 +132,12 @@ SPACY_MODEL = "en_core_web_sm"
 MIN_PKNOWN = 0.90
 EXCLUDED_CEFR = {"A1", "A2"}
 ZIPF_RESCUE_THRESHOLD = 4.5
+
+# Phrase courte (hors chaîne de filtrage ci-dessus) : si la phrase contenant
+# le lemme mesure moins de ce nombre de mots, la phrase précédente et la
+# phrase suivante (dans la même ligne du livre) sont incluses avec elle dans
+# le contexte exporté, pour donner assez de matière au lecteur.
+MIN_SENTENCE_WORDS = 5
 
 # Filtre 0 (hors rapport) : UPOS écartés avant toute autre étape.
 EXCLUDED_UPOS = {"PROPN", "INTJ", "PUNCT"}
@@ -421,6 +435,8 @@ def build_word_contexts(
 
     lines = list(iter_book_lines(book_path))
     for line_idx, doc in enumerate(nlp.pipe(lines, batch_size=64)):
+        sents = list(doc.sents)
+        sent_idx_by_start = {s.start_char: i for i, s in enumerate(sents)}
         for token in doc:
             if not token.is_alpha:
                 continue
@@ -477,7 +493,21 @@ def build_word_contexts(
             passed_types.add(type_key)
 
             sent = token.sent
-            raw_sent_text = sent.text
+            sent_idx = sent_idx_by_start[sent.start_char]
+
+            # Phrase courte (< MIN_SENTENCE_WORDS mots) : on l'étend avec la
+            # phrase précédente et la phrase suivante de la même ligne, si
+            # elles existent (voir MIN_SENTENCE_WORDS).
+            if len(sent.text.split()) < MIN_SENTENCE_WORDS:
+                span_start_char = sents[sent_idx - 1].start_char if sent_idx > 0 else sent.start_char
+                span_end_char = (
+                    sents[sent_idx + 1].end_char if sent_idx < len(sents) - 1 else sent.end_char
+                )
+            else:
+                span_start_char = sent.start_char
+                span_end_char = sent.end_char
+
+            raw_sent_text = doc.text[span_start_char:span_end_char]
             phrase_text = raw_sent_text.strip()
             if not phrase_text:
                 continue
@@ -487,7 +517,7 @@ def build_word_contexts(
             # tester plus tard le chevauchement avec les spans MWE détectés
             # sur ce même texte (filtre 5) — voir mwe_member_spans.
             lstrip_offset = len(raw_sent_text) - len(raw_sent_text.lstrip())
-            token_start = (token.idx - sent.start_char) - lstrip_offset
+            token_start = (token.idx - span_start_char) - lstrip_offset
             token_end = token_start + len(token.text)
 
             entry = by_lemma.setdefault(lemma, {"surfaces": set(), "upos": set(), "phrases": {}})
