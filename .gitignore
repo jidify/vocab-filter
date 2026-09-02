@@ -41,6 +41,10 @@ POC/traitement_word/claude/lemmas_not_in_*.csv
 POC/traitement_word/claude/word_analysis.csv
 POC/traitement_word/claude/tests/word_analysis_test-batch.csv
 POC/traitement_word/codex/vocab_words.csv
+POC/traitement_mwe/claude/mwe_contexts.csv
+POC/traitement_mwe/claude/mwe_gate_rejections.csv
+POC/traitement_mwe/claude/vpc_candidates.jsonl
+POC/traitement_mwe/claude/rules_plus_candidates.jsonl
 
 # Benchmark de référence versionné volontairement (pas régénéré à la volée) :
 # POC/traitement_word/claude/tests/word_analysis_test-sequential.csv
