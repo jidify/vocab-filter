@@ -37,11 +37,18 @@ adapté d'écraser silencieusement le résultat d'un autre fichier) :
         <slug>-distractors.csv   <- résultat final (CSV_HEADER ci-dessous),
                                      une ligne par expression UNIQUE,
                                      colonnes type, expression, distractors,
-                                     nb_distractors — distractors est une
-                                     liste jointe par " | " (même convention
-                                     que translations dans
-                                     translate_word_context.py / le CSV
-                                     d'entrée)
+                                     nb_distractors — distractors encode une
+                                     liste de GROUPES de synonymes (voir
+                                     ExpressionDistractors) : les mots d'un
+                                     même groupe joints par " | " (même
+                                     convention que translations), les
+                                     groupes eux-mêmes joints par " || "
+                                     (même convention que phrases dans
+                                     translate_mwe_context.py) — ex.
+                                     "ascenseur | monte-charge || couloir |
+                                     corridor". nb_distractors compte les
+                                     GROUPES (options de réponse), pas les
+                                     mots.
         audit/
             distractors_rejected.csv  <- distracteurs rejetés par le garde-fou
                                           anti-traduction pendant CE run,
@@ -51,11 +58,8 @@ adapté d'écraser silencieusement le résultat d'un autre fichier) :
                                           explication : réutilisable tel quel
                                           dans une consigne de re-soumission
                                           au LLM ("ne pas utiliser <cause>",
-                                          voir CONTRÔLES ci-dessous ; la
-                                          re-soumission elle-même N'EST PAS
-                                          implémentée — ce fichier ne fait
-                                          QUE journaliser, décision utilisateur
-                                          explicite)
+                                          voir CONTRÔLES et REJEU ci-dessous —
+                                          --replay-rejected fait exactement ça)
 
 slug = slugify(nom du fichier d'entrée sans extension) — copié tel quel de
 build_vocabulary_to_learn_pipeline.py::slugify (minuscules, séparateurs
@@ -84,25 +88,32 @@ l'utilisateur, à comparer en pratique à --batch-size 0 avant un run complet
 (voir le plan).
 
 CONTRÔLES a posteriori (check_distractors, motif check_analysis du script
-mots) :
+mots) — opèrent au niveau du MOT, à l'intérieur de chaque groupe (voir
+GROUPES DE SYNONYMES dans ExpressionDistractors) :
   - expression renvoyée != expression d'entrée (casefold) -> comptage seul
-  - GARDE-FOU TRADUCTIONS : tout distracteur qui coïncide (strip+casefold)
-    avec une des translations connues de cette expression (union de tous ses
-    sens) est RETIRÉ de la liste — seul contrôle qui modifie la sortie, la
-    contrainte anti-traduction étant le cœur de la demande et l'entrée nous
-    donnant gratuitement une partie de la réponse. Journalisé À LA FOIS sur
-    stdout (ATTENTION) ET dans out/<slug>/audit/distractors_rejected.csv
-    (colonnes expression,cause — voir SORTIE ci-dessus) : PAS de fichier
-    d'audit avant cette entrée du docstring — un run réel qui déclenche ce
-    garde-fou perdait la trace de l'expression concernée dès que le seul
-    ATTENTION stdout défilait hors de l'écran (cas vécu sur "beat"/"silence").
-  - distracteurs vides ou dupliqués dans la même ligne -> retirés + comptés,
-    JAMAIS journalisés dans distractors_rejected.csv (rien d'utile à faire
-    éviter au LLM dans ces deux cas — juste du bruit de formatage).
-  - après retraits, hors de [2, 3] -> rattrapage individuel une fois (avec le
-    MÊME prompt, sans tenir compte des causes journalisées ci-dessus — voir
-    REJEU plus bas), puis écrit quand même (jamais perdu silencieusement) et
-    compté à part.
+  - GARDE-FOU TRADUCTIONS : tout MOT (dans n'importe quel groupe) qui
+    coïncide (strip+casefold) avec une des translations connues de cette
+    expression (union de tous ses sens) est RETIRÉ de son groupe — seul
+    contrôle qui modifie la sortie, la contrainte anti-traduction étant le
+    cœur de la demande et l'entrée nous donnant gratuitement une partie de
+    la réponse. Journalisé À LA FOIS sur stdout (ATTENTION) ET dans
+    out/<slug>/audit/distractors_rejected.csv (colonnes expression,cause —
+    voir SORTIE ci-dessus) : PAS de fichier d'audit avant cette entrée du
+    docstring — un run réel qui déclenche ce garde-fou perdait la trace de
+    l'expression concernée dès que le seul ATTENTION stdout défilait hors de
+    l'écran (cas vécu sur "beat"/"silence"). Un groupe vidé de tous ses mots
+    est retiré EN ENTIER (compté à part).
+  - mots vides, dupliqués DANS le même groupe, OU dupliqués ENTRE deux
+    groupes (un mot ne doit représenter qu'UN SEUL sens erroné) -> retirés +
+    comptés, JAMAIS journalisés dans distractors_rejected.csv (rien d'utile
+    à faire éviter au LLM dans ces cas — juste du bruit de formatage).
+  - après retraits, un groupe réduit à 1 mot est CONSERVÉ (toujours
+    utilisable comme option de réponse) mais compté à part
+    (`groupes_sous_min_synonymes`) — pas de rattrapage pour ce seul motif.
+  - après retraits, nombre de GROUPES hors de [2, 3] -> rattrapage individuel
+    une fois (avec le MÊME prompt, sans tenir compte des causes journalisées
+    ci-dessus — voir REJEU plus bas), puis écrit quand même (jamais perdu
+    silencieusement) et compté à part.
 
 REJEU DES DISTRACTEURS REJETÉS (--replay-rejected) : relit
 out/<slug>/audit/distractors_rejected.csv, regroupe les causes par
@@ -236,8 +247,17 @@ DEFAULT_CACHE_PATH = Path(__file__).parent / "cache" / "distractors_cache.csv"
 
 MAX_TOKENS = 4000
 DEFAULT_BATCH_SIZE = 50
+# MIN/MAX_DISTRACTORS : nombre de GROUPES (= de sens erronés distincts, donc
+# d'options de réponse dans le quizz) — inchangé depuis la 1re version.
 MIN_DISTRACTORS = 2
 MAX_DISTRACTORS = 3
+# MIN/MAX_SYNONYMS_PER_GROUP : nombre de mots FR par groupe (synonymes ou
+# quasi-synonymes du MÊME sens erroné) — voir GROUPES DE SYNONYMES dans le
+# docstring du module. Un groupe qui tombe à 0 après le garde-fou est retiré
+# en entier ; un groupe réduit à 1 mot est conservé (toujours utilisable
+# comme option de réponse) mais compté à part (voir check_distractors).
+MIN_SYNONYMS_PER_GROUP = 2
+MAX_SYNONYMS_PER_GROUP = 4
 
 # Copie documentée du schéma écrit par
 # POC/pipeline/stages/localize_words_and_mwe.py::OUTPUT_COLUMNS (INPUT_COLUMNS
@@ -256,10 +276,10 @@ CSV_HEADER = ["type", "expression", "distractors", "nb_distractors"]
 
 # Journal d'audit des distracteurs rejetés par le garde-fou anti-traduction
 # (calcul frais OU relecture de cache invalidée — voir CONTRÔLES et CACHE
-# PERSISTANT dans le docstring du module) — une ligne par distracteur rejeté.
-# `cause` est le distracteur rejeté LUI-MÊME (pas une explication) : pensé
-# pour être injecté tel quel dans une future consigne de re-soumission au
-# LLM ("ne pas utiliser <cause>") — re-soumission NON implémentée ici.
+# PERSISTANT dans le docstring du module) — une ligne par MOT rejeté (pas par
+# groupe, voir GROUPES DE SYNONYMES). `cause` est le mot rejeté LUI-MÊME (pas
+# une explication) : injecté tel quel dans a_eviter par --replay-rejected
+# ("ne pas utiliser <cause>", voir REJEU).
 AUDIT_CSV_HEADER = ["expression", "cause"]
 
 
@@ -305,12 +325,28 @@ class Expression(BaseModel):
 
 class ExpressionDistractors(BaseModel):
     """Les distracteurs français d'une expression — ce que le LLM renvoie,
-    un objet par expression reçue."""
+    un objet par expression reçue.
+
+    GROUPES DE SYNONYMES (décidé avec l'utilisateur) : une vraie traduction
+    se présente souvent comme plusieurs mots de MÊME sens ("fauteuil
+    inclinable | fauteuil relax") ; dans le quizz, chaque OPTION de réponse
+    (la bonne comme les mauvaises) doit donc pouvoir afficher plusieurs
+    formulations acceptées. distractors est donc une liste de GROUPES, pas
+    une liste de mots : chaque groupe = UN sens erroné, représenté par
+    plusieurs mots FR synonymes entre eux (jamais un mot isolé qui serait
+    seul à représenter son sens). Les groupes eux-mêmes ne doivent JAMAIS
+    être mélangés (un mot d'un groupe n'a pas le même sens qu'un mot d'un
+    autre groupe) — voir MIN/MAX_SYNONYMS_PER_GROUP."""
 
     expression: str = Field(description="Recopiée à l'identique depuis l'entrée, jamais reformulée ni traduite.")
-    distractors: list[str] = Field(
-        description="2 ou 3 distracteurs français, triés du meilleur au moins bon. "
-                    "Jamais une traduction possible de expression, quel qu'en soit le sens."
+    distractors: list[list[str]] = Field(
+        description=f"2 ou 3 GROUPES, un par sens erroné distinct, triés du meilleur groupe au "
+                    f"moins bon. Chaque groupe contient {MIN_SYNONYMS_PER_GROUP} à "
+                    f"{MAX_SYNONYMS_PER_GROUP} mots ou expressions françaises SYNONYMES entre eux "
+                    "(différentes façons de dire la MÊME chose fausse) — jamais un seul mot par "
+                    "groupe. Aucun mot, dans aucun groupe, n'est une traduction possible de "
+                    "expression, quel qu'en soit le sens ; aucun mot n'apparaît dans plus d'un "
+                    "groupe."
     )
 
 
@@ -321,32 +357,46 @@ class ExpressionDistractors(BaseModel):
 class ProposeDistracteursMot(dspy.Signature):
     """Tu es lexicographe bilingue anglais-français, concepteur de jeux de
     traduction à choix multiples. Pour le mot anglais reçu (entree.expression),
-    propose 2 ou 3 distracteurs en français.
+    propose 2 ou 3 SENS ERRONÉS distincts pour servir de mauvaises réponses.
 
-    Contraintes strictes :
-      - Le distracteur doit être un mot français courant et réel.
-      - Il ne doit en aucun cas être une traduction possible du mot source,
+    IMPORTANT — chaque sens erroné est un GROUPE de 2 à 4 mots français
+    SYNONYMES ENTRE EUX (différentes façons de dire la MÊME chose fausse),
+    JAMAIS un seul mot isolé — exactement
+    comme une vraie traduction se présente souvent comme plusieurs mots de
+    même sens (ex. "fauteuil inclinable | fauteuil relax"). distractors est
+    donc une LISTE DE GROUPES (une liste de listes), pas une liste de mots.
+
+    Contraintes strictes, pour CHAQUE mot de CHAQUE groupe :
+      - Doit être un mot français courant et réel.
+      - Ne doit en aucun cas être une traduction possible du mot source,
         quel que soit le contexte.
       - Vérifie tous les sens, usages, nuances, registres, expressions
         idiomatiques et emplois figurés possibles du mot source avant de
-        retenir un distracteur.
-      - Le distracteur ne doit être ni un synonyme, ni un quasi-synonyme, ni
-        une traduction contextuelle possible du mot source.
-      - Il doit néanmoins être plausible comme réponse erronée dans un jeu de
+        retenir un mot.
+      - Ne doit être ni un synonyme, ni un quasi-synonyme, ni une traduction
+        contextuelle possible du mot source.
+      - Doit néanmoins être plausible comme réponse erronée dans un jeu de
         traduction : idéalement un mot courant que le joueur pourrait
         raisonnablement choisir.
       - Privilégie des mots de fréquence et de difficulté similaires au mot
-        source.
-      - Évite les mots trop rares, archaïques, techniques ou manifestement
-        absurdes.
+        source. Évite les mots trop rares, archaïques, techniques ou
+        manifestement absurdes.
       - Si un mot peut être une traduction possible, même dans un contexte
         très spécifique, élimine-le.
-      - Si tu hésites sur un distracteur, ne le propose pas et cherche une
+      - Si tu hésites sur un mot, ne le propose pas et cherche une
         alternative plus sûre.
 
-    Classe tes propositions par qualité décroissante (la meilleure en
-    premier) dans distractors. Ne renvoie que les 2 ou 3 meilleurs
-    distracteurs.
+    Contraintes strictes sur les GROUPES :
+      - Tous les mots d'UN MÊME groupe doivent être synonymes ou
+        quasi-synonymes entre eux (interchangeables dans une phrase, pour LE
+        MÊME sens erroné).
+      - Les groupes représentent des sens erronés DIFFÉRENTS les uns des
+        autres — ne mélange jamais deux sens dans un même groupe, et ne
+        répète jamais le même sens dans deux groupes.
+      - Un mot ne doit apparaître que dans UN SEUL groupe.
+
+    Classe les groupes par qualité décroissante (le meilleur en premier)
+    dans distractors. Ne renvoie que les 2 ou 3 meilleurs groupes.
 
     CONSIGNE IMPORTANTE ET IMPÉRATIVE : les distracteurs doivent être
     suffisamment éloignés sémantiquement du mot source pour qu'ils ne
@@ -361,16 +411,16 @@ class ProposeDistracteursLotMot(dspy.Signature):
     """Même tâche que ProposeDistracteursMot, appliquée à PLUSIEURS mots
     anglais INDÉPENDANTS les uns des autres. Traite CHAQUE mot séparément,
     exactement comme si tu ne recevais que lui : ne mélange JAMAIS les
-    distracteurs de deux mots différents, même s'ils se ressemblent ou
-    partagent un sens proche. Applique à chaque mot les mêmes contraintes
-    strictes que ProposeDistracteursMot (distracteur jamais une traduction
-    possible du mot source, quel qu'en soit le sens ou le registre ; 2 ou 3
-    distracteurs, classés par qualité décroissante). Renvoie UNE entrée par
-    mot reçu, dans une seule liste plate — le champ expression de chaque
-    entrée sert à la rattacher au bon mot d'entrée."""
+    groupes de deux mots différents, même s'ils se ressemblent ou partagent
+    un sens proche. Applique à chaque mot les mêmes contraintes strictes que
+    ProposeDistracteursMot (groupes de synonymes, jamais un mot isolé ; aucun
+    mot jamais une traduction possible du mot source ; 2 ou 3 groupes,
+    classés par qualité décroissante). Renvoie UNE entrée par mot reçu, dans
+    une seule liste plate — le champ expression de chaque entrée sert à la
+    rattacher au bon mot d'entrée."""
 
     lot: list[Expression] = dspy.InputField(
-        description="Mots indépendants à traiter dans ce lot — ne jamais mélanger leurs distracteurs entre eux."
+        description="Mots indépendants à traiter dans ce lot — ne jamais mélanger leurs groupes entre eux."
     )
     resultats: list[ExpressionDistractors] = dspy.OutputField(
         description="Une entrée par mot du lot, dans le même ordre si possible, jamais moins d'entrées que de mots reçus."
@@ -385,36 +435,47 @@ class ProposeDistracteursMwe(dspy.Signature):
     """Tu es expert en phraséologie et lexicographie bilingue anglais-français,
     concepteur de jeux de traduction à choix multiples. Pour l'expression
     anglaise reçue (entree.expression — une locution, un verbe à particule,
-    une expression figée), propose 2 ou 3 distracteurs en français.
+    une expression figée), propose 2 ou 3 SENS ERRONÉS distincts pour servir
+    de mauvaises réponses.
 
-    Contraintes strictes :
-      - Le distracteur doit être un mot ou une expression française courante
-        et réelle.
-      - Il ne doit en aucun cas être une traduction possible de l'expression
+    IMPORTANT — chaque sens erroné est un GROUPE de 2 à 4 mots ou expressions
+    françaises SYNONYMES ENTRE EUX (différentes façons de dire la MÊME chose
+    fausse), JAMAIS un seul mot isolé — exactement comme une vraie traduction
+    se présente souvent comme plusieurs mots de même sens (ex. "revenir |
+    retourner"). distractors est donc une LISTE DE GROUPES (une liste de
+    listes), pas une liste de mots.
+
+    Contraintes strictes, pour CHAQUE mot de CHAQUE groupe :
+      - Doit être un mot ou une expression française courante et réelle.
+      - Ne doit en aucun cas être une traduction possible de l'expression
         source, ni de son sens LITTÉRAL (mot à mot), ni de son sens
         IDIOMATIQUE/FIGURÉ, quel que soit le contexte.
       - Vérifie tous les sens, usages, nuances, registres et emplois possibles
         de l'expression source (au sens propre comme au sens figuré) avant de
-        retenir un distracteur.
-      - Le distracteur ne doit être ni un synonyme, ni un quasi-synonyme, ni
-        une traduction contextuelle possible de l'expression source, à aucun
-        de ses sens.
-      - Il doit néanmoins être plausible comme réponse erronée dans un jeu de
-        traduction : idéalement un mot ou une expression courante que le
-        joueur pourrait raisonnablement choisir.
-      - Privilégie des distracteurs de fréquence et de difficulté similaires
-        à l'expression source (un mot simple ou une courte expression, pas
-        forcément une autre locution).
-      - Évite les distracteurs trop rares, archaïques, techniques ou
-        manifestement absurdes.
+        le retenir.
+      - Ne doit être ni un synonyme, ni un quasi-synonyme, ni une traduction
+        contextuelle possible de l'expression source, à aucun de ses sens.
+      - Doit néanmoins être plausible comme réponse erronée dans un jeu de
+        traduction.
+      - Privilégie des mots de fréquence et de difficulté similaires à
+        l'expression source. Évite les mots trop rares, archaïques,
+        techniques ou manifestement absurdes.
       - Si un mot ou une expression peut être une traduction possible, même
         dans un contexte très spécifique ou un registre familier, élimine-le.
-      - Si tu hésites sur un distracteur, ne le propose pas et cherche une
+      - Si tu hésites sur un mot, ne le propose pas et cherche une
         alternative plus sûre.
 
-    Classe tes propositions par qualité décroissante (la meilleure en
-    premier) dans distractors. Ne renvoie que les 2 ou 3 meilleurs
-    distracteurs.
+    Contraintes strictes sur les GROUPES :
+      - Tous les mots d'UN MÊME groupe doivent être synonymes ou
+        quasi-synonymes entre eux (interchangeables, pour LE MÊME sens
+        erroné).
+      - Les groupes représentent des sens erronés DIFFÉRENTS les uns des
+        autres — ne mélange jamais deux sens dans un même groupe, et ne
+        répète jamais le même sens dans deux groupes.
+      - Un mot ne doit apparaître que dans UN SEUL groupe.
+
+    Classe les groupes par qualité décroissante (le meilleur en premier)
+    dans distractors. Ne renvoie que les 2 ou 3 meilleurs groupes.
 
     CONSIGNE IMPORTANTE ET IMPÉRATIVE : les distracteurs doivent être
     suffisamment éloignés sémantiquement de l'expression source (sens propre
@@ -430,17 +491,18 @@ class ProposeDistracteursLotMwe(dspy.Signature):
     """Même tâche que ProposeDistracteursMwe, appliquée à PLUSIEURS
     expressions anglaises INDÉPENDANTES les unes des autres. Traite CHAQUE
     expression séparément, exactement comme si tu ne recevais qu'elle : ne
-    mélange JAMAIS les distracteurs de deux expressions différentes, même
-    si elles se ressemblent ou partagent un sens proche. Applique à chaque
+    mélange JAMAIS les groupes de deux expressions différentes, même si
+    elles se ressemblent ou partagent un sens proche. Applique à chaque
     expression les mêmes contraintes strictes que ProposeDistracteursMwe
-    (distracteur jamais une traduction possible de l'expression source, ni au
-    sens littéral ni au sens idiomatique/figuré ; 2 ou 3 distracteurs, classés
-    par qualité décroissante). Renvoie UNE entrée par expression reçue, dans
-    une seule liste plate — le champ expression de chaque entrée sert à la
-    rattacher à la bonne expression d'entrée."""
+    (groupes de synonymes, jamais un mot isolé ; aucun mot jamais une
+    traduction possible de l'expression source, ni au sens littéral ni au
+    sens idiomatique/figuré ; 2 ou 3 groupes, classés par qualité
+    décroissante). Renvoie UNE entrée par expression reçue, dans une seule
+    liste plate — le champ expression de chaque entrée sert à la rattacher à
+    la bonne expression d'entrée."""
 
     lot: list[Expression] = dspy.InputField(
-        description="Expressions indépendantes à traiter dans ce lot — ne jamais mélanger leurs distracteurs entre elles."
+        description="Expressions indépendantes à traiter dans ce lot — ne jamais mélanger leurs groupes entre elles."
     )
     resultats: list[ExpressionDistractors] = dspy.OutputField(
         description="Une entrée par expression du lot, dans le même ordre si possible, jamais moins d'entrées que d'expressions reçues."
@@ -468,34 +530,36 @@ class ExpressionAvecExclusions(BaseModel):
 
 class ProposeDistracteursMotRejeu(dspy.Signature):
     """Identique à ProposeDistracteursMot (même objectif, mêmes contraintes
-    strictes rappelées ci-dessous), avec UNE contrainte supplémentaire :
-    entree.a_eviter liste des distracteurs déjà proposés pour ce mot et
-    rejetés par un contrôle automatique car ils correspondaient à une
-    traduction connue du mot — NE JAMAIS reproposer un de ces mots précis,
-    ni une variante évidente (accord, conjugaison, synonyme immédiat).
+    strictes rappelées ci-dessous — GROUPES de synonymes, jamais un mot
+    isolé), avec UNE contrainte supplémentaire : entree.a_eviter liste des
+    mots déjà proposés pour ce mot (dans n'importe quel groupe d'un essai
+    précédent) et rejetés par un contrôle automatique car ils correspondaient
+    à une traduction connue du mot — NE JAMAIS reproposer un de ces mots
+    précis, dans AUCUN groupe, ni une variante évidente (accord, conjugaison,
+    synonyme immédiat).
 
     Contraintes strictes (rappel, identiques à un premier essai) :
-      - Le distracteur doit être un mot français courant et réel.
-      - Il ne doit en aucun cas être une traduction possible du mot source,
-        quel que soit le contexte.
+      - distractors est une LISTE DE GROUPES, chaque groupe = 2 à 4 mots
+        français SYNONYMES entre eux pour UN sens erroné.
+      - Chaque mot doit être français, courant et réel.
+      - Aucun mot ne doit en aucun cas être une traduction possible du mot
+        source, quel que soit le contexte.
       - Vérifie tous les sens, usages, nuances, registres, expressions
         idiomatiques et emplois figurés possibles du mot source avant de
-        retenir un distracteur.
-      - Le distracteur ne doit être ni un synonyme, ni un quasi-synonyme, ni
-        une traduction contextuelle possible du mot source.
-      - Il doit néanmoins être plausible comme réponse erronée dans un jeu de
-        traduction : idéalement un mot courant que le joueur pourrait
-        raisonnablement choisir.
+        retenir un mot.
+      - Aucun mot ne doit être un synonyme, ni un quasi-synonyme, ni une
+        traduction contextuelle possible du mot source.
+      - Doit néanmoins être plausible comme réponse erronée dans un jeu de
+        traduction.
       - Privilégie des mots de fréquence et de difficulté similaires au mot
         source. Évite les mots trop rares, archaïques, techniques ou
         manifestement absurdes.
-      - Si tu hésites sur un distracteur (y compris sur son lien avec un
-        élément de a_eviter), ne le propose pas et cherche une alternative
-        plus sûre.
+      - Si tu hésites sur un mot (y compris sur son lien avec un élément de
+        a_eviter), ne le propose pas et cherche une alternative plus sûre.
 
-    Classe tes propositions par qualité décroissante dans distractors. Ne
-    renvoie que les 2 ou 3 meilleurs distracteurs — AUCUN ne doit figurer
-    dans a_eviter, ni en être une variante évidente."""
+    Classe les groupes par qualité décroissante dans distractors. Ne renvoie
+    que les 2 ou 3 meilleurs groupes — AUCUN mot, dans AUCUN groupe, ne doit
+    figurer dans a_eviter, ni en être une variante évidente."""
 
     entree: ExpressionAvecExclusions = dspy.InputField()
     resultat: ExpressionDistractors = dspy.OutputField()
@@ -505,7 +569,7 @@ class ProposeDistracteursLotMotRejeu(dspy.Signature):
     """Même tâche que ProposeDistracteursMotRejeu, appliquée à PLUSIEURS mots
     anglais INDÉPENDANTS les uns des autres, chacun avec sa PROPRE liste
     a_eviter — ne jamais appliquer la liste a_eviter d'un mot à un autre mot
-    du lot, et ne jamais mélanger les distracteurs de deux mots différents.
+    du lot, et ne jamais mélanger les groupes de deux mots différents.
     Renvoie UNE entrée par mot reçu, dans une seule liste plate — le champ
     expression de chaque entrée sert à la rattacher au bon mot d'entrée."""
 
@@ -514,43 +578,44 @@ class ProposeDistracteursLotMotRejeu(dspy.Signature):
     )
     resultats: list[ExpressionDistractors] = dspy.OutputField(
         description="Une entrée par mot du lot, jamais moins d'entrées que de mots reçus — aucun "
-                    "distracteur ne doit figurer dans le a_eviter de SON mot."
+                    "mot, dans aucun groupe, ne doit figurer dans le a_eviter de SON mot."
     )
 
 
 class ProposeDistracteursMweRejeu(dspy.Signature):
     """Identique à ProposeDistracteursMwe (même objectif, mêmes contraintes
-    strictes rappelées ci-dessous, sens LITTÉRAL et IDIOMATIQUE/FIGURÉ),
-    avec UNE contrainte supplémentaire : entree.a_eviter liste des
-    distracteurs déjà proposés pour cette expression et rejetés par un
-    contrôle automatique car ils correspondaient à une traduction connue —
-    NE JAMAIS reproposer un de ces mots/expressions précis, ni une variante
-    évidente.
+    strictes rappelées ci-dessous — GROUPES de synonymes, jamais un mot
+    isolé, sens LITTÉRAL et IDIOMATIQUE/FIGURÉ), avec UNE contrainte
+    supplémentaire : entree.a_eviter liste des mots déjà proposés pour cette
+    expression (dans n'importe quel groupe d'un essai précédent) et rejetés
+    par un contrôle automatique car ils correspondaient à une traduction
+    connue — NE JAMAIS reproposer un de ces mots/expressions précis, dans
+    AUCUN groupe, ni une variante évidente.
 
     Contraintes strictes (rappel, identiques à un premier essai) :
-      - Le distracteur doit être un mot ou une expression française courante
-        et réelle.
-      - Il ne doit en aucun cas être une traduction possible de l'expression
-        source, ni de son sens LITTÉRAL (mot à mot), ni de son sens
-        IDIOMATIQUE/FIGURÉ, quel que soit le contexte.
+      - distractors est une LISTE DE GROUPES, chaque groupe = 2 à 4 mots ou
+        expressions françaises SYNONYMES entre eux pour UN sens erroné.
+      - Chaque mot doit être français, courant et réel.
+      - Aucun mot ne doit en aucun cas être une traduction possible de
+        l'expression source, ni de son sens LITTÉRAL (mot à mot), ni de son
+        sens IDIOMATIQUE/FIGURÉ, quel que soit le contexte.
       - Vérifie tous les sens, usages, nuances, registres et emplois possibles
         de l'expression source (au sens propre comme au sens figuré) avant de
-        retenir un distracteur.
-      - Le distracteur ne doit être ni un synonyme, ni un quasi-synonyme, ni
-        une traduction contextuelle possible de l'expression source, à aucun
-        de ses sens.
-      - Il doit néanmoins être plausible comme réponse erronée dans un jeu de
+        retenir un mot.
+      - Aucun mot ne doit être un synonyme, ni un quasi-synonyme, ni une
+        traduction contextuelle possible de l'expression source, à aucun de
+        ses sens.
+      - Doit néanmoins être plausible comme réponse erronée dans un jeu de
         traduction.
-      - Privilégie des distracteurs de fréquence et de difficulté similaires
-        à l'expression source. Évite les distracteurs trop rares, archaïques,
+      - Privilégie des mots de fréquence et de difficulté similaires à
+        l'expression source. Évite les mots trop rares, archaïques,
         techniques ou manifestement absurdes.
-      - Si tu hésites sur un distracteur (y compris sur son lien avec un
-        élément de a_eviter), ne le propose pas et cherche une alternative
-        plus sûre.
+      - Si tu hésites sur un mot (y compris sur son lien avec un élément de
+        a_eviter), ne le propose pas et cherche une alternative plus sûre.
 
-    Classe tes propositions par qualité décroissante dans distractors. Ne
-    renvoie que les 2 ou 3 meilleurs distracteurs — AUCUN ne doit figurer
-    dans a_eviter, ni en être une variante évidente."""
+    Classe les groupes par qualité décroissante dans distractors. Ne renvoie
+    que les 2 ou 3 meilleurs groupes — AUCUN mot, dans AUCUN groupe, ne doit
+    figurer dans a_eviter, ni en être une variante évidente."""
 
     entree: ExpressionAvecExclusions = dspy.InputField()
     resultat: ExpressionDistractors = dspy.OutputField()
@@ -561,7 +626,7 @@ class ProposeDistracteursLotMweRejeu(dspy.Signature):
     expressions anglaises INDÉPENDANTES les unes des autres, chacune avec sa
     PROPRE liste a_eviter — ne jamais appliquer la liste a_eviter d'une
     expression à une autre expression du lot, et ne jamais mélanger les
-    distracteurs de deux expressions différentes. Renvoie UNE entrée par
+    groupes de deux expressions différentes. Renvoie UNE entrée par
     expression reçue, dans une seule liste plate — le champ expression de
     chaque entrée sert à la rattacher à la bonne expression d'entrée."""
 
@@ -570,7 +635,7 @@ class ProposeDistracteursLotMweRejeu(dspy.Signature):
     )
     resultats: list[ExpressionDistractors] = dspy.OutputField(
         description="Une entrée par expression du lot, jamais moins d'entrées que d'expressions reçues "
-                    "— aucun distracteur ne doit figurer dans le a_eviter de SON expression."
+                    "— aucun mot, dans aucun groupe, ne doit figurer dans le a_eviter de SON expression."
     )
 
 
@@ -625,6 +690,25 @@ class ReplayEntry:
 
 def _split_translations(raw: str) -> list[str]:
     return [t.strip() for t in raw.split("|") if t.strip()]
+
+
+def _join_distractor_groups(groups: list[list[str]]) -> str:
+    """Sérialise les groupes de synonymes d'ExpressionDistractors.distractors
+    pour la colonne `distractors` (--out ET --cache-path) : mots d'un même
+    groupe joints par " | " (convention translations), groupes joints par
+    " || " (convention phrases de translate_mwe_context.py) — voir SORTIE
+    dans le docstring du module. Ex. [["a","b"],["c"]] -> "a | b || c"."""
+    return " || ".join(" | ".join(g) for g in groups)
+
+
+def _split_distractor_groups(raw: str) -> list[list[str]]:
+    """Inverse de _join_distractor_groups. "" -> []."""
+    if not raw.strip():
+        return []
+    return [
+        [w.strip() for w in group.split("|") if w.strip()]
+        for group in raw.split("||")
+    ]
 
 
 def read_input_csv(path: Path) -> tuple[list[VocabEntry], dict[str, int]]:
@@ -731,7 +815,7 @@ def read_cache(cache_path: Path) -> dict[tuple[str, str], ExpressionDistractors]
         for row in reader:
             row_type = (row.get("type") or "").strip()
             expression = (row.get("expression") or "").strip()
-            distractors = _split_translations(row.get("distractors") or "")
+            distractors = _split_distractor_groups(row.get("distractors") or "")
             if row_type not in ("word", "mwe") or not expression or not distractors:
                 continue
             cache[(row_type, expression.casefold())] = ExpressionDistractors(
@@ -778,7 +862,7 @@ def append_results_csv(row_type: str, results: list[ExpressionDistractors], out_
     with out_path.open("a", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         for r in results:
-            writer.writerow([row_type, r.expression, " | ".join(r.distractors), len(r.distractors)])
+            writer.writerow([row_type, r.expression, _join_distractor_groups(r.distractors), len(r.distractors)])
 
 
 def update_output_rows(out_path: Path, updates: dict[tuple[str, str], ExpressionDistractors]) -> int:
@@ -800,7 +884,7 @@ def update_output_rows(out_path: Path, updates: dict[tuple[str, str], Expression
         key = ((row.get("type") or "").strip(), (row.get("expression") or "").strip().casefold())
         result = updates.get(key)
         if result is not None:
-            row["distractors"] = " | ".join(result.distractors)
+            row["distractors"] = _join_distractor_groups(result.distractors)
             row["nb_distractors"] = str(len(result.distractors))
             nb_replaced += 1
 
@@ -836,39 +920,58 @@ def rewrite_rejected_csv(path: Path, remaining_causes: dict[str, list[str]]) -> 
 def check_distractors(
     result: ExpressionDistractors, entry: VocabEntry, stats: dict[str, int], rejected_rows: list[list[str]],
 ) -> ExpressionDistractors:
-    """rejected_rows reçoit une ligne [expression, cause] par distracteur
-    écarté pour cause de traduction connue (voir AUDIT_CSV_HEADER) — PAS pour
-    les distracteurs vides/dupliqués, qui n'ont rien d'utile à faire éviter
-    au LLM (voir CONTRÔLES dans le docstring du module). Muté en place :
-    l'appelant l'écrit dans out/<slug>/audit/distractors_rejected.csv."""
+    """rejected_rows reçoit une ligne [expression, cause] par MOT écarté pour
+    cause de traduction connue (voir AUDIT_CSV_HEADER) — PAS pour les mots
+    vides/dupliqués, qui n'ont rien d'utile à faire éviter au LLM (voir
+    CONTRÔLES dans le docstring du module). Muté en place : l'appelant
+    l'écrit dans out/<slug>/audit/distractors_rejected.csv.
+
+    Opère au niveau du MOT, À L'INTÉRIEUR de chaque groupe de
+    result.distractors (voir GROUPES DE SYNONYMES sur ExpressionDistractors) :
+    un mot qui coïncide avec une traduction connue est retiré de SON groupe
+    (pas tout le groupe) ; un mot dupliqué DANS un groupe ou ENTRE deux
+    groupes (un même mot ne doit représenter qu'un seul sens erroné) est
+    aussi retiré. Un groupe vidé de tous ses mots est retiré EN ENTIER ; un
+    groupe réduit à 1 mot est conservé mais compté à part
+    (`groupes_sous_min_synonymes`, voir MIN_SYNONYMS_PER_GROUP)."""
     if result.expression.strip().casefold() != entry.expression.strip().casefold():
         print(f"  ATTENTION expression renvoyée différente : {result.expression!r} != {entry.expression!r}")
         stats["expression_mismatch"] += 1
 
     known_translations = {t.casefold() for t in entry.translations}
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for d in result.distractors:
-        d = d.strip()
-        if not d:
-            stats["distracteurs_vides_retires"] += 1
-            continue
-        key = d.casefold()
-        if key in known_translations:
-            print(f"  ATTENTION distracteur écarté (traduction connue de {entry.expression!r}) : {d!r}")
-            stats["distracteurs_traduction_retires"] += 1
-            rejected_rows.append([entry.expression, d])
-            continue
-        if key in seen:
-            stats["distracteurs_doublons_retires"] += 1
-            continue
-        seen.add(key)
-        cleaned.append(d)
+    cleaned_groups: list[list[str]] = []
+    seen: set[str] = set()  # partagé entre TOUS les groupes -> un mot n'appartient qu'à un seul groupe
+    for group in result.distractors:
+        cleaned_group: list[str] = []
+        for d in group:
+            d = d.strip()
+            if not d:
+                stats["distracteurs_vides_retires"] += 1
+                continue
+            key = d.casefold()
+            if key in known_translations:
+                print(f"  ATTENTION mot écarté (traduction connue de {entry.expression!r}) : {d!r}")
+                stats["distracteurs_traduction_retires"] += 1
+                rejected_rows.append([entry.expression, d])
+                continue
+            if key in seen:
+                stats["distracteurs_doublons_retires"] += 1
+                continue
+            seen.add(key)
+            cleaned_group.append(d)
 
-    if not (MIN_DISTRACTORS <= len(cleaned) <= MAX_DISTRACTORS):
+        if not cleaned_group:
+            if group:  # groupe non-vide en entrée mais vidé par le garde-fou -> compté
+                stats["groupes_vides_retires"] += 1
+            continue
+        if len(cleaned_group) < MIN_SYNONYMS_PER_GROUP:
+            stats["groupes_sous_min_synonymes"] += 1
+        cleaned_groups.append(cleaned_group)
+
+    if not (MIN_DISTRACTORS <= len(cleaned_groups) <= MAX_DISTRACTORS):
         stats["hors_bornes_apres_controle"] += 1
 
-    return ExpressionDistractors(expression=entry.expression, distractors=cleaned)
+    return ExpressionDistractors(expression=entry.expression, distractors=cleaned_groups)
 
 
 # --------------------------------------------------------------------------
@@ -903,8 +1006,9 @@ def split_by_cache(
 
         known_translations = {t.casefold(): t for t in entry.translations}
         conflicts = [
-            (d, known_translations[d.strip().casefold()])
-            for d in cached.distractors if d.strip().casefold() in known_translations
+            (word, known_translations[word.strip().casefold()])
+            for group in cached.distractors for word in group
+            if word.strip().casefold() in known_translations
         ]
         if conflicts:
             stats["expressions_cache_invalidees"] += 1
@@ -933,6 +1037,7 @@ def new_stats(expressions_total: int, expressions_skipped_done: int) -> dict[str
         "resultats": 0, "expression_mismatch": 0,
         "distracteurs_vides_retires": 0, "distracteurs_doublons_retires": 0,
         "distracteurs_traduction_retires": 0, "hors_bornes_apres_controle": 0,
+        "groupes_vides_retires": 0, "groupes_sous_min_synonymes": 0,
         "expressions_retentees": 0, "expressions_toujours_manquantes": 0,
     }
 
@@ -1038,6 +1143,7 @@ def new_replay_stats(expressions_total: int, expressions_introuvables: int) -> d
         # Alimentés par check_distractors (réutilisé tel quel, voir plus bas).
         "expression_mismatch": 0, "distracteurs_vides_retires": 0, "distracteurs_doublons_retires": 0,
         "distracteurs_traduction_retires": 0, "hors_bornes_apres_controle": 0,
+        "groupes_vides_retires": 0, "groupes_sous_min_synonymes": 0,
     }
 
 
@@ -1290,8 +1396,9 @@ def run_replay_mode(
     print(f"Rattrapages individuels         : {stats['replay_retentees']}")
     print(f"  dont toujours manquants       : {stats['replay_toujours_manquantes']}")
     print(f"Résultats obtenus                : {stats['replay_resultats']}")
-    print(f"  dont corrigés (>= {MIN_DISTRACTORS} distracteurs valides) : {stats['replay_corrigees']}")
-    print(f"  dont distracteurs = traduction connue (retirés) : {stats['distracteurs_traduction_retires']}")
+    print(f"  dont corrigés (>= {MIN_DISTRACTORS} groupes valides) : {stats['replay_corrigees']}")
+    print(f"  dont mots = traduction connue (retirés) : {stats['distracteurs_traduction_retires']}")
+    print(f"  dont groupes vidés (tous leurs mots retirés) : {stats['groupes_vides_retires']}")
     print(f"Lignes remplacées dans {out_path.name}    : {nb_replaced}")
     print(f"Expressions encore dans {rejected_path.name} : {len(remaining_causes)}")
     print()
@@ -1420,7 +1527,10 @@ def main() -> int:
     print(f"  dont distracteurs vides retirés    : {stats['distracteurs_vides_retires']}")
     print(f"  dont distracteurs doublons retirés : {stats['distracteurs_doublons_retires']}")
     print(f"  dont distracteurs = traduction connue (retirés) : {stats['distracteurs_traduction_retires']}")
-    print(f"  dont lignes hors bornes [{MIN_DISTRACTORS},{MAX_DISTRACTORS}] après contrôle : "
+    print(f"  dont groupes vidés (tous leurs mots retirés)      : {stats['groupes_vides_retires']}")
+    print(f"  dont groupes sous {MIN_SYNONYMS_PER_GROUP} synonyme(s) après contrôle : "
+          f"{stats['groupes_sous_min_synonymes']}")
+    print(f"  dont lignes hors bornes [{MIN_DISTRACTORS},{MAX_DISTRACTORS}] groupes après contrôle : "
           f"{stats['hors_bornes_apres_controle']}")
     print()
     print(f"-> {out_path}")

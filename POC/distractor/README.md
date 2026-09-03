@@ -69,5 +69,24 @@ Le CSV attendu est celui produit par `localize_words_and_mwe.py` (colonnes
 `inputs/vocabulary_input_example.csv` pour un exemple. Avec ou sans ligne
 d'en-tête, les deux sont détectés automatiquement.
 
+## Format de sortie
+
+Une vraie traduction se présente souvent comme plusieurs mots de même sens
+(`fauteuil inclinable | fauteuil relax`) ; chaque distracteur est donc lui
+aussi un GROUPE de plusieurs mots français synonymes entre eux (2 à 4), pas
+un mot isolé — pour que le quizz puisse afficher plusieurs formulations
+acceptées, aussi bien pour la bonne réponse que pour les mauvaises. La
+colonne `distractors` encode cette liste de groupes : les mots d'un même
+groupe sont joints par `" | "`, les groupes eux-mêmes par `" || "`.
+
+```
+type,expression,distractors,nb_distractors
+word,staircase,ascenseur | élévateur || couloir | corridor || échelle | échelle à barreaux,3
+```
+
+Ici, 3 groupes (3 mauvaises réponses possibles dans le quizz) : "ascenseur"
+ou "élévateur" pour la 1re, "couloir" ou "corridor" pour la 2e, etc.
+`nb_distractors` compte les GROUPES (options de réponse), pas les mots.
+
 Détails de conception (dédoublonnage, garde-fou anti-traduction, cache,
 prompts DSPy) : voir le docstring en tête de `generate_distractors.py`.
