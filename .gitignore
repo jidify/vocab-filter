@@ -59,6 +59,16 @@ POC/traitement_localisation/localisation_unmatched.csv
 # est régénérable via une seule commande, mêmes conventions que ci-dessus.
 POC/pipeline/out/
 
+# Générateur de distracteurs (POC/distractor/generate_distractors.py) —
+# outputs/ est régénérable via une commande (mêmes conventions que
+# ci-dessus). cache/ (cache persistant de distracteurs + son audit,
+# --cache-path/--cache-audit-path) est un artefact de travail local qui
+# grossit à chaque run réel : pas versionné, à sauvegarder hors git si sa
+# valeur (appels LLM déjà payés) doit être conservée — même logique que
+# data/llm_results.sqlite3 ci-dessous.
+POC/distractor/outputs/
+POC/distractor/cache/
+
 # Exceptions aux règles ci-dessus (word-prevalence.txt, kuperman-aoa.csv,
 # ligne 25-26) : copies VENDORÉES, volontairement versionnées, pour que
 # POC/ reste autonome et déplaçable sans dépendre de DATASETS/ — voir
