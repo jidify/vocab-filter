@@ -33,6 +33,7 @@ expression déjà connue d'un traitement précédent.
 | `--rejected-out` | `out/<slug>/audit/distractors_rejected.csv` | Journal (`expression,cause`) des distracteurs rejetés par le garde-fou de ce run |
 | `--no-cache` | off | Désactive le cache disque de DSPy (~/.dspy_cache) — sans rapport avec `--cache-path` |
 | `--dry-run` | off | Dédoublonne et affiche le plan de lots sans appeler le LLM ni rien écrire |
+| `--replay-rejected` | off | Mode rejeu : relit `--rejected-out` et redemande au LLM les expressions concernées, en lui interdisant de reproposer les causes déjà rejetées. Remplace le flux normal pour ce run ; incompatible avec `--restart` |
 
 ## Exemples
 
@@ -54,6 +55,11 @@ uv run python POC/distractor/generate_distractors.py --in mon_livre.csv --ignore
 
 # Résultats dans un répertoire différent
 uv run python POC/distractor/generate_distractors.py --in mon_livre.csv --out-dir /tmp/essai
+
+# Rejouer les expressions dont des distracteurs ont été rejetés (voir
+# out/<slug>/audit/distractors_rejected.csv) — le LLM est explicitement
+# invité à ne pas reproposer les causes déjà rejetées
+uv run python POC/distractor/generate_distractors.py --in mon_livre.csv --replay-rejected
 ```
 
 ## Format d'entrée

@@ -101,19 +101,47 @@ mots) :
     éviter au LLM dans ces deux cas — juste du bruit de formatage).
   - après retraits, hors de [2, 3] -> rattrapage individuel une fois (avec le
     MÊME prompt, sans tenir compte des causes journalisées ci-dessus — voir
-    RÉ-SOUMISSION plus bas), puis écrit quand même (jamais perdu
-    silencieusement) et compté à part.
+    REJEU plus bas), puis écrit quand même (jamais perdu silencieusement) et
+    compté à part.
 
-RÉ-SOUMISSION AU LLM AVEC LES CAUSES JOURNALISÉES : PAS IMPLÉMENTÉE
-(décision utilisateur explicite) — distractors_rejected.csv existe pour
-qu'un futur run puisse relire ce journal et rejouer chaque expression
-concernée avec une consigne supplémentaire ("ne pas utiliser <cause>"), mais
-ce script ne le fait pas lui-même aujourd'hui. Une expression dont TOUS les
-distracteurs ont été rejetés (ex. "beat" -> 0 distracteur) reste donc dans le
-CSV de sortie avec un compte < 2, sans nouvelle tentative automatique au-delà
-du rattrapage individuel déjà décrit ci-dessus (qui rejoue le MÊME prompt,
-sans exclure les causes) — à corriger manuellement ou via un futur run outillé
-pour ça.
+REJEU DES DISTRACTEURS REJETÉS (--replay-rejected) : relit
+out/<slug>/audit/distractors_rejected.csv, regroupe les causes par
+expression, et redemande au LLM ses distracteurs pour CES expressions
+précises via une variante des signatures ci-dessus
+(ProposeDistracteurs{Mot,Mwe}{,Lot}Rejeu, champ supplémentaire entree.a_eviter
+= les causes connues, jamais à reproposer). Mode AUTONOME : remplace
+ENTIÈREMENT le flux normal pour ce run (pas de génération de nouvelles
+expressions dans le même run) ; incompatible avec --restart (qui
+supprimerait exactement ce que ce mode doit lire — voir main()). Traitement
+PAR LOTS comme le flux normal (mêmes --batch-size, mêmes lots homogènes
+word/mwe). Le garde-fou anti-traduction (check_distractors) reste actif sur
+les résultats du rejeu : le LLM peut ignorer a_eviter, un distracteur qui
+coïncide encore avec une traduction connue est de nouveau écarté et
+journalisé.
+
+Résultats du rejeu : une expression qui obtient >= MIN_DISTRACTORS
+distracteurs valides REMPLACE sa ligne (déficiente) dans
+<slug>-distractors.csv — SEULE opération du script qui réécrit ce fichier au
+lieu d'y ajouter (update_output_rows : lit tout le CSV en mémoire, remplace,
+réécrit ; acceptable pour cette correction ponctuelle, un livre entier restant
+de l'ordre de quelques milliers de lignes) — et disparaît de
+distractors_rejected.csv. Une expression encore sous MIN_DISTRACTORS y reste,
+avec les causes constatées PENDANT ce rejeu (qui REMPLACENT les anciennes) —
+sauf si l'appel LLM lui-même a échoué (lot en échec, expression absente de la
+réponse même après rattrapage individuel), auquel cas ses causes D'ORIGINE
+sont conservées telles quelles : aucune perte d'information faute d'avoir pu
+retester (voir run_replay_batches). Écriture UNE SEULE FOIS en fin de rejeu
+(pas de streaming incrémental ici, à la différence du flux normal — les
+volumes attendus sont petits) : une interruption en cours de rejeu ne perd
+rien d'irréversible, ni out_path ni distractors_rejected.csv ne sont modifiés
+tant que le rejeu n'est pas allé à son terme ; relancer --replay-rejected
+repart du même journal.
+
+LIMITE CONNUE (assumée pour rester simple) : si un rejeu renvoie moins de
+MIN_DISTRACTORS sans qu'aucun distracteur n'ait été rejeté cette fois (le LLM
+en propose simplement trop peu, sans en reproposer d'invalide), l'expression
+sort quand même de distractors_rejected.csv faute de cause à y écrire, malgré
+un problème persistant — signalé au récapitulatif, pas traité autrement.
 
 REPRISE : le CSV de sortie (<slug>/<slug>-distractors.csv) fait office de
 journal (colonne `expression`, casefold) — --restart pour ignorer et repartir
@@ -172,6 +200,8 @@ Usage :
     uv run python POC/distractor/generate_distractors.py --batch-size 0
     # forcer un recalcul LLM en ignorant le cache en lecture :
     uv run python POC/distractor/generate_distractors.py --ignore-cache
+    # rejouer les distracteurs rejetés (voir REJEU ci-dessus) :
+    uv run python POC/distractor/generate_distractors.py --in <fusionné.csv> --replay-rejected
 """
 
 from __future__ import annotations
@@ -183,6 +213,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 import dspy
 from pydantic import BaseModel, Field
@@ -417,6 +448,133 @@ class ProposeDistracteursLotMwe(dspy.Signature):
 
 
 # --------------------------------------------------------------------------
+# Signatures DSPy — REJEU (--replay-rejected, voir REJEU dans le docstring
+# du module) : mêmes contraintes que les 4 signatures ci-dessus, plus une
+# liste de distracteurs déjà rejetés à ne jamais reproposer.
+# --------------------------------------------------------------------------
+
+class ExpressionAvecExclusions(BaseModel):
+    """Une expression à rejouer, avec les distracteurs déjà proposés pour
+    elle et rejetés — ce que le LLM reçoit en entrée pour --replay-rejected."""
+
+    expression: str = Field(description="Mot ou expression anglaise source, identique à un rejeu précédent.")
+    a_eviter: list[str] = Field(
+        description="Distracteurs déjà proposés pour cette expression et rejetés par un contrôle "
+                    "automatique car ils correspondaient à une traduction connue — NE JAMAIS les "
+                    "reproposer, y compris reformulés, au singulier/pluriel, conjugués ou en "
+                    "synonyme évident de ces mots précis."
+    )
+
+
+class ProposeDistracteursMotRejeu(dspy.Signature):
+    """Identique à ProposeDistracteursMot (même objectif, mêmes contraintes
+    strictes rappelées ci-dessous), avec UNE contrainte supplémentaire :
+    entree.a_eviter liste des distracteurs déjà proposés pour ce mot et
+    rejetés par un contrôle automatique car ils correspondaient à une
+    traduction connue du mot — NE JAMAIS reproposer un de ces mots précis,
+    ni une variante évidente (accord, conjugaison, synonyme immédiat).
+
+    Contraintes strictes (rappel, identiques à un premier essai) :
+      - Le distracteur doit être un mot français courant et réel.
+      - Il ne doit en aucun cas être une traduction possible du mot source,
+        quel que soit le contexte.
+      - Vérifie tous les sens, usages, nuances, registres, expressions
+        idiomatiques et emplois figurés possibles du mot source avant de
+        retenir un distracteur.
+      - Le distracteur ne doit être ni un synonyme, ni un quasi-synonyme, ni
+        une traduction contextuelle possible du mot source.
+      - Il doit néanmoins être plausible comme réponse erronée dans un jeu de
+        traduction : idéalement un mot courant que le joueur pourrait
+        raisonnablement choisir.
+      - Privilégie des mots de fréquence et de difficulté similaires au mot
+        source. Évite les mots trop rares, archaïques, techniques ou
+        manifestement absurdes.
+      - Si tu hésites sur un distracteur (y compris sur son lien avec un
+        élément de a_eviter), ne le propose pas et cherche une alternative
+        plus sûre.
+
+    Classe tes propositions par qualité décroissante dans distractors. Ne
+    renvoie que les 2 ou 3 meilleurs distracteurs — AUCUN ne doit figurer
+    dans a_eviter, ni en être une variante évidente."""
+
+    entree: ExpressionAvecExclusions = dspy.InputField()
+    resultat: ExpressionDistractors = dspy.OutputField()
+
+
+class ProposeDistracteursLotMotRejeu(dspy.Signature):
+    """Même tâche que ProposeDistracteursMotRejeu, appliquée à PLUSIEURS mots
+    anglais INDÉPENDANTS les uns des autres, chacun avec sa PROPRE liste
+    a_eviter — ne jamais appliquer la liste a_eviter d'un mot à un autre mot
+    du lot, et ne jamais mélanger les distracteurs de deux mots différents.
+    Renvoie UNE entrée par mot reçu, dans une seule liste plate — le champ
+    expression de chaque entrée sert à la rattacher au bon mot d'entrée."""
+
+    lot: list[ExpressionAvecExclusions] = dspy.InputField(
+        description="Mots indépendants à rejouer dans ce lot, chacun avec sa propre liste a_eviter."
+    )
+    resultats: list[ExpressionDistractors] = dspy.OutputField(
+        description="Une entrée par mot du lot, jamais moins d'entrées que de mots reçus — aucun "
+                    "distracteur ne doit figurer dans le a_eviter de SON mot."
+    )
+
+
+class ProposeDistracteursMweRejeu(dspy.Signature):
+    """Identique à ProposeDistracteursMwe (même objectif, mêmes contraintes
+    strictes rappelées ci-dessous, sens LITTÉRAL et IDIOMATIQUE/FIGURÉ),
+    avec UNE contrainte supplémentaire : entree.a_eviter liste des
+    distracteurs déjà proposés pour cette expression et rejetés par un
+    contrôle automatique car ils correspondaient à une traduction connue —
+    NE JAMAIS reproposer un de ces mots/expressions précis, ni une variante
+    évidente.
+
+    Contraintes strictes (rappel, identiques à un premier essai) :
+      - Le distracteur doit être un mot ou une expression française courante
+        et réelle.
+      - Il ne doit en aucun cas être une traduction possible de l'expression
+        source, ni de son sens LITTÉRAL (mot à mot), ni de son sens
+        IDIOMATIQUE/FIGURÉ, quel que soit le contexte.
+      - Vérifie tous les sens, usages, nuances, registres et emplois possibles
+        de l'expression source (au sens propre comme au sens figuré) avant de
+        retenir un distracteur.
+      - Le distracteur ne doit être ni un synonyme, ni un quasi-synonyme, ni
+        une traduction contextuelle possible de l'expression source, à aucun
+        de ses sens.
+      - Il doit néanmoins être plausible comme réponse erronée dans un jeu de
+        traduction.
+      - Privilégie des distracteurs de fréquence et de difficulté similaires
+        à l'expression source. Évite les distracteurs trop rares, archaïques,
+        techniques ou manifestement absurdes.
+      - Si tu hésites sur un distracteur (y compris sur son lien avec un
+        élément de a_eviter), ne le propose pas et cherche une alternative
+        plus sûre.
+
+    Classe tes propositions par qualité décroissante dans distractors. Ne
+    renvoie que les 2 ou 3 meilleurs distracteurs — AUCUN ne doit figurer
+    dans a_eviter, ni en être une variante évidente."""
+
+    entree: ExpressionAvecExclusions = dspy.InputField()
+    resultat: ExpressionDistractors = dspy.OutputField()
+
+
+class ProposeDistracteursLotMweRejeu(dspy.Signature):
+    """Même tâche que ProposeDistracteursMweRejeu, appliquée à PLUSIEURS
+    expressions anglaises INDÉPENDANTES les unes des autres, chacune avec sa
+    PROPRE liste a_eviter — ne jamais appliquer la liste a_eviter d'une
+    expression à une autre expression du lot, et ne jamais mélanger les
+    distracteurs de deux expressions différentes. Renvoie UNE entrée par
+    expression reçue, dans une seule liste plate — le champ expression de
+    chaque entrée sert à la rattacher à la bonne expression d'entrée."""
+
+    lot: list[ExpressionAvecExclusions] = dspy.InputField(
+        description="Expressions indépendantes à rejouer dans ce lot, chacune avec sa propre liste a_eviter."
+    )
+    resultats: list[ExpressionDistractors] = dspy.OutputField(
+        description="Une entrée par expression du lot, jamais moins d'entrées que d'expressions reçues "
+                    "— aucun distracteur ne doit figurer dans le a_eviter de SON expression."
+    )
+
+
+# --------------------------------------------------------------------------
 # Câblage LM (CatGPT via l'adaptateur LiteLLM de prod) — recopié à
 # l'identique de translate_word_context.py::configure_dspy.
 # --------------------------------------------------------------------------
@@ -452,6 +610,17 @@ class VocabEntry:
     type: str
     expression: str
     translations: set[str]
+
+
+@dataclass
+class ReplayEntry:
+    """Une expression à rejouer (--replay-rejected, voir REJEU dans le
+    docstring du module) : son VocabEntry d'origine (relu depuis --in, donc
+    avec ses translations pour le garde-fou) et les causes déjà connues
+    (distracteurs déjà proposés et rejetés pour elle)."""
+
+    entry: VocabEntry
+    excluded: list[str]
 
 
 def _split_translations(raw: str) -> list[str]:
@@ -506,10 +675,14 @@ def read_input_csv(path: Path) -> tuple[list[VocabEntry], dict[str, int]]:
     return [entries_by_key[k] for k in order], counters
 
 
-def build_batches(entries: list[VocabEntry], batch_size: int) -> list[list[VocabEntry]]:
+T = TypeVar("T")
+
+
+def build_batches(entries: list[T], batch_size: int) -> list[list[T]]:
     """Découpe entries (déjà homogène en type — voir main()) en lots de
     batch_size expressions. batch_size <= 0 -> un lot par expression (mode
-    séquentiel)."""
+    séquentiel). Générique : réutilisé tel quel sur list[VocabEntry] (flux
+    normal) et list[ReplayEntry] (--replay-rejected, voir plus bas)."""
     if batch_size <= 0:
         return [[e] for e in entries]
     return [entries[i:i + batch_size] for i in range(0, len(entries), batch_size)]
@@ -567,6 +740,24 @@ def read_cache(cache_path: Path) -> dict[tuple[str, str], ExpressionDistractors]
     return cache
 
 
+def read_rejected(path: Path) -> dict[str, list[str]]:
+    """Lit out/<slug>/audit/distractors_rejected.csv (colonnes
+    expression,cause) et regroupe les causes par expression — utilisé
+    UNIQUEMENT par --replay-rejected (voir REJEU dans le docstring du
+    module). Fichier absent ou vide -> {}."""
+    causes: dict[str, list[str]] = {}
+    if not path.exists():
+        return causes
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            expression = (row.get("expression") or "").strip()
+            cause = (row.get("cause") or "").strip()
+            if expression and cause:
+                causes.setdefault(expression, []).append(cause)
+    return causes
+
+
 def append_audit_rows(rows: list[list[str]], audit_path: Path) -> None:
     """Ajoute des lignes au journal d'audit du cache — mêmes règles
     d'encodage que append_results_csv (utf-8 SANS -sig en append, voir
@@ -588,6 +779,53 @@ def append_results_csv(row_type: str, results: list[ExpressionDistractors], out_
         writer = csv.writer(f)
         for r in results:
             writer.writerow([row_type, r.expression, " | ".join(r.distractors), len(r.distractors)])
+
+
+def update_output_rows(out_path: Path, updates: dict[tuple[str, str], ExpressionDistractors]) -> int:
+    """Réécrit out_path en remplaçant les lignes dont (type,
+    expression.casefold()) est dans updates par leur nouveau contenu — SEULE
+    fonction du script qui réécrit out_path au lieu d'y ajouter, utilisée
+    UNIQUEMENT par --replay-rejected (voir REJEU dans le docstring du module ;
+    le flux normal reste append-only en streaming, voir append_results_csv).
+    Lit tout le fichier en mémoire (quelques centaines à quelques milliers de
+    lignes pour un livre entier) — acceptable pour cette correction
+    ponctuelle. Renvoie le nombre de lignes effectivement remplacées."""
+    if not updates or not out_path.exists():
+        return 0
+    with out_path.open("r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    nb_replaced = 0
+    for row in rows:
+        key = ((row.get("type") or "").strip(), (row.get("expression") or "").strip().casefold())
+        result = updates.get(key)
+        if result is not None:
+            row["distractors"] = " | ".join(result.distractors)
+            row["nb_distractors"] = str(len(result.distractors))
+            nb_replaced += 1
+
+    with out_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_HEADER)
+        writer.writeheader()
+        writer.writerows(rows)
+    return nb_replaced
+
+
+def rewrite_rejected_csv(path: Path, remaining_causes: dict[str, list[str]]) -> None:
+    """Réécrit intégralement out/<slug>/audit/distractors_rejected.csv après
+    un rejeu (--replay-rejected) : ne garde que les causes des expressions
+    ENCORE déficientes après ce rejeu (résolues -> disparaissent du fichier).
+    remaining_causes vide -> le fichier est supprimé (rien à signaler)."""
+    rows = [[expression, cause] for expression, causes in remaining_causes.items() for cause in causes]
+    if not rows:
+        if path.exists():
+            path.unlink()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(AUDIT_CSV_HEADER)
+        writer.writerows(rows)
 
 
 # --------------------------------------------------------------------------
@@ -787,6 +1025,135 @@ def run_batches(
 
 
 # --------------------------------------------------------------------------
+# Rejeu des distracteurs rejetés (--replay-rejected) — voir REJEU dans le
+# docstring du module.
+# --------------------------------------------------------------------------
+
+def new_replay_stats(expressions_total: int, expressions_introuvables: int) -> dict[str, int]:
+    return {
+        "expressions_total": expressions_total, "expressions_introuvables": expressions_introuvables,
+        "replay_batches": 0, "replay_batches_failed": 0,
+        "replay_resultats": 0, "replay_corrigees": 0,
+        "replay_retentees": 0, "replay_toujours_manquantes": 0,
+        # Alimentés par check_distractors (réutilisé tel quel, voir plus bas).
+        "expression_mismatch": 0, "distracteurs_vides_retires": 0, "distracteurs_doublons_retires": 0,
+        "distracteurs_traduction_retires": 0, "hors_bornes_apres_controle": 0,
+    }
+
+
+def run_replay_batches(
+    row_type: str, batches: list[list[ReplayEntry]], cache_path: Path, stats: dict[str, int],
+) -> tuple[dict[tuple[str, str], ExpressionDistractors], dict[str, list[str]]]:
+    """Pendant de run_batches pour --replay-rejected : mêmes principes (échec
+    de lot -> pending_retry, réconciliation par expression.casefold(),
+    rattrapage individuel en fin de run via la signature unitaire *Rejeu),
+    mais construit ExpressionAvecExclusions (a_eviter = r.excluded) au lieu
+    de Expression, alimente le cache normalement (append_results_csv, additif
+    — voir CACHE PERSISTANT dans le docstring du module), et NE MODIFIE PAS
+    out_path/distractors_rejected.csv directement : renvoie (updates,
+    remaining_causes) que l'appelant applique UNE SEULE FOIS pour tout le
+    run (word + mwe confondus) via update_output_rows/rewrite_rejected_csv."""
+    unit_analyser = dspy.ChainOfThought(ProposeDistracteursMotRejeu if row_type == "word" else ProposeDistracteursMweRejeu)
+    lot_analyser = dspy.ChainOfThought(ProposeDistracteursLotMotRejeu if row_type == "word" else ProposeDistracteursLotMweRejeu)
+    pending_retry: list[ReplayEntry] = []
+
+    updates: dict[tuple[str, str], ExpressionDistractors] = {}
+    # Pessimiste par défaut : toute expression garde ses causes D'ORIGINE
+    # tant qu'un rejeu effectif (réussi ou non) ne les a pas mises à jour —
+    # une expression dont l'appel LLM échoue même après rattrapage individuel
+    # n'est donc JAMAIS perdue du journal (voir le docstring du module).
+    remaining_causes: dict[str, list[str]] = {
+        r.entry.expression: list(r.excluded) for batch in batches for r in batch
+    }
+
+    for batch_idx, batch in enumerate(batches, start=1):
+        entries_by_key = {r.entry.expression.casefold(): r for r in batch}
+        expr_list = ", ".join(r.entry.expression for r in batch)
+        print(f"[{row_type} rejeu {batch_idx}/{len(batches)}] {len(batch)} expression(s) : {expr_list}")
+        stats["replay_batches"] += 1
+
+        try:
+            if len(batch) == 1:
+                r0 = batch[0]
+                prediction = unit_analyser(
+                    entree=ExpressionAvecExclusions(expression=r0.entry.expression, a_eviter=r0.excluded)
+                )
+                results = [prediction.resultat]
+            else:
+                prediction = lot_analyser(lot=[
+                    ExpressionAvecExclusions(expression=r.entry.expression, a_eviter=r.excluded) for r in batch
+                ])
+                results = prediction.resultats
+        except Exception as exc:  # dégrade : un lot en échec n'arrête pas le run
+            print(f"  échec de lot : {exc!r}")
+            stats["replay_batches_failed"] += 1
+            pending_retry.extend(batch)
+            continue
+
+        seen_keys: set[str] = set()
+        for result in results:
+            key = result.expression.strip().casefold()
+            r = entries_by_key.get(key)
+            if r is None:
+                print(f"  ATTENTION résultat hors-lot ignoré : expression={result.expression!r}")
+                continue
+            seen_keys.add(key)
+            stats["replay_resultats"] += 1
+            rejected_rows: list[list[str]] = []
+            kept = check_distractors(result, r.entry, stats, rejected_rows)
+            updates[(row_type, r.entry.expression.casefold())] = kept
+            if len(kept.distractors) >= MIN_DISTRACTORS:
+                remaining_causes.pop(r.entry.expression, None)
+                stats["replay_corrigees"] += 1
+            else:
+                remaining_causes[r.entry.expression] = [row[1] for row in rejected_rows]
+            append_results_csv(row_type, [kept], cache_path)  # cache toujours additif, voir read_cache
+
+        missing = [r for r in batch if r.entry.expression.casefold() not in seen_keys]
+        if missing:
+            print(f"  ATTENTION {len(missing)} expression(s) absente(s) de la réponse : "
+                  f"{', '.join(r.entry.expression for r in missing)}")
+            pending_retry.extend(missing)
+
+    if not pending_retry:
+        return updates, remaining_causes
+
+    print()
+    print(f"=== Rattrapage individuel de {len(pending_retry)} expression(s) rejouée(s) ({row_type}) ===")
+    for r in pending_retry:
+        stats["replay_retentees"] += 1
+        print(f"[rattrapage rejeu {stats['replay_retentees']}/{len(pending_retry)}] {r.entry.expression}...")
+        try:
+            prediction = unit_analyser(
+                entree=ExpressionAvecExclusions(expression=r.entry.expression, a_eviter=r.excluded)
+            )
+        except Exception as exc:
+            print(f"  échec : {exc!r}")
+            stats["replay_toujours_manquantes"] += 1
+            continue  # remaining_causes garde les causes D'ORIGINE de r, jamais modifiées ci-dessus
+
+        result = prediction.resultat
+        if result.expression.strip().casefold() != r.entry.expression.strip().casefold():
+            print(f"  ATTENTION toujours aucun résultat exploitable pour {r.entry.expression!r}")
+            stats["replay_toujours_manquantes"] += 1
+            continue
+
+        stats["replay_resultats"] += 1
+        rejected_rows: list[list[str]] = []
+        kept = check_distractors(result, r.entry, stats, rejected_rows)
+        updates[(row_type, r.entry.expression.casefold())] = kept
+        if len(kept.distractors) >= MIN_DISTRACTORS:
+            remaining_causes.pop(r.entry.expression, None)
+            stats["replay_corrigees"] += 1
+        else:
+            remaining_causes[r.entry.expression] = [row[1] for row in rejected_rows]
+        append_results_csv(row_type, [kept], cache_path)
+        print("  -> 1 résultat rejoué")
+
+    return updates, remaining_causes
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -832,7 +1199,109 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true",
                          help="Lit, dédoublonne, consulte le cache et affiche le plan de lots sans "
                               "appeler le LLM ni rien écrire (ni --out, ni le cache, ni l'audit)")
+    parser.add_argument("--replay-rejected", action="store_true",
+                         help="Mode REJEU (voir REJEU dans le docstring du module) : relit "
+                              "--rejected-out, regroupe les causes par expression, et redemande au "
+                              "LLM ses distracteurs pour CES expressions en lui interdisant "
+                              "explicitement de reproposer les causes connues. REMPLACE le flux "
+                              "normal (pas de génération de nouvelles expressions dans ce run) ; "
+                              "incompatible avec --restart")
     return parser.parse_args()
+
+
+def run_replay_mode(
+    entries: list[VocabEntry], rejected_path: Path, out_path: Path, cache_path: Path, args: argparse.Namespace,
+) -> int:
+    """Flux complet de --replay-rejected — voir REJEU dans le docstring du
+    module. Appelé par main() en remplacement ENTIER du flux normal (aucune
+    nouvelle expression générée dans ce run)."""
+    causes_by_expr = read_rejected(rejected_path)
+    if not causes_by_expr:
+        print(f"Rien à rejouer : {rejected_path} absent ou vide.")
+        return 0
+
+    # entries_by_expr : si une même expression existe à la fois en word et en
+    # mwe dans --in (cas structurellement possible mais non observé en
+    # pratique), seule la dernière rencontrée est retenue ici — limite
+    # assumée pour rester simple (voir le docstring du module).
+    entries_by_expr = {e.expression.casefold(): e for e in entries}
+    replay_entries: list[ReplayEntry] = []
+    introuvables: list[str] = []
+    for expression, causes in causes_by_expr.items():
+        entry = entries_by_expr.get(expression.casefold())
+        if entry is None:
+            introuvables.append(expression)
+            continue
+        replay_entries.append(ReplayEntry(entry=entry, excluded=causes))
+
+    print(f"{len(causes_by_expr)} expression(s) à rejouer trouvée(s) dans {rejected_path}.")
+    if introuvables:
+        print(f"  ATTENTION {len(introuvables)} expression(s) introuvable(s) dans --in (ignorée(s)) : "
+              f"{', '.join(introuvables)}")
+
+    replay_words = [r for r in replay_entries if r.entry.type == "word"]
+    replay_mwes = [r for r in replay_entries if r.entry.type == "mwe"]
+    print(f"  dont {len(replay_words)} word / {len(replay_mwes)} mwe à rejouer")
+
+    word_batches = build_batches(replay_words, args.batch_size)
+    mwe_batches = build_batches(replay_mwes, args.batch_size)
+    print(f"{len(replay_words)} word(s) -> {len(word_batches)} lot(s), "
+          f"{len(replay_mwes)} mwe(s) -> {len(mwe_batches)} lot(s) "
+          f"(seuil {args.batch_size} expression(s)/lot, lots jamais mixtes).")
+
+    if args.dry_run:
+        for label, batches in (("word", word_batches), ("mwe", mwe_batches)):
+            for idx, batch in enumerate(batches, start=1):
+                detail = ", ".join(f"{r.entry.expression} (éviter : {', '.join(r.excluded)})" for r in batch)
+                print(f"  [dry-run rejeu {label} lot {idx}/{len(batches)}] {detail}")
+        print("--dry-run : aucun appel LLM effectué, rien écrit.")
+        return 0
+
+    if not replay_entries:
+        return 0
+
+    stats = new_replay_stats(expressions_total=len(replay_entries), expressions_introuvables=len(introuvables))
+
+    configure_dspy(no_cache=args.no_cache)
+    ensure_csv_with_header(cache_path)
+
+    updates: dict[tuple[str, str], ExpressionDistractors] = {}
+    remaining_causes: dict[str, list[str]] = {}
+    if word_batches:
+        u, rc = run_replay_batches("word", word_batches, cache_path, stats)
+        updates.update(u)
+        remaining_causes.update(rc)
+    if mwe_batches:
+        u, rc = run_replay_batches("mwe", mwe_batches, cache_path, stats)
+        updates.update(u)
+        remaining_causes.update(rc)
+
+    nb_replaced = update_output_rows(out_path, updates)
+    if nb_replaced < len(updates):
+        print(f"  ATTENTION {len(updates) - nb_replaced} résultat(s) rejoué(s) sans ligne "
+              f"correspondante dans {out_path} (pas remplacé(s)).")
+    rewrite_rejected_csv(rejected_path, remaining_causes)
+
+    print()
+    print("=== Récapitulatif du rejeu ===")
+    print(f"Expressions à rejouer           : {stats['expressions_total']}")
+    print(f"  dont introuvables dans --in   : {stats['expressions_introuvables']}")
+    print(f"Lots envoyés                    : {stats['replay_batches']} ({stats['replay_batches_failed']} en échec)")
+    print(f"Rattrapages individuels         : {stats['replay_retentees']}")
+    print(f"  dont toujours manquants       : {stats['replay_toujours_manquantes']}")
+    print(f"Résultats obtenus                : {stats['replay_resultats']}")
+    print(f"  dont corrigés (>= {MIN_DISTRACTORS} distracteurs valides) : {stats['replay_corrigees']}")
+    print(f"  dont distracteurs = traduction connue (retirés) : {stats['distracteurs_traduction_retires']}")
+    print(f"Lignes remplacées dans {out_path.name}    : {nb_replaced}")
+    print(f"Expressions encore dans {rejected_path.name} : {len(remaining_causes)}")
+    print()
+    print(f"-> {out_path}")
+    print(f"-> cache : {cache_path}")
+    if rejected_path.exists():
+        print(f"-> distracteurs encore rejetés (audit) : {rejected_path}")
+    else:
+        print(f"-> {rejected_path.name} supprimé : plus aucune expression rejetée.")
+    return 0
 
 
 def main() -> int:
@@ -842,6 +1311,12 @@ def main() -> int:
 
     if not in_path.exists():
         print(f"CSV d'entrée introuvable : {in_path}")
+        return 1
+
+    if args.replay_rejected and args.restart:
+        print("--replay-rejected et --restart sont incompatibles : --restart supprimerait "
+              "out/<slug>/ (résultat ET distractors_rejected.csv), exactement ce que "
+              "--replay-rejected doit lire. Lance les deux séparément si besoin.")
         return 1
 
     slug = slugify(in_path.stem)
@@ -859,6 +1334,9 @@ def main() -> int:
           f"{read_counters['lignes_ignorees']} ignorée(s) (type inconnu ou expression vide), "
           f"{read_counters['expressions_uniques']} expression(s) unique(s), "
           f"{read_counters['doublons_ecartes']} doublon(s) écarté(s).")
+
+    if args.replay_rejected:
+        return run_replay_mode(entries, rejected_path, out_path, cache_path, args)
 
     if args.limit > 0:
         entries = entries[:args.limit]
