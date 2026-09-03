@@ -1,14 +1,13 @@
 """Orchestrateur du pipeline POC de sélection de vocabulaire — enchaîne
-programmatiquement les six étapes jusqu'ici lancées à la main dans
-POC/traitement_word/, POC/traitement_mwe/, POC/traitement_merge/ et
-POC/traitement_localisation/, chacune étant l'entrée de la suivante :
+programmatiquement les six étapes, toutes dans POC/pipeline/stages/,
+chacune étant l'entrée de la suivante :
 
-  1. word_extract   (traitement_word/claude/extract_word_contexts.py)
-  2. word_translate  (traitement_word/claude/translate_word_context.py)
-  3. mwe_extract    (traitement_mwe/claude/extract_mwe_contexts.py)
-  4. mwe_translate   (traitement_mwe/claude/translate_mwe_context.py)
-  5. merge          (traitement_merge/merge_word_and_mwe_analysis.py)
-  6. localize       (traitement_localisation/localize_words_and_mwe.py)
+  1. word_extract   (stages/extract_word_contexts.py)
+  2. word_translate  (stages/translate_word_context.py)
+  3. mwe_extract    (stages/extract_mwe_contexts.py)
+  4. mwe_translate   (stages/translate_mwe_context.py)
+  5. merge          (stages/merge_word_and_mwe_analysis.py)
+  6. localize       (stages/localize_words_and_mwe.py)
 
 Ne dépend d'AUCUN fichier hors de POC/ : les six scripts ci-dessus importent
 `poc_pipeline` (copie autonome, vendorée depuis `pipeline/` — voir le plan
@@ -79,10 +78,7 @@ POC_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(POC_ROOT))
 from poc_pipeline import config  # noqa: E402
 
-WORD_DIR = POC_ROOT / "traitement_word" / "claude"
-MWE_DIR = POC_ROOT / "traitement_mwe" / "claude"
-MERGE_DIR = POC_ROOT / "traitement_merge"
-LOCALIZE_DIR = POC_ROOT / "traitement_localisation"
+STAGES_DIR = POC_ROOT / "pipeline" / "stages"
 
 STAGE_NAMES = [
     "word_extract", "word_translate", "mwe_extract", "mwe_translate",
@@ -184,7 +180,7 @@ def run_word_extract(opts: Options, paths: RunPaths) -> None:
     if not opts.force and paths.word_contexts.exists():
         print(f"\n=== word_extract : sautée (sortie déjà présente : {paths.word_contexts}) ===")
         return
-    run_step("word_extract", WORD_DIR / "extract_word_contexts.py", [
+    run_step("word_extract", STAGES_DIR / "extract_word_contexts.py", [
         "--book", str(opts.file),
         "--out", str(paths.word_contexts),
         "--mwe-exclusions-out", str(paths.mwe_exclusions),
@@ -207,14 +203,14 @@ def run_word_translate(opts: Options, paths: RunPaths) -> None:
         args.append("--restart")
     if opts.no_cache:
         args.append("--no-cache")
-    run_step("word_translate", WORD_DIR / "translate_word_context.py", args)
+    run_step("word_translate", STAGES_DIR / "translate_word_context.py", args)
 
 
 def run_mwe_extract(opts: Options, paths: RunPaths) -> None:
     if not opts.force and paths.mwe_contexts.exists():
         print(f"\n=== mwe_extract : sautée (sortie déjà présente : {paths.mwe_contexts}) ===")
         return
-    run_step("mwe_extract", MWE_DIR / "extract_mwe_contexts.py", [
+    run_step("mwe_extract", STAGES_DIR / "extract_mwe_contexts.py", [
         "--book", str(opts.file),
         "--out", str(paths.mwe_contexts),
         "--gate-rejections-out", str(paths.mwe_gate_rejections),
@@ -237,14 +233,14 @@ def run_mwe_translate(opts: Options, paths: RunPaths) -> None:
         args.append("--restart")
     if opts.no_cache:
         args.append("--no-cache")
-    run_step("mwe_translate", MWE_DIR / "translate_mwe_context.py", args)
+    run_step("mwe_translate", STAGES_DIR / "translate_mwe_context.py", args)
 
 
 def run_merge(opts: Options, paths: RunPaths) -> None:
     if not opts.force and paths.merged.exists():
         print(f"\n=== merge : sautée (sortie déjà présente : {paths.merged}) ===")
         return
-    run_step("merge", MERGE_DIR / "merge_word_and_mwe_analysis.py", [
+    run_step("merge", STAGES_DIR / "merge_word_and_mwe_analysis.py", [
         "--word-in", str(paths.word_analysis),
         "--mwe-in", str(paths.mwe_analysis),
         "--out", str(paths.merged),
@@ -255,7 +251,7 @@ def run_localize(opts: Options, paths: RunPaths) -> None:
     if not opts.force and paths.output.exists():
         print(f"\n=== localize : sautée (sortie déjà présente : {paths.output}) ===")
         return
-    run_step("localize", LOCALIZE_DIR / "localize_words_and_mwe.py", [
+    run_step("localize", STAGES_DIR / "localize_words_and_mwe.py", [
         "--book", str(opts.file),
         "--in", str(paths.merged),
         "--out", str(paths.output),
@@ -326,12 +322,12 @@ def main() -> int:
         return 1
 
     for label, directory in [
-        ("extract_word_contexts.py", WORD_DIR / "extract_word_contexts.py"),
-        ("translate_word_context.py", WORD_DIR / "translate_word_context.py"),
-        ("extract_mwe_contexts.py", MWE_DIR / "extract_mwe_contexts.py"),
-        ("translate_mwe_context.py", MWE_DIR / "translate_mwe_context.py"),
-        ("merge_word_and_mwe_analysis.py", MERGE_DIR / "merge_word_and_mwe_analysis.py"),
-        ("localize_words_and_mwe.py", LOCALIZE_DIR / "localize_words_and_mwe.py"),
+        ("extract_word_contexts.py", STAGES_DIR / "extract_word_contexts.py"),
+        ("translate_word_context.py", STAGES_DIR / "translate_word_context.py"),
+        ("extract_mwe_contexts.py", STAGES_DIR / "extract_mwe_contexts.py"),
+        ("translate_mwe_context.py", STAGES_DIR / "translate_mwe_context.py"),
+        ("merge_word_and_mwe_analysis.py", STAGES_DIR / "merge_word_and_mwe_analysis.py"),
+        ("localize_words_and_mwe.py", STAGES_DIR / "localize_words_and_mwe.py"),
     ]:
         if not directory.exists():
             print(f"Script POC introuvable : {directory}")

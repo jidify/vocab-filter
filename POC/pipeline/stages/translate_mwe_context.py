@@ -1,5 +1,5 @@
 """POC — pour chaque candidat MWE de mwe_contexts.csv (sortie de
-POC/traitement_mwe/claude/extract_mwe_contexts.py), reconstruit la véritable
+POC/pipeline/stages/extract_mwe_contexts.py), reconstruit la véritable
 unité lexicalisée, la type, évalue sa compositionnalité/conventionnalité/
 difficulté, regroupe ses phrases par SENS DISTINCT et produit pour chaque
 sens une définition anglaise dense, ses traductions françaises et un exemple
@@ -103,12 +103,12 @@ finale — pour qu'une interruption ne perde que ce qui n'a pas encore été
 écrit.
 
 Usage :
-    uv run python POC/traitement_mwe/claude/translate_mwe_context.py \
+    uv run python POC/pipeline/stages/translate_mwe_context.py \
         --in POC/traitement_mwe/claude/tests/mwe_contexts_tests.csv \
         --out POC/traitement_mwe/claude/tests/mwe_analysis_test.csv
-    uv run python POC/traitement_mwe/claude/translate_mwe_context.py
+    uv run python POC/pipeline/stages/translate_mwe_context.py
     # mode séquentiel (1 appel par candidat, comme avant --batch-max-phrases) :
-    uv run python POC/traitement_mwe/claude/translate_mwe_context.py --batch-max-phrases 0
+    uv run python POC/pipeline/stages/translate_mwe_context.py --batch-max-phrases 0
 """
 
 from __future__ import annotations
@@ -123,13 +123,13 @@ from typing import Literal
 import dspy
 from pydantic import BaseModel, Field
 
-# POC/traitement_mwe/claude/translate_mwe_context.py -> POC/ est le parent(2).
+# POC/pipeline/stages/translate_mwe_context.py -> POC/ est le parent(2).
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from poc_pipeline import config, llm_litellm_catgpt  # noqa: E402
 
-DEFAULT_IN_PATH = ROOT / "traitement_mwe" / "claude" / "mwe_contexts.csv"
+DEFAULT_IN_PATH = Path(__file__).parent / "mwe_contexts.csv"
 DEFAULT_OUT_PATH = Path(__file__).parent / "mwe_analysis.csv"
 DEFAULT_EMPTY_OUT_PATH = Path(__file__).parent / "mwe_analysis_empty.csv"
 

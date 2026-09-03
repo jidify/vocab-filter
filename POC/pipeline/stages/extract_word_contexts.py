@@ -87,8 +87,8 @@ ce soit, elles ne font qu'annoter les lignes déjà décidées par la chaîne
 ci-dessus.
 
 Usage :
-    uv run python POC/traitement_word/claude/extract_word_contexts.py
-    uv run python POC/traitement_word/claude/extract_word_contexts.py --book "books/Dark Matter - Blake Crouch.txt"
+    uv run python POC/pipeline/stages/extract_word_contexts.py
+    uv run python POC/pipeline/stages/extract_word_contexts.py --book "books/Dark Matter - Blake Crouch.txt"
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ from pathlib import Path
 import spacy
 from wordfreq import zipf_frequency
 
-# POC/traitement_word/claude/extract_word_contexts.py -> POC/ est le parent(2).
+# POC/pipeline/stages/extract_word_contexts.py -> POC/ est le parent(2).
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 

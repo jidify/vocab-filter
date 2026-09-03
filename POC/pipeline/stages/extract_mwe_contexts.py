@@ -3,7 +3,7 @@ candidats produits par la chaîne de détection DÉTERMINISTE de prod (S0 -> S1
 -> S2, sans le juge LLM S3), puis pour chaque expression retenue la liste
 des phrases du livre qui la contiennent (sous une de ses formes de surface)
 et leur nombre. Pendant du script pour les mots simples,
-POC/traitement_word/claude/extract_word_contexts.py, avec la même structure
+POC/pipeline/stages/extract_word_contexts.py, avec la même structure
 de sortie (moins les colonnes métriques Pknown/CEFR/Zipf/AoA, qui ne
 s'appliquent qu'aux mots).
 
@@ -74,8 +74,8 @@ phrase précédente et la phrase suivante du même segment (quand elles
 existent) sont incluses avec lui — même règle qu'extract_word_contexts.py.
 
 Usage :
-    uv run python POC/traitement_mwe/claude/extract_mwe_contexts.py
-    uv run python POC/traitement_mwe/claude/extract_mwe_contexts.py --book "books/Dark Matter - Blake Crouch.txt"
+    uv run python POC/pipeline/stages/extract_mwe_contexts.py
+    uv run python POC/pipeline/stages/extract_mwe_contexts.py --book "books/Dark Matter - Blake Crouch.txt"
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ import csv
 import sys
 from pathlib import Path
 
-# POC/traitement_mwe/claude/extract_mwe_contexts.py -> POC/ est le parent(2).
+# POC/pipeline/stages/extract_mwe_contexts.py -> POC/ est le parent(2).
 # Racine du POC autonome (pas la racine du dépôt vocab-filter) : voir le
 # plan "Pipeline POC autonome" — aucune dépendance vers pipeline/ de prod.
 ROOT = Path(__file__).resolve().parents[2]

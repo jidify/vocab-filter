@@ -77,12 +77,12 @@ Pièges catgpt/DSPy identifiés avant l'écriture de ce script (voir le plan) :
     lancer un run complet.
 
 Usage :
-    uv run python POC/traitement_word/claude/translate_word_context.py
-    uv run python POC/traitement_word/claude/translate_word_context.py \
+    uv run python POC/pipeline/stages/translate_word_context.py
+    uv run python POC/pipeline/stages/translate_word_context.py \
         --in POC/traitement_word/claude/tests/word_context_test.csv \
         --out POC/traitement_word/claude/tests/word_analysis_test-batch.csv
     # mode séquentiel (1 appel par lemme, comme avant --batch-max-phrases) :
-    uv run python POC/traitement_word/claude/translate_word_context.py --batch-max-phrases 0
+    uv run python POC/pipeline/stages/translate_word_context.py --batch-max-phrases 0
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ from pathlib import Path
 import dspy
 from pydantic import BaseModel, Field
 
-# POC/traitement_word/claude/translate_word_context.py -> POC/ est le parent(2).
+# POC/pipeline/stages/translate_word_context.py -> POC/ est le parent(2).
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 

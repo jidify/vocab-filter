@@ -1,6 +1,6 @@
 """POC — localise A POSTERIORI, dans le livre, les éléments de vocabulaire
 déjà retenus par la chaîne `extract_* -> translate_* ->
-merge_word_and_mwe_analysis.py` (POC/traitement_merge/word_and_mwe_analysis.csv),
+merge_word_and_mwe_analysis.py` (POC/pipeline/stages/word_and_mwe_analysis.csv),
 et calcule pour chacun les tranches de 5 % du livre où il apparaît — pendant
 du layout de zones de production (pipeline/zones.py), mais calculé après
 coup plutôt que pendant l'analyse S1.
@@ -17,7 +17,7 @@ lignes reçoivent toutes les MÊMES colonnes de localisation.
 
 Ne touche à rien dans pipeline/ ni pipeline_out/ : script autonome, jetable,
 hors pipeline de production. Rejoue en mémoire la même chaîne de détection
-que POC/traitement_mwe/claude/extract_mwe_contexts.py (S0 -> S1 -> S2, sans
+que POC/pipeline/stages/extract_mwe_contexts.py (S0 -> S1 -> S2, sans
 le juge LLM S3), en réutilisant directement les fonctions de prod (jamais
 recopiées), à l'exception de `load_vpc_and_rules_plus_candidates`
 ci-dessous, reprise telle quelle depuis extract_mwe_contexts.py (import
@@ -49,8 +49,8 @@ Puis, LA SEULE PARTIE PROPRE À CE SCRIPT :
     couvertes par ces occurrences.
 
 Usage :
-    uv run python POC/traitement_localisation/localize_words_and_mwe.py
-    uv run python POC/traitement_localisation/localize_words_and_mwe.py --book "books/Dark Matter - Blake Crouch.txt" --in ... --out ...
+    uv run python POC/pipeline/stages/localize_words_and_mwe.py
+    uv run python POC/pipeline/stages/localize_words_and_mwe.py --book "books/Dark Matter - Blake Crouch.txt" --in ... --out ...
 """
 
 from __future__ import annotations
@@ -61,8 +61,8 @@ import json
 import sys
 from pathlib import Path
 
-# POC/traitement_localisation/localize_words_and_mwe.py -> POC/ est le parent(1).
-ROOT = Path(__file__).resolve().parents[1]
+# POC/pipeline/stages/localize_words_and_mwe.py -> POC/ est le parent(2).
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from poc_pipeline import analyze as analyze_module  # noqa: E402
@@ -72,7 +72,7 @@ from poc_pipeline import zones as zones_module  # noqa: E402
 from poc_pipeline.corpus import load_segments  # noqa: E402
 
 DEFAULT_BOOK_PATH = ROOT / "books" / "The Humans - Stephen Karam.txt"
-DEFAULT_IN_PATH = ROOT / "traitement_merge" / "word_and_mwe_analysis.csv"
+DEFAULT_IN_PATH = Path(__file__).parent / "word_and_mwe_analysis.csv"
 # Pas de titre de livre en dur dans le nom par défaut (piège documenté dans
 # le plan "Pipeline POC autonome" : l'ancien défaut écrasait silencieusement
 # le résultat d'un autre livre) — passer --out explicitement reste recommandé.
@@ -82,7 +82,7 @@ DEFAULT_LAYOUT_OUT_PATH = Path(__file__).parent / "zone_layout.json"
 DEFAULT_VPC_CANDIDATES_OUT_PATH = Path(__file__).parent / "vpc_candidates.jsonl"
 DEFAULT_RULES_PLUS_CANDIDATES_OUT_PATH = Path(__file__).parent / "rules_plus_candidates.jsonl"
 
-# Colonnes attendues du CSV fusionné (POC/traitement_merge/merge_word_and_mwe_analysis.py::CSV_HEADER).
+# Colonnes attendues du CSV fusionné (POC/pipeline/stages/merge_word_and_mwe_analysis.py::CSV_HEADER).
 INPUT_COLUMNS = [
     "type", "lemme", "extracted_form", "lexicalized_form", "mwe_type", "sense",
     "definition_en", "translations", "false_friend", "compositionality",
@@ -100,7 +100,7 @@ OUTPUT_COLUMNS = INPUT_COLUMNS + LOCATION_COLUMNS
 # --------------------------------------------------------------------------
 # S1 : candidats VPC + rules_plus, réutilisant pipeline.analyze SANS y
 # toucher, en redirigeant localement où pipeline.mwe va les relire.
-# Copié à l'identique de POC/traitement_mwe/claude/extract_mwe_contexts.py
+# Copié à l'identique de POC/pipeline/stages/extract_mwe_contexts.py
 # (load_vpc_and_rules_plus_candidates) — voir la docstring du module.
 # --------------------------------------------------------------------------
 
@@ -337,7 +337,7 @@ def parse_args() -> argparse.Namespace:
                          help="Chemin du livre .txt (défaut : books/The Humans - Stephen Karam.txt)")
     parser.add_argument("--in", dest="in_path", default=str(DEFAULT_IN_PATH),
                          help="CSV fusionné mots+MWE en entrée (défaut : "
-                              "POC/traitement_merge/word_and_mwe_analysis.csv)")
+                              "POC/pipeline/stages/word_and_mwe_analysis.csv)")
     parser.add_argument("--out", default=str(DEFAULT_OUT_PATH), help="CSV de sortie")
     parser.add_argument("--unmatched-out", default=str(DEFAULT_UNMATCHED_OUT_PATH),
                          help="CSV des lignes non localisées (audit)")
