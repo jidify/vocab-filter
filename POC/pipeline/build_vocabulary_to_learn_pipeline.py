@@ -29,7 +29,7 @@ puisse jamais écraser silencieusement le résultat d'un autre livre (ce
 qu'un --output à chemin libre permettait) :
 
     POC/pipeline/out/<slug-du-livre>/     (ou --out-dir)
-        vocabulary.csv               <- résultat final, nom fixe
+        <slug-du-livre>-vocabulary.csv   <- résultat final
         transient/                   <- intermédiaires par étape (reprise)
             01_word_contexts.csv
             02_word_analysis.csv        (journal de reprise, étape LLM)
@@ -50,7 +50,8 @@ qu'un --output à chemin libre permettait) :
 Usage :
     uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py \\
         --file "books_excerpts/The Humans - Stephen Karam - excerpt.txt"
-    # -> POC/pipeline/out/the_humans_stephen_karam_excerpt/vocabulary.csv
+    # -> POC/pipeline/out/the_humans_stephen_karam_excerpt/
+    #      the_humans_stephen_karam_excerpt-vocabulary.csv
 
     # Livre complet (front matter connu : copyright/sommaire/distribution
     # jusqu'à la ligne 182 avant les épigraphes) :
@@ -83,11 +84,6 @@ MWE_DIR = POC_ROOT / "traitement_mwe" / "claude"
 MERGE_DIR = POC_ROOT / "traitement_merge"
 LOCALIZE_DIR = POC_ROOT / "traitement_localisation"
 
-# Nom fixe, jamais paramétrable (voir docstring du module) — le seul chemin
-# variable en entrée est --file ; --out-dir ne déplace que la racine
-# entière (résultat + transient/), jamais le nom du résultat tout seul.
-OUTPUT_FILENAME = "vocabulary.csv"
-
 STAGE_NAMES = [
     "word_extract", "word_translate", "mwe_extract", "mwe_translate",
     "merge", "localize",
@@ -112,9 +108,10 @@ def slugify(stem: str) -> str:
 @dataclass
 class RunPaths:
     output_root: Path
+    output_filename: str
 
     def __post_init__(self) -> None:
-        self.output = self.output_root / OUTPUT_FILENAME
+        self.output = self.output_root / self.output_filename
         self.transient = self.output_root / "transient"
         self.word_contexts = self.transient / "01_word_contexts.csv"
         self.word_analysis = self.transient / "02_word_analysis.csv"
@@ -291,8 +288,8 @@ def parse_args() -> argparse.Namespace:
                               "par motifs (0 = aucune, défaut ; 182 pour le livre complet "
                               "The Humans). Voir poc_pipeline/config.py::FRONT_MATTER_SKIP_LINES.")
     parser.add_argument("--out-dir", default=None,
-                         help=f"Répertoire racine de sortie pour ce livre — contient "
-                              f"{OUTPUT_FILENAME} (résultat final, nom fixe) et transient/ "
+                         help="Répertoire racine de sortie pour ce livre — contient "
+                              "<slug>-vocabulary.csv (résultat final) et transient/ "
                               "(défaut : POC/pipeline/out/<slug-du-livre>)")
     parser.add_argument("--from", dest="from_stage", default=None, choices=STAGE_NAMES,
                          help="Reprendre à partir de cette étape")
@@ -340,11 +337,16 @@ def main() -> int:
             print(f"Script POC introuvable : {directory}")
             return 1
 
+    # Le slug nomme À LA FOIS le répertoire par défaut ET le fichier final
+    # (<slug>-vocabulary.csv) — toujours dérivé de --file, y compris quand
+    # --out-dir déplace la racine ailleurs, pour que le nom du fichier reste
+    # traçable jusqu'au livre source même hors de son emplacement par défaut.
+    slug = slugify(book_path.stem)
     output_root = Path(args.out_dir).resolve() if args.out_dir else (
-        POC_ROOT / "pipeline" / "out" / slugify(book_path.stem)
+        POC_ROOT / "pipeline" / "out" / slug
     )
 
-    paths = RunPaths(output_root=output_root)
+    paths = RunPaths(output_root=output_root, output_filename=f"{slug}-vocabulary.csv")
     paths.audit.mkdir(parents=True, exist_ok=True)
 
     opts = Options(
