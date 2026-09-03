@@ -55,21 +55,60 @@ référence est explicite : mieux vaut regrouper à tort que sur-séparer). Un
 candidat jugé non lexicalisé (aucune phrase ne le confirme comme MWE)
 produit une liste VIDE, ce n'est pas une erreur.
 
-Architecture MINIMALE pour ce premier passage (décision actée avec
-l'utilisateur, contrairement à translate_word_context.py) : UN APPEL LLM PAR
-LIGNE du CSV d'entrée, écriture en streaming, PAS de lots, PAS de reprise/
---restart. Comme extracted_form est un écho garanti par construction du
-prompt, un futur passage en lots n'aura aucune ambiguïté de rattachement
-analyse<->ligne d'entrée (contrairement à ce qu'aurait donné un rattachement
-sur un "lemme" potentiellement reconstruit). À étendre plus tard seulement si
-le passage sur les 522 lignes réelles de mwe_contexts.csv s'avère trop lent
-avec la gateway catgpt (pilotée par navigateur, donc lente).
+Traitement PAR LOTS (--batch-max-phrases, défaut 50), même principe que
+translate_word_context.py::build_batches : au lieu d'un appel par candidat,
+les lignes du CSV d'entrée sont regroupées en lots dont la somme des
+nb_phrases reste sous ce seuil. Règle d'accumulation :
+    lot = [ligne courante] ; total = nb_phrases(ligne)
+    si total >= seuil -> le lot est cette seule ligne, on ferme
+    sinon, tant que (total + nb_phrases(ligne suivante)) < seuil :
+        ajouter la ligne suivante au lot ; total += nb_phrases(ligne suivante)
+    (dès que total + nb_phrases(suivante) >= seuil, on ferme le lot SANS
+    ajouter cette ligne suivante, qui démarre le lot d'après)
+--batch-max-phrases 0 repasse en mode séquentiel (1 candidat = 1 appel,
+chaque lot y est alors un singleton). Comme extracted_form est un écho
+EXACT garanti par construction du prompt (jamais reformulé), le rattachement
+analyse<->ligne d'entrée dans un lot se fait dessus, sans ambiguïté même
+quand lexicalized_form diffère du candidat.
+
+Un lot d'un seul candidat (par le seuil OU par --batch-max-phrases 0) appelle
+directement AnalyseMweSenses ; un lot de plusieurs candidats appelle
+AnalyseLotMweSenses (même consigne, entrée/sortie en listes).
+
+CAS PARTICULIER MWE, absent du script mots : un candidat peut légitimement
+ne produire AUCUNE analyse (liste vide = non lexicalisé, voir §21 du prompt
+de référence), ce qui rend une liste plate de sortie ambiguë en lot — un
+candidat absent de la réponse d'un lot peut soit avoir été confirmé vide,
+soit simplement oublié par le modèle, indiscernables depuis l'extérieur du
+lot. Résolu ainsi :
+  - un lot d'UN SEUL candidat est TOUJOURS entièrement résolu par son propre
+    appel (AnalyseMweSenses) : une liste vide y est directement une réponse
+    de confiance (pas de rattrapage, pas de gaspillage d'appel) ;
+  - dans un lot de PLUSIEURS candidats, tout candidat absent de la réponse
+    (AnalyseLotMweSenses) est rejoué INDIVIDUELLEMENT en fin de run — seul un
+    appel individuel (AnalyseMweSenses) fait foi pour confirmer une liste
+    vide.
+Un candidat confirmé vide (par un appel individuel, direct ou de rattrapage)
+est journalisé dans un second CSV compagnon (--empty-out, défaut
+mwe_analysis_empty.csv, colonne extracted_form) — nécessaire à la REPRISE
+ci-dessous, puisqu'une ligne sans aucune analyse n'écrit sinon rien dans le
+CSV principal et serait donc indiscernable, au redémarrage, d'une ligne
+jamais traitée.
+
+REPRISE : les deux CSV de sortie (principal + vide) font office de journal.
+Au démarrage, les candidats déjà présents dans l'un OU l'autre sont exclus du
+traitement (--restart pour ignorer les deux et repartir de zéro). Les lignes
+sont écrites en streaming, un lot à la fois — jamais en une seule passe
+finale — pour qu'une interruption ne perde que ce qui n'a pas encore été
+écrit.
 
 Usage :
     uv run python POC/traitement_mwe/claude/translate_mwe_context.py \
         --in POC/traitement_mwe/claude/tests/mwe_contexts_tests.csv \
         --out POC/traitement_mwe/claude/tests/mwe_analysis_test.csv
     uv run python POC/traitement_mwe/claude/translate_mwe_context.py
+    # mode séquentiel (1 appel par candidat, comme avant --batch-max-phrases) :
+    uv run python POC/traitement_mwe/claude/translate_mwe_context.py --batch-max-phrases 0
 """
 
 from __future__ import annotations
@@ -91,16 +130,19 @@ from pipeline import config, llm_litellm_catgpt  # noqa: E402
 
 DEFAULT_IN_PATH = ROOT / "POC" / "traitement_mwe" / "claude" / "mwe_contexts.csv"
 DEFAULT_OUT_PATH = Path(__file__).parent / "mwe_analysis.csv"
+DEFAULT_EMPTY_OUT_PATH = Path(__file__).parent / "mwe_analysis_empty.csv"
 
 MAX_TOKENS = 16000
 SENSE_MAX_WORDS = 3
 DEFINITION_MAX_WORDS = 35
+DEFAULT_BATCH_MAX_PHRASES = 50
 
 CSV_HEADER = [
     "extracted_form", "lexicalized_form", "mwe_type", "compositionality",
     "conventionality", "difficulty_for_non_native", "sense", "definition_en",
     "translations", "example",
 ]
+EMPTY_CSV_HEADER = ["extracted_form"]
 
 MweType = Literal[
     "idiom", "phrasal_verb", "proverb", "semi_fixed", "collocation",
@@ -267,6 +309,53 @@ class AnalyseMweSenses(dspy.Signature):
     )
 
 
+class AnalyseLotMweSenses(dspy.Signature):
+    """Tu es un expert en linguistique anglaise, phraséologie, lexicographie
+    et NLP. On te donne PLUSIEURS candidats MWE INDÉPENDANTS les uns des
+    autres, chacun avec ses formes de surface et TOUTES les phrases d'un
+    livre où il apparaît. Traite CHAQUE candidat séparément, exactement
+    comme si tu ne recevais que lui : ne fusionne JAMAIS les sens de deux
+    candidats différents, même s'ils se ressemblent. Aucun candidat n'est
+    supposé être une MWE valide.
+
+    Pour chaque candidat, applique les mêmes règles que pour un candidat
+    unique : analyse occurrence par occurrence (fréquence/cooccurrence ne
+    prouve jamais la lexicalisation) ; si le candidat n'est qu'un fragment,
+    reconstruis la plus petite MWE complète et indépendamment lexicalisée
+    justifiée par le contexte, sans jamais y inclure un simple complément
+    syntaxique productif (sujet, objet, complément infinitif ordinaire) ;
+    regroupe les sens de façon CONSERVATRICE — ne sépare deux occurrences en
+    deux sens que si la contribution sémantique de la MWE elle-même diffère
+    réellement, jamais seulement à cause d'un complément, d'un sujet ou
+    d'une paraphrase différente (test d'invariance : si tu peux remplacer le
+    complément sans changer la contribution sémantique de la MWE, regroupe
+    sous un seul sens).
+
+    Ne retiens que des sens réellement attestés par au moins une phrase
+    reçue POUR CE CANDIDAT — n'invente pas de sens absent de son contexte,
+    et n'invente jamais de phrase d'exemple hors de la phrases_list de ce
+    même candidat. Si aucune phrase d'un candidat ne permet d'établir une
+    véritable MWE le concernant, ce candidat ne produit AUCUNE analyse dans
+    la liste de sortie (il n'y apparaît simplement pas) — ne renvoie jamais
+    une MWE spéculative.
+
+    Renvoie TOUTES les analyses de TOUS les candidats du lot dans une seule
+    liste plate : chaque analyse porte son propre champ extracted_form,
+    identique caractère pour caractère au candidat d'entrée correspondant
+    (jamais reformulé) — c'est ce qui permet de la rattacher au bon candidat
+    d'entrée."""
+
+    lot: list[MweWithContext] = dspy.InputField(
+        description="Candidats indépendants à analyser dans ce lot — ne jamais les confondre ni "
+                    "mélanger leurs sens entre eux."
+    )
+    analyses: list[MweAnalysis] = dspy.OutputField(
+        description="Liste PLATE de toutes les analyses de TOUS les candidats du lot — un "
+                    "candidat non lexicalisé n'y contribue aucune ligne (pas de placeholder "
+                    "vide), un candidat polysémique plusieurs."
+    )
+
+
 # --------------------------------------------------------------------------
 # Câblage LM (CatGPT via l'adaptateur LiteLLM de prod) — identique à
 # translate_word_context.py::configure_dspy()
@@ -289,7 +378,11 @@ def configure_dspy() -> None:
 
 @dataclass
 class ContextRow:
+    """Une ligne de mwe_contexts.csv — entry est ce qui part vers le LLM,
+    nb_phrases sert uniquement à la constitution des lots (build_batches)."""
+
     entry: MweWithContext
+    nb_phrases: int
 
 
 def read_mwe_contexts(path: Path) -> list[ContextRow]:
@@ -304,18 +397,63 @@ def read_mwe_contexts(path: Path) -> list[ContextRow]:
                 surface_forms=surface_forms,
                 phrases_list=phrases_list,
             )
-            rows.append(ContextRow(entry=entry))
+            rows.append(ContextRow(entry=entry, nb_phrases=int(row["nb_phrases"])))
     return rows
 
 
+def build_batches(rows: list[ContextRow], max_phrases: int) -> list[list[ContextRow]]:
+    """Regroupe des lignes consécutives tant que la somme de leurs
+    nb_phrases reste sous max_phrases (voir la règle d'accumulation dans le
+    docstring du module — identique à translate_word_context.py::
+    build_batches). max_phrases <= 0 -> un lot par ligne (mode séquentiel)."""
+    if max_phrases <= 0:
+        return [[r] for r in rows]
+
+    batches: list[list[ContextRow]] = []
+    i, n = 0, len(rows)
+    while i < n:
+        batch = [rows[i]]
+        total = rows[i].nb_phrases
+        i += 1
+        while i < n and total + rows[i].nb_phrases < max_phrases:
+            batch.append(rows[i])
+            total += rows[i].nb_phrases
+            i += 1
+        batches.append(batch)
+    return batches
+
+
 # --------------------------------------------------------------------------
-# Écriture CSV (streaming, pas de reprise — voir docstring du module)
+# Lecture des candidats déjà traités (reprise) / écriture incrémentale
 # --------------------------------------------------------------------------
 
-def ensure_csv_with_header(out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8-sig", newline="") as f:
-        csv.writer(f).writerow(CSV_HEADER)
+def read_done_candidates(out_path: Path, empty_out_path: Path) -> set[str]:
+    """Candidats déjà présents (colonne `extracted_form`, casefold) dans le
+    CSV principal OU le CSV compagnon des candidats confirmés vides d'un run
+    précédent — sert de journal de reprise, voir le docstring du module.
+    Les deux fichiers sont nécessaires : un candidat confirmé non lexicalisé
+    n'écrit jamais de ligne dans le CSV principal (aucune analyse), il serait
+    donc indiscernable d'un candidat jamais traité sans le CSV compagnon."""
+    done: set[str] = set()
+    for path in (out_path, empty_out_path):
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                value = (row.get("extracted_form") or "").strip()
+                if value:
+                    done.add(value.casefold())
+    return done
+
+
+def ensure_csv_with_header(path: Path, header: list[str]) -> None:
+    """Crée `path` avec son en-tête s'il n'existe pas encore — jamais appelé
+    sur un fichier existant (la reprise s'appuie dessus)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        with path.open("w", encoding="utf-8-sig", newline="") as f:
+            csv.writer(f).writerow(header)
 
 
 def append_analyses_csv(analyses: list[MweAnalysis], out_path: Path) -> None:
@@ -343,6 +481,20 @@ def append_analyses_csv(analyses: list[MweAnalysis], out_path: Path) -> None:
             ])
 
 
+def append_empty_csv(candidates: list[str], empty_out_path: Path) -> None:
+    """Journalise les candidats confirmés non lexicalisés (liste vide) par
+    un appel INDIVIDUEL (jamais un appel de lot, voir le docstring du
+    module) — seul moyen de reprise fiable pour ces lignes, qui n'écrivent
+    sinon rien dans le CSV principal. Même piège BOM-en-mode-append que
+    append_analyses_csv : encoding="utf-8" sans -sig ici."""
+    if not candidates:
+        return
+    with empty_out_path.open("a", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        for candidate in candidates:
+            writer.writerow([candidate])
+
+
 # --------------------------------------------------------------------------
 # Contrôles a posteriori (déterministes, gratuits — n'altèrent pas la sortie)
 # --------------------------------------------------------------------------
@@ -365,43 +517,114 @@ def check_analysis(analysis: MweAnalysis, entry: MweWithContext, stats: dict[str
 
 
 # --------------------------------------------------------------------------
-# Boucle principale : un appel LLM par ligne, écriture en streaming
+# Boucle d'analyse : lots, réconciliation par extracted_form, rattrapage
+# individuel (seul chemin fiable pour confirmer une liste vide en lot)
 # --------------------------------------------------------------------------
 
-def new_stats(rows_total: int) -> dict[str, int]:
+def new_stats(candidates_total: int, candidates_skipped_done: int) -> dict[str, int]:
     return {
-        "rows_total": rows_total, "rows_failed": 0, "rows_empty": 0,
+        "candidates_total": candidates_total, "candidates_skipped_done": candidates_skipped_done,
+        "batches": 0, "batches_failed": 0,
         "analyses": 0, "extracted_form_mismatch": 0, "bad_example": 0,
         "sense_too_long": 0, "definition_too_long": 0,
+        "candidates_confirmed_empty": 0,
+        "candidates_retried": 0, "candidates_still_missing": 0,
     }
 
 
-def run_rows(rows: list[ContextRow], out_path: Path, stats: dict[str, int]) -> None:
-    analyser = dspy.ChainOfThought(AnalyseMweSenses)
+def _handle_single_candidate(
+    entry: MweWithContext, analyser, out_path: Path, empty_out_path: Path, stats: dict[str, int],
+) -> None:
+    """Résout ENTIÈREMENT un candidat via un appel individuel
+    (AnalyseMweSenses) : contrairement à un lot de plusieurs candidats, une
+    liste vide reçue ici est une réponse de confiance (pas de rattrapage
+    nécessaire) — voir le docstring du module."""
+    try:
+        prediction = analyser(entree=entry)
+    except Exception as exc:
+        print(f"  échec : {exc!r}")
+        stats["candidates_still_missing"] += 1
+        return
 
-    for row_idx, row in enumerate(rows, start=1):
-        entry = row.entry
-        print(f"[{row_idx}/{len(rows)}] {entry.lemme} ({len(entry.phrases_list)} phrase(s))...")
+    analyses = prediction.analyses
+    if not analyses:
+        print("  -> aucune MWE confirmée (liste vide)")
+        stats["candidates_confirmed_empty"] += 1
+        append_empty_csv([entry.lemme], empty_out_path)
+        return
 
+    for analysis in analyses:
+        stats["analyses"] += 1
+        check_analysis(analysis, entry, stats)
+    append_analyses_csv(analyses, out_path)
+    print(f"  -> {len(analyses)} analyse(s) écrite(s)")
+
+
+def run_batches(
+    batches: list[list[ContextRow]], out_path: Path, empty_out_path: Path, stats: dict[str, int],
+) -> None:
+    unit_analyser = dspy.ChainOfThought(AnalyseMweSenses)
+    lot_analyser = dspy.ChainOfThought(AnalyseLotMweSenses)
+    pending_retry: list[MweWithContext] = []
+
+    for batch_idx, batch in enumerate(batches, start=1):
+        total_phrases = sum(r.nb_phrases for r in batch)
+        candidate_list = ", ".join(r.entry.lemme for r in batch)
+        print(f"[lot {batch_idx}/{len(batches)}] {len(batch)} candidat(s), "
+              f"{total_phrases} phrase(s) : {candidate_list}")
+        stats["batches"] += 1
+
+        if len(batch) == 1:
+            # Lot d'un seul candidat : toujours entièrement résolu ici, même
+            # si le résultat est une liste vide — jamais de rattrapage
+            # redondant (voir le docstring du module).
+            _handle_single_candidate(batch[0].entry, unit_analyser, out_path, empty_out_path, stats)
+            continue
+
+        entries_by_key = {r.entry.lemme.casefold(): r.entry for r in batch}
         try:
-            prediction = analyser(entree=entry)
-        except Exception as exc:  # dégrade : une ligne en échec n'arrête pas le run
-            print(f"  échec : {exc!r}")
-            stats["rows_failed"] += 1
+            prediction = lot_analyser(lot=[r.entry for r in batch])
+        except Exception as exc:  # dégrade : un lot en échec n'arrête pas le run
+            print(f"  échec de lot : {exc!r}")
+            stats["batches_failed"] += 1
+            pending_retry.extend(r.entry for r in batch)
             continue
 
         analyses = prediction.analyses
-        if not analyses:
-            print("  -> aucune MWE confirmée (liste vide)")
-            stats["rows_empty"] += 1
-            continue
-
+        seen_keys: set[str] = set()
+        kept: list[MweAnalysis] = []
         for analysis in analyses:
+            key = analysis.extracted_form.strip().casefold()
+            entry = entries_by_key.get(key)
+            if entry is None:
+                print(f"  ATTENTION analyse hors-lot ignorée : extracted_form={analysis.extracted_form!r}")
+                continue
+            seen_keys.add(key)
             stats["analyses"] += 1
             check_analysis(analysis, entry, stats)
+            kept.append(analysis)
 
-        append_analyses_csv(analyses, out_path)
-        print(f"  -> {len(analyses)} analyse(s) écrite(s)")
+        # Absent de la réponse : soit confirmé vide, soit oublié par le
+        # modèle — indiscernable en lot (voir le docstring du module) ;
+        # rejoué individuellement ci-dessous, seul chemin qui tranche.
+        missing = [r.entry for r in batch if r.entry.lemme.casefold() not in seen_keys]
+        if missing:
+            print(f"  {len(missing)} candidat(s) absent(s) de la réponse (à confirmer "
+                  f"individuellement) : {', '.join(e.lemme for e in missing)}")
+            pending_retry.extend(missing)
+
+        append_analyses_csv(kept, out_path)
+        print(f"  -> {len(kept)} analyse(s) écrite(s)")
+
+    if not pending_retry:
+        return
+
+    print()
+    print(f"=== Rattrapage individuel de {len(pending_retry)} candidat(s) ===")
+    for entry in pending_retry:
+        stats["candidates_retried"] += 1
+        print(f"[rattrapage {stats['candidates_retried']}/{len(pending_retry)}] {entry.lemme}...")
+        _handle_single_candidate(entry, unit_analyser, out_path, empty_out_path, stats)
 
 
 # --------------------------------------------------------------------------
@@ -413,10 +636,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--in", dest="in_path", default=str(DEFAULT_IN_PATH),
                          help="Chemin du CSV d'entrée (défaut : mwe_contexts.csv)")
     parser.add_argument("--out", dest="out_path", default=str(DEFAULT_OUT_PATH),
-                         help="Chemin du CSV de sortie (défaut : mwe_analysis.csv) — écrasé à "
-                              "chaque run, pas de reprise (voir docstring du module)")
+                         help="Chemin du CSV de sortie (défaut : mwe_analysis.csv) — sert aussi "
+                              "de journal de reprise, voir --restart")
+    parser.add_argument("--empty-out", dest="empty_out_path", default=str(DEFAULT_EMPTY_OUT_PATH),
+                         help="Chemin du CSV des candidats confirmés non lexicalisés (défaut : "
+                              "mwe_analysis_empty.csv) — second journal de reprise, voir "
+                              "docstring du module")
     parser.add_argument("--limit", type=int, default=0,
                          help="Plafond de candidats considérés depuis l'entrée (0 = tous, défaut)")
+    parser.add_argument("--batch-max-phrases", type=int, default=DEFAULT_BATCH_MAX_PHRASES,
+                         help="Nombre de phrases visé par lot avant appel groupé à catgpt "
+                              "(défaut : 50 ; 0 = mode séquentiel, un appel par candidat)")
+    parser.add_argument("--restart", action="store_true",
+                         help="Ignore et réécrit les CSV de sortie existants (principal + "
+                              "candidats vides) au lieu de reprendre là où le run précédent "
+                              "s'est arrêté")
     return parser.parse_args()
 
 
@@ -424,10 +658,16 @@ def main() -> int:
     args = parse_args()
     in_path = Path(args.in_path)
     out_path = Path(args.out_path)
+    empty_out_path = Path(args.empty_out_path)
 
     if not in_path.exists():
         print(f"CSV d'entrée introuvable : {in_path}")
         return 1
+
+    if args.restart:
+        for path in (out_path, empty_out_path):
+            if path.exists():
+                path.unlink()
 
     print(f"Entrée : {in_path}")
     rows = read_mwe_contexts(in_path)
@@ -435,24 +675,43 @@ def main() -> int:
         rows = rows[:args.limit]
     print(f"{len(rows)} candidat(s) MWE au total.")
 
-    stats = new_stats(rows_total=len(rows))
+    done = read_done_candidates(out_path, empty_out_path)
+    todo = [r for r in rows if r.entry.lemme.casefold() not in done]
+    if done:
+        print(f"{len(rows) - len(todo)} candidat(s) déjà présent(s) dans {out_path.name}/"
+              f"{empty_out_path.name} -> sauté(s).")
+
+    stats = new_stats(candidates_total=len(rows), candidates_skipped_done=len(rows) - len(todo))
+
+    if not todo:
+        print("Rien à faire : tous les candidats demandés sont déjà présents dans les CSV de sortie.")
+        return 0
+
+    batches = build_batches(todo, args.batch_max_phrases)
+    print(f"{len(todo)} candidat(s) à traiter, regroupés en {len(batches)} lot(s) "
+          f"(seuil ~{args.batch_max_phrases} phrase(s)/lot).")
 
     configure_dspy()
-    ensure_csv_with_header(out_path)
-    run_rows(rows, out_path, stats)
+    ensure_csv_with_header(out_path, CSV_HEADER)
+    ensure_csv_with_header(empty_out_path, EMPTY_CSV_HEADER)
+    run_batches(batches, out_path, empty_out_path, stats)
 
     print()
     print("=== Récapitulatif ===")
-    print(f"Candidats au total           : {stats['rows_total']}")
-    print(f"  dont échecs d'appel LLM    : {stats['rows_failed']}")
-    print(f"  dont MWE non confirmée (liste vide) : {stats['rows_empty']}")
-    print(f"Analyses (sens) produites    : {stats['analyses']}")
+    print(f"Candidats au total            : {stats['candidates_total']}")
+    print(f"  dont déjà traités (sautés)  : {stats['candidates_skipped_done']}")
+    print(f"Lots envoyés                  : {stats['batches']} ({stats['batches_failed']} en échec)")
+    print(f"Candidats rattrapés individuellement : {stats['candidates_retried']}")
+    print(f"  dont toujours manquants     : {stats['candidates_still_missing']}")
+    print(f"Candidats confirmés non lexicalisés (liste vide) : {stats['candidates_confirmed_empty']}")
+    print(f"Analyses (sens) produites     : {stats['analyses']}")
     print(f"  dont extracted_form != entrée : {stats['extracted_form_mismatch']}")
     print(f"  dont example hors phrases_list : {stats['bad_example']}")
     print(f"  dont sense > {SENSE_MAX_WORDS} mots : {stats['sense_too_long']}")
     print(f"  dont definition_en > {DEFINITION_MAX_WORDS} mots : {stats['definition_too_long']}")
     print()
     print(f"-> {out_path}")
+    print(f"-> {empty_out_path}")
     return 0
 
 
