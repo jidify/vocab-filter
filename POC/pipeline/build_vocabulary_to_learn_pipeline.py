@@ -21,41 +21,46 @@ soit vers un nom de fichier qui écrase silencieusement le résultat d'un
 autre livre. Cet orchestrateur passe TOUJOURS tous les chemins
 explicitement — aucun défaut de script n'est utilisé.
 
-Arborescence de sortie — tout dérive de --file, un seul répertoire racine
-par livre traité, jamais partagé entre deux livres :
+--file et --output sont OBLIGATOIRES : --output est le chemin EXACT du CSV
+final, utilisé tel quel (jamais renommé, jamais réduit à son nom de
+fichier, jamais replacé sous un autre répertoire) — c'est le contrat
+d'origine de cet orchestrateur, il ne doit pas bouger même quand
+l'arborescence des intermédiaires change. Seuls les fichiers TRANSITOIRES
+(un par étape, plus l'audit) sont placés automatiquement, dérivés de
+--file, dans un répertoire qui leur est propre et jamais partagé entre deux
+livres :
 
-    POC/pipeline/out/<slug-du-livre>/
-        vocabulary.csv              <- résultat final (ou --output <nom>)
-        transient/                  <- intermédiaires par étape (reprise)
-            01_word_contexts.csv
-            02_word_analysis.csv        (journal de reprise, étape LLM)
-            03_mwe_contexts.csv
-            04_mwe_analysis.csv         (journal de reprise, étape LLM)
-            04_mwe_analysis_empty.csv   (second journal, étape LLM)
-            05_word_and_mwe_analysis.csv
-            audit/                  <- rejets/exclusions de chaque filtre
-                mwe_exclusions.csv           (filtre 5 : membre de MWE)
-                cognates_removed.csv         (filtre 0bis : cognat)
-                pknown_cefr_excluded.csv     (filtre 1/2/3 : Pknown/CEFR/Zipf)
-                basic_level_excluded.csv     (filtre 4 : A1/A2 tous POS)
-                mwe_gate_rejections.csv
-                vpc_candidates.jsonl / rules_plus_candidates.jsonl (x2)
-                zone_layout.json
-                localisation_unmatched.csv
+    POC/pipeline/out/<slug-du-livre>/transient/    (ou --transient-dir)
+        01_word_contexts.csv
+        02_word_analysis.csv        (journal de reprise, étape LLM)
+        03_mwe_contexts.csv
+        04_mwe_analysis.csv         (journal de reprise, étape LLM)
+        04_mwe_analysis_empty.csv   (second journal, étape LLM)
+        05_word_and_mwe_analysis.csv
+        audit/                  <- rejets/exclusions de chaque filtre
+            mwe_exclusions.csv           (filtre 5 : membre de MWE)
+            cognates_removed.csv         (filtre 0bis : cognat)
+            pknown_cefr_excluded.csv     (filtre 1/2/3 : Pknown/CEFR/Zipf)
+            basic_level_excluded.csv     (filtre 4 : A1/A2 tous POS)
+            mwe_gate_rejections.csv
+            vpc_candidates.jsonl / rules_plus_candidates.jsonl (x2)
+            zone_layout.json
+            localisation_unmatched.csv
 
 Usage :
     uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py \\
-        --file "books_excerpts/The Humans - Stephen Karam - excerpt.txt"
-    # -> POC/pipeline/out/the_humans_stephen_karam_excerpt/vocabulary.csv
+        --file "books_excerpts/The Humans - Stephen Karam - excerpt.txt" \\
+        --output "POC/pipeline/out/humans_excerpt_vocab.csv"
 
     # Livre complet (front matter connu : copyright/sommaire/distribution
     # jusqu'à la ligne 182 avant les épigraphes) :
     uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py \\
-        --file "books/The Humans - Stephen Karam.txt" --skip-lines 182
+        --file "books/The Humans - Stephen Karam.txt" --skip-lines 182 \\
+        --output "POC/pipeline/out/humans_full_vocab.csv"
 
     # Reprendre à partir d'une étape, ou n'en lancer qu'une :
-    uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py --file ... --from mwe_extract
-    uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py --file ... --only word_translate
+    uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py --file ... --output ... --from mwe_extract
+    uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py --file ... --output ... --only word_translate
 """
 
 from __future__ import annotations
@@ -78,8 +83,6 @@ WORD_DIR = POC_ROOT / "traitement_word" / "claude"
 MWE_DIR = POC_ROOT / "traitement_mwe" / "claude"
 MERGE_DIR = POC_ROOT / "traitement_merge"
 LOCALIZE_DIR = POC_ROOT / "traitement_localisation"
-
-DEFAULT_OUTPUT_FILENAME = "vocabulary.csv"
 
 STAGE_NAMES = [
     "word_extract", "word_translate", "mwe_extract", "mwe_translate",
@@ -104,12 +107,10 @@ def slugify(stem: str) -> str:
 
 @dataclass
 class RunPaths:
-    output_root: Path
-    output_filename: str
+    output: Path
+    transient: Path
 
     def __post_init__(self) -> None:
-        self.output = self.output_root / self.output_filename
-        self.transient = self.output_root / "transient"
         self.word_contexts = self.transient / "01_word_contexts.csv"
         self.word_analysis = self.transient / "02_word_analysis.csv"
         self.mwe_contexts = self.transient / "03_mwe_contexts.csv"
@@ -280,18 +281,19 @@ LLM_STAGES = {"word_translate", "mwe_translate"}
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--file", required=True, help="Livre .txt en entrée")
-    parser.add_argument("--output", default=DEFAULT_OUTPUT_FILENAME,
-                         help=f"Nom du CSV final (défaut : {DEFAULT_OUTPUT_FILENAME}) — "
-                              "toujours écrit à la racine du répertoire de sortie du livre "
-                              "(voir --out-dir) ; seul le NOM de fichier est pris en compte, "
-                              "un chemin éventuel est ignoré.")
+    parser.add_argument("--output", required=True,
+                         help="Chemin EXACT du CSV final localisé — utilisé tel quel, jamais "
+                              "renommé ni replacé sous un autre répertoire (contrat d'origine "
+                              "de cet orchestrateur). Seuls les fichiers transitoires (voir "
+                              "--transient-dir) sont placés automatiquement.")
     parser.add_argument("--skip-lines", type=int, default=0,
                          help="Lignes de tête à ignorer (hors-œuvre) en plus de la détection "
                               "par motifs (0 = aucune, défaut ; 182 pour le livre complet "
                               "The Humans). Voir poc_pipeline/config.py::FRONT_MATTER_SKIP_LINES.")
-    parser.add_argument("--out-dir", default=None,
-                         help="Répertoire de sortie racine pour ce livre — résultat final "
-                              "et transient/ (défaut : POC/pipeline/out/<slug-du-livre>)")
+    parser.add_argument("--transient-dir", default=None,
+                         help="Répertoire des fichiers intermédiaires + audit (défaut : "
+                              "POC/pipeline/out/<slug-du-livre>/transient) — n'affecte pas "
+                              "--output, toujours honoré tel quel.")
     parser.add_argument("--from", dest="from_stage", default=None, choices=STAGE_NAMES,
                          help="Reprendre à partir de cette étape")
     parser.add_argument("--only", dest="only_stage", default=None, choices=STAGE_NAMES,
@@ -338,13 +340,16 @@ def main() -> int:
             print(f"Script POC introuvable : {directory}")
             return 1
 
-    output_root = Path(args.out_dir).resolve() if args.out_dir else (
-        POC_ROOT / "pipeline" / "out" / slugify(book_path.stem)
+    # --output est honoré EXACTEMENT tel que donné (résolu en absolu pour la
+    # même raison que book_path ci-dessus) — jamais renommé, jamais replacé
+    # sous --transient-dir : voir la docstring du module.
+    output_path = Path(args.output).resolve()
+    transient_dir = Path(args.transient_dir).resolve() if args.transient_dir else (
+        POC_ROOT / "pipeline" / "out" / slugify(book_path.stem) / "transient"
     )
-    output_filename = Path(args.output).name or DEFAULT_OUTPUT_FILENAME
 
-    paths = RunPaths(output_root=output_root, output_filename=output_filename)
-    paths.output_root.mkdir(parents=True, exist_ok=True)
+    paths = RunPaths(output=output_path, transient=transient_dir)
+    paths.output.parent.mkdir(parents=True, exist_ok=True)
     paths.audit.mkdir(parents=True, exist_ok=True)
 
     opts = Options(
@@ -374,8 +379,8 @@ def main() -> int:
             return 1
 
     print(f"Livre              : {book_path}")
-    print(f"Répertoire racine  : {output_root}")
     print(f"Sortie finale      : {paths.output}")
+    print(f"Répertoire transitoire : {transient_dir}")
     print(f"Lignes ignorées    : {opts.skip_lines}")
 
     for name, fn in stages:
