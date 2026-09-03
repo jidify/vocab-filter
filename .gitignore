@@ -45,7 +45,7 @@ POC/traitement_mwe/claude/mwe_contexts.csv
 POC/traitement_mwe/claude/mwe_gate_rejections.csv
 POC/traitement_mwe/claude/vpc_candidates.jsonl
 POC/traitement_mwe/claude/rules_plus_candidates.jsonl
-POC/traitement_word/claude/mwe_analysis.csv
+POC/traitement_mwe/claude/mwe_analysis.csv
 POC/traitement_mwe/claude/tests/mwe_analysis_test.csv
 
 # Benchmark de référence versionné volontairement (pas régénéré à la volée) :

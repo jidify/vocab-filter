@@ -66,10 +66,10 @@ le passage sur les 522 lignes réelles de mwe_contexts.csv s'avère trop lent
 avec la gateway catgpt (pilotée par navigateur, donc lente).
 
 Usage :
-    uv run python POC/traitement_word/claude/translate_mwe_context.py \
+    uv run python POC/traitement_mwe/claude/translate_mwe_context.py \
         --in POC/traitement_mwe/claude/tests/mwe_contexts_tests.csv \
         --out POC/traitement_mwe/claude/tests/mwe_analysis_test.csv
-    uv run python POC/traitement_word/claude/translate_mwe_context.py
+    uv run python POC/traitement_mwe/claude/translate_mwe_context.py
 """
 
 from __future__ import annotations
