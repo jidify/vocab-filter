@@ -33,7 +33,7 @@ Filtres supplémentaires (hors rapport, ajoutés pour ce script) :
          suppression est journalisée dans un CSV séparé (voir
          write_cognates_removed_csv), avec le mot FR cognat et le
          concept_id WordNet correspondants.
-       - FAUX-AMI (false_friends_en_fr_seed.csv, à côté de ce script —
+       - FAUX-AMI (false_friends_en_fr_seed.csv, dans poc_datasets/ —
          liste seed constituée à la main, ~35 paires classiques
          actually/actuellement, library/librairie, etc. — PAS un dataset
          académique : aucune source téléchargeable trouvée pour le
@@ -123,7 +123,7 @@ AOA_PATH = ROOT / "poc_datasets" / "kuperman-aoa.csv"  # non utilisé (rapport :
 PREVALENCE_PATH = ROOT / "poc_datasets" / "word-prevalence.txt"
 CEFR_PATH = ROOT / "poc_datasets" / "cefrj.csv"
 COGNET_PATH = ROOT / "poc_datasets" / "cognet_en_fr.csv"
-FALSE_FRIENDS_PATH = Path(__file__).parent / "false_friends_en_fr_seed.csv"
+FALSE_FRIENDS_PATH = ROOT / "poc_datasets" / "false_friends_en_fr_seed.csv"
 
 SPACY_MODEL = "en_core_web_sm"
 
