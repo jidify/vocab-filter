@@ -358,16 +358,28 @@ class AnalyseLotMweSenses(dspy.Signature):
 
 # --------------------------------------------------------------------------
 # Câblage LM (CatGPT via l'adaptateur LiteLLM de prod) — identique à
-# translate_word_context.py::configure_dspy()
+# translate_word_context.py::configure_dspy(), plus --no-cache
 # --------------------------------------------------------------------------
 
-def configure_dspy() -> None:
+def configure_dspy(no_cache: bool = False) -> None:
+    """dspy.LM(..., cache=True) est le défaut de DSPy — jamais désactivé
+    avant l'ajout de --no-cache : le cache est PERSISTANT SUR DISQUE
+    (~/.dspy_cache, diskcache), survit aux runs ET aux sessions. Avec
+    LLM_TEMPERATURE=0.0, la clé de cache est stable : toute ligne/tout lot
+    déjà envoyé une fois est rejoué depuis le cache SANS jamais rappeler
+    catgpt, quel que soit le nombre de runs ultérieurs. Les signatures
+    AnalyseMweSenses (séquentiel) et AnalyseLotMweSenses (lot) produisent
+    des prompts différents donc des clés de cache différentes — pas de
+    collision entre les deux modes — mais deux runs du MÊME mode sur les
+    MÊMES candidats se partagent, eux, le même cache. --no-cache force
+    cache=False pour un test à blanc garanti sans cache."""
     llm_litellm_catgpt.register()
     lm = dspy.LM(
         model=f"catgpt/{config.CATGPT_MODEL}",
         api_key=config.CATGPT_API_TOKEN,
         temperature=config.LLM_TEMPERATURE,
         max_tokens=MAX_TOKENS,
+        cache=not no_cache,
     )
     dspy.configure(lm=lm)
 
@@ -651,6 +663,10 @@ def parse_args() -> argparse.Namespace:
                          help="Ignore et réécrit les CSV de sortie existants (principal + "
                               "candidats vides) au lieu de reprendre là où le run précédent "
                               "s'est arrêté")
+    parser.add_argument("--no-cache", action="store_true",
+                         help="Désactive le cache disque persistant de DSPy (~/.dspy_cache) : "
+                              "force un appel catgpt réel pour chaque lot/candidat, sans jamais "
+                              "rejouer une réponse d'un run précédent (voir configure_dspy)")
     return parser.parse_args()
 
 
@@ -691,7 +707,7 @@ def main() -> int:
     print(f"{len(todo)} candidat(s) à traiter, regroupés en {len(batches)} lot(s) "
           f"(seuil ~{args.batch_max_phrases} phrase(s)/lot).")
 
-    configure_dspy()
+    configure_dspy(no_cache=args.no_cache)
     ensure_csv_with_header(out_path, CSV_HEADER)
     ensure_csv_with_header(empty_out_path, EMPTY_CSV_HEADER)
     run_batches(batches, out_path, empty_out_path, stats)
