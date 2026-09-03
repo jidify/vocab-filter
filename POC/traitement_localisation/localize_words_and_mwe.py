@@ -61,18 +61,22 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path("C:/DOCS/_perso/vocab-filter")
+# POC/traitement_localisation/localize_words_and_mwe.py -> POC/ est le parent(1).
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pipeline import analyze as analyze_module  # noqa: E402
-from pipeline import atomic, config  # noqa: E402
-from pipeline import mwe as mwe_module  # noqa: E402
-from pipeline import zones as zones_module  # noqa: E402
-from pipeline.corpus import load_segments  # noqa: E402
+from poc_pipeline import analyze as analyze_module  # noqa: E402
+from poc_pipeline import atomic, config  # noqa: E402
+from poc_pipeline import mwe as mwe_module  # noqa: E402
+from poc_pipeline import zones as zones_module  # noqa: E402
+from poc_pipeline.corpus import load_segments  # noqa: E402
 
 DEFAULT_BOOK_PATH = ROOT / "books" / "The Humans - Stephen Karam.txt"
-DEFAULT_IN_PATH = ROOT / "POC" / "traitement_merge" / "word_and_mwe_analysis.csv"
-DEFAULT_OUT_PATH = Path(__file__).parent / "words_and_mwe_for_The-Humans-Stephen-Karam.csv"
+DEFAULT_IN_PATH = ROOT / "traitement_merge" / "word_and_mwe_analysis.csv"
+# Pas de titre de livre en dur dans le nom par défaut (piège documenté dans
+# le plan "Pipeline POC autonome" : l'ancien défaut écrasait silencieusement
+# le résultat d'un autre livre) — passer --out explicitement reste recommandé.
+DEFAULT_OUT_PATH = Path(__file__).parent / "words_and_mwe_localized.csv"
 DEFAULT_UNMATCHED_OUT_PATH = Path(__file__).parent / "localisation_unmatched.csv"
 DEFAULT_LAYOUT_OUT_PATH = Path(__file__).parent / "zone_layout.json"
 DEFAULT_VPC_CANDIDATES_OUT_PATH = Path(__file__).parent / "vpc_candidates.jsonl"
@@ -346,6 +350,12 @@ def parse_args() -> argparse.Namespace:
                          help="JSONL intermédiaire des candidats rules_plus (audit)")
     parser.add_argument("--zone-percent", type=float, default=config.ZONE_PERCENT,
                          help=f"Taille des tranches en %% (défaut : {config.ZONE_PERCENT})")
+    parser.add_argument("--skip-lines", type=int, default=0,
+                         help="Nombre de lignes de tête (hors-œuvre : copyright, sommaire, "
+                              "distribution...) à ignorer en plus de la détection par motifs "
+                              "(0 = aucune, défaut ; 182 pour le livre complet The Humans). "
+                              "Doit être identique à la valeur utilisée pour "
+                              "extract_mwe_contexts.py sur le même livre.")
     return parser.parse_args()
 
 
@@ -372,7 +382,7 @@ def main() -> int:
           f"({sum(1 for r in rows if r['type'] == 'word')} word, "
           f"{sum(1 for r in rows if r['type'] == 'mwe')} mwe).")
 
-    segments = load_segments(book_path)
+    segments = load_segments(book_path, skip_lines=args.skip_lines)
     play_segments = [s for s in segments if s.kind != "hors_oeuvre"]
     print(f"{len(segments)} segments ({len(play_segments)} hors hors-œuvre).")
 

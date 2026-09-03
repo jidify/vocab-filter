@@ -96,10 +96,11 @@ from pathlib import Path
 import dspy
 from pydantic import BaseModel, Field
 
-ROOT = Path("C:/DOCS/_perso/vocab-filter")
+# POC/traitement_word/claude/translate_word_context.py -> POC/ est le parent(2).
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from pipeline import config, llm_litellm_catgpt  # noqa: E402
+from poc_pipeline import config, llm_litellm_catgpt  # noqa: E402
 
 DEFAULT_IN_PATH = Path(__file__).parent / "word_contexts.csv"
 DEFAULT_OUT_PATH = Path(__file__).parent / "word_analysis.csv"

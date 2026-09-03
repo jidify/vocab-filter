@@ -123,12 +123,13 @@ from typing import Literal
 import dspy
 from pydantic import BaseModel, Field
 
-ROOT = Path("C:/DOCS/_perso/vocab-filter")
+# POC/traitement_mwe/claude/translate_mwe_context.py -> POC/ est le parent(2).
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from pipeline import config, llm_litellm_catgpt  # noqa: E402
+from poc_pipeline import config, llm_litellm_catgpt  # noqa: E402
 
-DEFAULT_IN_PATH = ROOT / "POC" / "traitement_mwe" / "claude" / "mwe_contexts.csv"
+DEFAULT_IN_PATH = ROOT / "traitement_mwe" / "claude" / "mwe_contexts.csv"
 DEFAULT_OUT_PATH = Path(__file__).parent / "mwe_analysis.csv"
 DEFAULT_EMPTY_OUT_PATH = Path(__file__).parent / "mwe_analysis_empty.csv"
 

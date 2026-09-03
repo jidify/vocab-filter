@@ -54,6 +54,19 @@ POC/traitement_localisation/rules_plus_candidates.jsonl
 POC/traitement_localisation/zone_layout.json
 POC/traitement_localisation/localisation_unmatched.csv
 
+# Pipeline POC autonome (POC/pipeline/build_vocabulary_to_learn_pipeline.py) —
+# intermédiaires/audit par run (runs/<slug>/) et sorties finales (out/) sont
+# régénérables via une seule commande, mêmes conventions que ci-dessus.
+POC/pipeline/runs/
+POC/pipeline/out/
+
+# Exceptions aux règles ci-dessus (word-prevalence.txt, kuperman-aoa.csv,
+# ligne 25-26) : copies VENDORÉES, volontairement versionnées, pour que
+# POC/ reste autonome et déplaçable sans dépendre de DATASETS/ — voir
+# POC/poc_pipeline/config.py et le plan "Pipeline POC autonome".
+!POC/poc_datasets/word-prevalence.txt
+!POC/poc_datasets/kuperman-aoa.csv
+
 # Benchmark de référence versionné volontairement (pas régénéré à la volée) :
 # POC/traitement_word/claude/tests/word_analysis_test-sequential.csv
 

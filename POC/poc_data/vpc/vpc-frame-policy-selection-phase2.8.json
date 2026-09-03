@@ -1,0 +1,536 @@
+{
+  "schema_version": "booklex-vpc-frame-policy-selection-1.0",
+  "construction_split": "train",
+  "calibration_split": "dev",
+  "inventory_sha256": "679260fa445fcab23b6d3ec3c81d6a1abca507218adffdb89d2f9370607ffcb7",
+  "stability_sha256": "c41fa30089630bdb944bd48f04dc051a17b6c4760acb0d13c8a947871dab5b79",
+  "criterion": "highest DEV F1; policies within 0.005 F1 and 0.01 recall of the best prefer document_count>=2, then the lower redundant support threshold",
+  "chosen_policy_id": "C-support-1-documents-2",
+  "candidate_results": [
+    {
+      "policy": {
+        "policy_id": "A-support-1",
+        "minimum_occurrences": 1,
+        "minimum_documents": 1
+      },
+      "eligible_train_frames": 113,
+      "eligible_lexical_frames": 98,
+      "eligible_generic_frames": 15,
+      "covered_lexical_pairs": 85,
+      "covered_train_occurrences": 127,
+      "single_document_frames": 94,
+      "multi_document_frames": 19,
+      "mean_lodo_survival": 0.168141592920354,
+      "selected_lexical_frames": 96,
+      "selected_generic_frames": 0,
+      "rejected_lexical_frames": 1,
+      "dev_true_positives": 66,
+      "dev_false_positives": 34,
+      "dev_false_negatives": 3,
+      "dev_precision": 0.66,
+      "dev_recall": 0.9565217391304348,
+      "dev_f1": 0.7810650887573966
+    },
+    {
+      "policy": {
+        "policy_id": "B-support-2",
+        "minimum_occurrences": 2,
+        "minimum_documents": 1
+      },
+      "eligible_train_frames": 21,
+      "eligible_lexical_frames": 15,
+      "eligible_generic_frames": 6,
+      "covered_lexical_pairs": 14,
+      "covered_train_occurrences": 118,
+      "single_document_frames": 2,
+      "multi_document_frames": 19,
+      "mean_lodo_survival": 0.9047619047619048,
+      "selected_lexical_frames": 14,
+      "selected_generic_frames": 0,
+      "rejected_lexical_frames": 0,
+      "dev_true_positives": 66,
+      "dev_false_positives": 35,
+      "dev_false_negatives": 3,
+      "dev_precision": 0.6534653465346535,
+      "dev_recall": 0.9565217391304348,
+      "dev_f1": 0.7764705882352941
+    },
+    {
+      "policy": {
+        "policy_id": "C-support-1-documents-2",
+        "minimum_occurrences": 1,
+        "minimum_documents": 2
+      },
+      "eligible_train_frames": 19,
+      "eligible_lexical_frames": 13,
+      "eligible_generic_frames": 6,
+      "covered_lexical_pairs": 13,
+      "covered_train_occurrences": 118,
+      "single_document_frames": 0,
+      "multi_document_frames": 19,
+      "mean_lodo_survival": 1.0,
+      "selected_lexical_frames": 12,
+      "selected_generic_frames": 0,
+      "rejected_lexical_frames": 0,
+      "dev_true_positives": 66,
+      "dev_false_positives": 35,
+      "dev_false_negatives": 3,
+      "dev_precision": 0.6534653465346535,
+      "dev_recall": 0.9565217391304348,
+      "dev_f1": 0.7764705882352941
+    },
+    {
+      "policy": {
+        "policy_id": "D-support-2-documents-2",
+        "minimum_occurrences": 2,
+        "minimum_documents": 2
+      },
+      "eligible_train_frames": 19,
+      "eligible_lexical_frames": 13,
+      "eligible_generic_frames": 6,
+      "covered_lexical_pairs": 13,
+      "covered_train_occurrences": 118,
+      "single_document_frames": 0,
+      "multi_document_frames": 19,
+      "mean_lodo_survival": 1.0,
+      "selected_lexical_frames": 12,
+      "selected_generic_frames": 0,
+      "rejected_lexical_frames": 0,
+      "dev_true_positives": 66,
+      "dev_false_positives": 35,
+      "dev_false_negatives": 3,
+      "dev_precision": 0.6534653465346535,
+      "dev_recall": 0.9565217391304348,
+      "dev_f1": 0.7764705882352941
+    }
+  ],
+  "frozen_frame_selection": {
+    "schema_version": "booklex-vpc-frame-selection-1.0",
+    "construction_split": "train",
+    "calibration_split": "dev",
+    "inventory_sha256": "679260fa445fcab23b6d3ec3c81d6a1abca507218adffdb89d2f9370607ffcb7",
+    "minimum_occurrences": 1,
+    "minimum_documents": 2,
+    "threshold_results": [
+      {
+        "minimum_occurrences": 1,
+        "minimum_documents": 2,
+        "selected_lexical_frames": 12,
+        "selected_generic_frames": 0,
+        "rejected_lexical_frames": 0,
+        "true_positives": 66,
+        "false_positives": 35,
+        "false_negatives": 3,
+        "precision": 0.6534653465346535,
+        "recall": 0.9565217391304348,
+        "f1": 0.7764705882352941
+      }
+    ],
+    "lexical_frames": [
+      {
+        "level": "lexical",
+        "verb_lemma": "break",
+        "particle_lemmas": [
+          "out"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "none"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 2,
+        "train_documents": 2,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "check",
+        "particle_lemmas": [
+          "out"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": true,
+          "object_positions": [
+            "before"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 2,
+        "train_documents": 2,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "end",
+        "particle_lemmas": [
+          "up"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "none"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 2,
+        "train_documents": 2,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "go",
+        "particle_lemmas": [
+          "on"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "none"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 4,
+        "train_documents": 4,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "look",
+        "particle_lemmas": [
+          "forward"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "advmod"
+          ],
+          "particle_pos": [
+            "ADV"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "none"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 5,
+        "train_documents": 4,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "set",
+        "particle_lemmas": [
+          "up"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "none"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 2,
+        "train_documents": 2,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "show",
+        "particle_lemmas": [
+          "up"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "none"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 4,
+        "train_documents": 4,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "take",
+        "particle_lemmas": [
+          "on"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "after"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 3,
+        "train_documents": 3,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "take",
+        "particle_lemmas": [
+          "over"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "after"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 2,
+        "train_documents": 2,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "take",
+        "particle_lemmas": [
+          "up"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "after"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 2,
+        "train_documents": 2,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "turn",
+        "particle_lemmas": [
+          "out"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "none"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 6,
+        "train_documents": 6,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      },
+      {
+        "level": "lexical",
+        "verb_lemma": "wake",
+        "particle_lemmas": [
+          "up"
+        ],
+        "frame": {
+          "particle_dependencies": [
+            "prt"
+          ],
+          "particle_pos": [
+            "ADP"
+          ],
+          "directly_attached": [
+            true
+          ],
+          "relative_positions": [
+            "after"
+          ],
+          "particle_count": 1,
+          "is_discontinuous": false,
+          "object_positions": [
+            "none"
+          ],
+          "particle_complements": [
+            "none"
+          ]
+        },
+        "train_occurrences": 3,
+        "train_documents": 3,
+        "dev_true_positives": 0,
+        "dev_false_positives": 0
+      }
+    ],
+    "generic_frames": [],
+    "rejected_lexical_frames": [],
+    "blocked_lexical_frames": 1,
+    "blocked_generic_frames": 6
+  },
+  "pick_up_veto_assessment": "pick up veto excluded by the frozen dispersion policy",
+  "prep_assessment": "prep: 9 lexical TRAIN frames, 0 multi-document; no generic VERB+relation relaxation is licensed",
+  "advmod_assessment": "advmod: 8 lexical TRAIN frames, 1 multi-document; no generic VERB+relation relaxation is licensed"
+}
+

@@ -101,13 +101,14 @@ from pathlib import Path
 import spacy
 from wordfreq import zipf_frequency
 
-ROOT = Path("C:/DOCS/_perso/vocab-filter")
+# POC/traitement_word/claude/extract_word_contexts.py -> POC/ est le parent(2).
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from pipeline.corpus import is_hors_oeuvre  # noqa: E402
-from pipeline import mwe as mwe_module  # noqa: E402
-from pipeline import mwe_alignment, mwe_gates  # noqa: E402
-from fix_pipeline.detection_benchmark.tokenizer_boundary_fix import (  # noqa: E402
+from poc_pipeline.corpus import is_hors_oeuvre  # noqa: E402
+from poc_pipeline import mwe as mwe_module  # noqa: E402
+from poc_pipeline import mwe_alignment, mwe_gates  # noqa: E402
+from poc_pipeline.tokenizer_boundary_fix import (  # noqa: E402
     patch_dash_after_punctuation,
 )
 
@@ -116,10 +117,10 @@ DEFAULT_OUT_PATH = Path(__file__).parent / "word_contexts.csv"
 DEFAULT_MWE_EXCLUSIONS_OUT_PATH = Path(__file__).parent / "mwe_exclusions.csv"
 DEFAULT_COGNATES_REMOVED_OUT_PATH = Path(__file__).parent / "cognates_removed.csv"
 
-AOA_PATH = ROOT / "DATASETS" / "kuperman-aoa.csv"  # non utilisé (rapport : AoA informatif seulement)
-PREVALENCE_PATH = ROOT / "DATASETS" / "word-prevalence.txt"
-CEFR_PATH = ROOT / "DATASETS" / "cefrj.csv"
-COGNET_PATH = ROOT / "DATASETS" / "cognet_en_fr.csv"
+AOA_PATH = ROOT / "poc_datasets" / "kuperman-aoa.csv"  # non utilisé (rapport : AoA informatif seulement)
+PREVALENCE_PATH = ROOT / "poc_datasets" / "word-prevalence.txt"
+CEFR_PATH = ROOT / "poc_datasets" / "cefrj.csv"
+COGNET_PATH = ROOT / "poc_datasets" / "cognet_en_fr.csv"
 FALSE_FRIENDS_PATH = Path(__file__).parent / "false_friends_en_fr_seed.csv"
 
 SPACY_MODEL = "en_core_web_sm"
@@ -387,11 +388,17 @@ def passes_filter(
 # Extraction + agrégation
 # --------------------------------------------------------------------------
 
-def iter_book_lines(book_path: Path):
+def iter_book_lines(book_path: Path, skip_lines: int = 0):
     """Lignes non vides du livre, hors-œuvre exclu (mêmes règles que
-    pipeline/corpus.py::is_hors_oeuvre, réutilisé tel quel)."""
+    poc_pipeline/corpus.py::is_hors_oeuvre, réutilisé tel quel), plus les
+    `skip_lines` premières lignes de tête (1-indexées, lignes vides
+    comprises) — même sémantique que corpus.py::load_segments(skip_lines=),
+    pour que ce script voie exactement le même texte que
+    extract_mwe_contexts.py sur le même livre."""
     raw_text = book_path.read_text(encoding="utf-8", errors="replace")
-    for line in raw_text.splitlines():
+    for line_no, line in enumerate(raw_text.splitlines(), start=1):
+        if line_no <= skip_lines:
+            continue
         stripped = line.strip()
         if not stripped or is_hors_oeuvre(stripped):
             continue
@@ -399,7 +406,7 @@ def iter_book_lines(book_path: Path):
 
 
 def build_word_contexts(
-    book_path: Path,
+    book_path: Path, skip_lines: int = 0,
 ) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict], dict[str, int]]:
     pknown_scores = load_pknown_scores()
     cefr_by_word = load_cefr_by_word()
@@ -433,7 +440,7 @@ def build_word_contexts(
     cognates_removed: dict[str, dict] = {}
     false_friend_lemmas_seen: set[str] = set()
 
-    lines = list(iter_book_lines(book_path))
+    lines = list(iter_book_lines(book_path, skip_lines=skip_lines))
     for line_idx, doc in enumerate(nlp.pipe(lines, batch_size=64)):
         sents = list(doc.sents)
         sent_idx_by_start = {s.start_char: i for i, s in enumerate(sents)}
@@ -694,6 +701,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-phrases", type=int, default=0,
                          help="Plafond de phrases affichées par lemme dans la colonne "
                               "'phrases' (0 = toutes, défaut). Ne change pas nb_phrases.")
+    parser.add_argument("--skip-lines", type=int, default=0,
+                         help="Nombre de lignes de tête (hors-œuvre : copyright, sommaire, "
+                              "distribution...) à ignorer en plus de la détection par motifs "
+                              "(0 = aucune, défaut ; 182 pour le livre complet The Humans).")
     return parser.parse_args()
 
 
@@ -709,7 +720,9 @@ def main() -> int:
         return 1
 
     print(f"Livre : {book_path}")
-    by_lemma, mwe_exclusions, cognates_removed, stats = build_word_contexts(book_path)
+    by_lemma, mwe_exclusions, cognates_removed, stats = build_word_contexts(
+        book_path, skip_lines=args.skip_lines
+    )
 
     # Rechargés ici pour les colonnes informatives des CSV (false_friend/
     # cefr/zipf/aoa) — fichiers légers, cohérent avec le style du script

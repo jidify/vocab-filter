@@ -57,10 +57,15 @@ import argparse
 import csv
 from pathlib import Path
 
-ROOT = Path("C:/DOCS/_perso/vocab-filter")
+# POC/traitement_merge/merge_word_and_mwe_analysis.py -> POC/ est le parent(1).
+ROOT = Path(__file__).resolve().parents[1]
 
-DEFAULT_WORD_IN = ROOT / "POC/traitement_word/claude/tests/word_analysis_test-batch.csv"
-DEFAULT_MWE_IN = ROOT / "POC/traitement_mwe/claude/tests/mwe_analysis_test-batch.csv"
+# Pointent vers les VRAIES sorties de translate_word_context.py /
+# translate_mwe_context.py (et non les fixtures de tests/, comme c'était le
+# cas avant — piège documenté dans le plan "Pipeline POC autonome" : lancer
+# les scripts sans argument fusionnait silencieusement 25 lignes de test).
+DEFAULT_WORD_IN = ROOT / "traitement_word/claude/word_analysis.csv"
+DEFAULT_MWE_IN = ROOT / "traitement_mwe/claude/mwe_analysis.csv"
 DEFAULT_OUT_PATH = Path(__file__).parent / "word_and_mwe_analysis.csv"
 
 TYPE_COLUMN = "type"

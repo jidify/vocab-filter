@@ -85,12 +85,15 @@ import csv
 import sys
 from pathlib import Path
 
-ROOT = Path("C:/DOCS/_perso/vocab-filter")
+# POC/traitement_mwe/claude/extract_mwe_contexts.py -> POC/ est le parent(2).
+# Racine du POC autonome (pas la racine du dépôt vocab-filter) : voir le
+# plan "Pipeline POC autonome" — aucune dépendance vers pipeline/ de prod.
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from pipeline import analyze as analyze_module  # noqa: E402
-from pipeline import atomic, config  # noqa: E402
-from pipeline import mwe as mwe_module  # noqa: E402
+from poc_pipeline import analyze as analyze_module  # noqa: E402
+from poc_pipeline import atomic, config  # noqa: E402
+from poc_pipeline import mwe as mwe_module  # noqa: E402
 
 DEFAULT_BOOK_PATH = ROOT / "books" / "The Humans - Stephen Karam.txt"
 DEFAULT_OUT_PATH = Path(__file__).parent / "mwe_contexts.csv"
@@ -260,10 +263,11 @@ def aggregate_rejected_by_idiom(
 
 def build_mwe_contexts(
     book_path: Path, vpc_out_path: Path, rules_plus_out_path: Path,
+    skip_lines: int = 0,
 ) -> tuple[dict[str, dict], dict[str, dict], dict[str, int]]:
-    from pipeline.corpus import load_segments
+    from poc_pipeline.corpus import load_segments
 
-    segments = load_segments(book_path)
+    segments = load_segments(book_path, skip_lines=skip_lines)
     play_segments = [s for s in segments if s.kind != "hors_oeuvre"]
 
     print("Chargement d'idiomatch (n=2)...")
@@ -367,6 +371,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-phrases", type=int, default=0,
                          help="Plafond de phrases affichées par idiome dans la colonne "
                               "'phrases' (0 = toutes, défaut). Ne change pas nb_phrases.")
+    parser.add_argument("--skip-lines", type=int, default=0,
+                         help="Nombre de lignes de tête (hors-œuvre : copyright, sommaire, "
+                              "distribution...) à ignorer en plus de la détection par motifs "
+                              "(0 = aucune, défaut ; 182 pour le livre complet The Humans).")
     return parser.parse_args()
 
 
@@ -384,7 +392,7 @@ def main() -> int:
 
     print(f"Livre : {book_path}")
     aggregated, rejected_aggregated, stats = build_mwe_contexts(
-        book_path, vpc_out_path, rules_plus_out_path,
+        book_path, vpc_out_path, rules_plus_out_path, skip_lines=args.skip_lines,
     )
 
     write_csv(aggregated, out_path, args.max_phrases)
