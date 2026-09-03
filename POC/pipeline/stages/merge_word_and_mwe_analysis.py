@@ -46,9 +46,7 @@ amont fait évoluer son schéma de sortie.
 Usage :
     uv run python POC/pipeline/stages/merge_word_and_mwe_analysis.py
     uv run python POC/pipeline/stages/merge_word_and_mwe_analysis.py \
-        --word-in POC/traitement_word/claude/tests/word_analysis_test-sequential.csv \
-        --mwe-in POC/traitement_mwe/claude/tests/mwe_analysis_test-sequential.csv \
-        --out POC/pipeline/stages/word_and_mwe_analysis-sequential.csv
+        --word-in <word_analysis.csv> --mwe-in <mwe_analysis.csv> --out <fusionné.csv>
 """
 
 from __future__ import annotations

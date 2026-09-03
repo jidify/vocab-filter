@@ -72,15 +72,13 @@ Pièges catgpt/DSPy identifiés avant l'écriture de ce script (voir le plan) :
   - Un lot de nombreux lemmes documentés dans le même appel augmente le
     risque de confusion entre lemmes proches (mesuré ailleurs dans le dépôt
     sur d'autres tâches : pipeline/config.py:322-333, réassignation S6
-    dégradée à 40/lot, seul 10/lot validé) — comparer la sortie par lots au
-    benchmark séquentiel (tests/word_analysis_test-sequential.csv) avant de
-    lancer un run complet.
+    dégradée à 40/lot, seul 10/lot validé) — comparer la sortie par lots à
+    un run séquentiel (--batch-max-phrases 0) sur le même échantillon avant
+    de lancer un run complet.
 
 Usage :
     uv run python POC/pipeline/stages/translate_word_context.py
-    uv run python POC/pipeline/stages/translate_word_context.py \
-        --in POC/traitement_word/claude/tests/word_context_test.csv \
-        --out POC/traitement_word/claude/tests/word_analysis_test-batch.csv
+    uv run python POC/pipeline/stages/translate_word_context.py --in <word_contexts.csv> --out <word_analysis.csv>
     # mode séquentiel (1 appel par lemme, comme avant --batch-max-phrases) :
     uv run python POC/pipeline/stages/translate_word_context.py --batch-max-phrases 0
 """

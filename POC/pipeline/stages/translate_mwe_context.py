@@ -103,10 +103,8 @@ finale — pour qu'une interruption ne perde que ce qui n'a pas encore été
 écrit.
 
 Usage :
-    uv run python POC/pipeline/stages/translate_mwe_context.py \
-        --in POC/traitement_mwe/claude/tests/mwe_contexts_tests.csv \
-        --out POC/traitement_mwe/claude/tests/mwe_analysis_test.csv
     uv run python POC/pipeline/stages/translate_mwe_context.py
+    uv run python POC/pipeline/stages/translate_mwe_context.py --in <mwe_contexts.csv> --out <mwe_analysis.csv>
     # mode séquentiel (1 appel par candidat, comme avant --batch-max-phrases) :
     uv run python POC/pipeline/stages/translate_mwe_context.py --batch-max-phrases 0
 """
