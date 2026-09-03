@@ -28,9 +28,28 @@ La clé de dédoublonnage est (type, expression.casefold()) — jamais les champ
 FR (translations), qui ne servent qu'au garde-fou ci-dessous, jamais de signal
 de fusion.
 
-Sortie : un CSV, une ligne par expression UNIQUE — colonnes type, expression,
-distractors, nb_distractors. distractors est une liste jointe par " | " (même
-convention que translations dans translate_word_context.py / le CSV d'entrée).
+SORTIE — un répertoire PAR FICHIER D'ENTRÉE, jamais un chemin libre, même
+principe que POC/pipeline/build_vocabulary_to_learn_pipeline.py (voir sa
+docstring : un --out à chemin libre permet à un copier-coller de commande mal
+adapté d'écraser silencieusement le résultat d'un autre fichier) :
+
+    POC/distractor/out/<slug-du-fichier-d'entrée>/  (ou --out-dir)
+        <slug>-distractors.csv   <- résultat final (CSV_HEADER ci-dessous),
+                                     une ligne par expression UNIQUE,
+                                     colonnes type, expression, distractors,
+                                     nb_distractors — distractors est une
+                                     liste jointe par " | " (même convention
+                                     que translations dans
+                                     translate_word_context.py / le CSV
+                                     d'entrée)
+        audit/
+            distractors_cache_audit.csv  <- conflits cache/traduction de CE
+                                             run (voir CACHE PERSISTANT)
+
+slug = slugify(nom du fichier d'entrée sans extension) — copié tel quel de
+build_vocabulary_to_learn_pipeline.py::slugify (minuscules, séparateurs
+collapsés en '_'). Ex. "my_file_xxx.csv" -> répertoire "my_file_xxx/",
+résultat "my_file_xxx/my_file_xxx-distractors.csv".
 
 Deux paires de signatures DSPy (dspy.ChainOfThought), jamais mélangées dans un
 lot : ProposeDistracteursMot/ProposeDistracteursLotMot pour type=word,
@@ -65,17 +84,22 @@ mots) :
   - après retraits, hors de [2, 3] -> rattrapage individuel une fois, puis
     écrit quand même (jamais perdu silencieusement) et compté à part.
 
-REPRISE : le CSV de sortie fait office de journal (colonne `expression`,
-casefold) — --restart pour ignorer et repartir de zéro. Écriture EN STREAMING,
-un lot à la fois (jamais une seule passe finale).
+REPRISE : le CSV de sortie (<slug>/<slug>-distractors.csv) fait office de
+journal (colonne `expression`, casefold) — --restart pour ignorer et repartir
+de zéro : supprime TOUT le répertoire <slug>/ (résultat + audit/ de CE run),
+jamais le cache persistant ni son historique inter-run (voir ci-dessous).
+Écriture EN STREAMING, un lot à la fois (jamais une seule passe finale).
 
 CACHE PERSISTANT DE DISTRACTEURS (--cache-path, défaut
-cache/distractors_cache.csv), décidé avec l'utilisateur : une expression déjà
-traitée pour UN livre ne redemande jamais d'appel LLM pour un AUTRE livre —
-les distracteurs d'une expression ne dépendent que de l'expression elle-même
-(voir DÉDOUBLONNAGE ci-dessus), donc ce cache est INDÉPENDANT de --in/--out et
-n'est JAMAIS vidé par --restart (qui ne concerne que --out). Même format que
-la sortie principale (CSV_HEADER), même clé de lecture que le dédoublonnage
+cache/distractors_cache.csv — SIBLING de out/, PAS dedans), décidé avec
+l'utilisateur : une expression déjà traitée pour UN fichier ne redemande
+jamais d'appel LLM pour un AUTRE fichier — les distracteurs d'une expression
+ne dépendent que de l'expression elle-même (voir DÉDOUBLONNAGE ci-dessus).
+C'est le SEUL état qui survit délibérément en dehors de out/<slug>/ : le
+mettre sous out/<slug>/ le rendrait spécifique à un seul fichier d'entrée et
+casserait la réutilisation inter-fichiers qui est tout l'intérêt de ce cache.
+Ni --restart ni --out-dir ne l'affectent. Même format que la sortie
+principale (CSV_HEADER), même clé de lecture que le dédoublonnage
 ((type, expression.casefold())) ; fichier APPEND-ONLY — une expression
 recalculée y ajoute une NOUVELLE ligne plutôt que de réécrire l'ancienne ;
 read_cache ne garde que la DERNIÈRE occurrence de chaque clé (les entrées
@@ -84,29 +108,32 @@ plus lues).
 
 LA SEULE VÉRIFICATION faite sur une valeur en cache avant réutilisation est le
 GARDE-FOU ANTI-TRADUCTION (check_distractors ci-dessus), rejoué contre les
-`translations` connues de cette expression DANS LE LIVRE COURANT (elles
-peuvent différer d'un livre à l'autre — un nouveau livre peut attester un sens
-donc une traduction absente lors du calcul initial). Aucun autre contrôle
-n'est refait (les doublons/bornes ont déjà été validés au moment du calcul
-initial). Si AU MOINS UN distracteur en cache correspond désormais à une
-traduction connue, l'entrée en cache est ENTIÈREMENT rejetée (pas de filtrage
-partiel) : l'expression repart en calcul LLM comme si elle n'était pas en
-cache, et le conflit est journalisé — un ATTENTION sur stdout, PLUS une ligne
-dans un fichier d'audit APPEND-ONLY dédié (--cache-audit-path, défaut
-cache/distractors_cache_audit.csv, colonnes type, expression,
-distracteur_rejete, traduction_correspondante, raison), lui aussi jamais vidé
-par --restart — trace durable inter-run de chaque conflit cache/traduction,
-motif déjà utilisé dans le pipeline de prod pour les journaux d'anomalies
-(ex. localize_words_and_mwe.py::localisation_unmatched.csv).
+`translations` connues de cette expression DANS LE FICHIER COURANT (elles
+peuvent différer d'un fichier à l'autre — un nouveau fichier peut attester un
+sens donc une traduction absente lors du calcul initial). Aucun autre
+contrôle n'est refait (les doublons/bornes ont déjà été validés au moment du
+calcul initial). Si AU MOINS UN distracteur en cache correspond désormais à
+une traduction connue, l'entrée en cache est ENTIÈREMENT rejetée (pas de
+filtrage partiel) : l'expression repart en calcul LLM comme si elle n'était
+pas en cache, et le conflit est journalisé — un ATTENTION sur stdout, PLUS une
+ligne dans out/<slug>/audit/distractors_cache_audit.csv (colonnes type,
+expression, distracteur_rejete, traduction_correspondante, raison), motif
+déjà utilisé dans le pipeline de prod pour ses journaux d'anomalies par livre
+(ex. transient/audit/localisation_unmatched.csv de
+build_vocabulary_to_learn_pipeline.py) — CE fichier-là, contrairement au
+cache, EST vidé par --restart (il fait partie de out/<slug>/, propre à CE
+run).
 
 Tout résultat frais (cache manquant OU invalidé), une fois passé par
-check_distractors, est ajouté À LA FOIS à --out et au cache — un futur livre
-pourra le réutiliser. --ignore-cache saute la LECTURE du cache (force un appel
-LLM pour toute expression, même déjà en cache) sans désactiver son ÉCRITURE.
+check_distractors, est ajouté À LA FOIS au CSV de sortie et au cache — un
+futur fichier pourra le réutiliser. --ignore-cache saute la LECTURE du cache
+(force un appel LLM pour toute expression, même déjà en cache) sans désactiver
+son ÉCRITURE.
 
 Usage :
     uv run python POC/distractor/generate_distractors.py
-    uv run python POC/distractor/generate_distractors.py --in <fusionné.csv> --out <distractors.csv>
+    uv run python POC/distractor/generate_distractors.py --in <fusionné.csv>
+    # -> POC/distractor/out/<slug>/<slug>-distractors.csv
     uv run python POC/distractor/generate_distractors.py --dry-run
     # mode séquentiel (1 appel par expression) :
     uv run python POC/distractor/generate_distractors.py --batch-size 0
@@ -118,6 +145,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -132,11 +161,14 @@ sys.path.insert(0, str(ROOT))
 from poc_pipeline import config, llm_litellm_catgpt  # noqa: E402
 
 DEFAULT_IN_PATH = Path(__file__).parent / "inputs" / "vocabulary_input_example.csv"
-DEFAULT_OUT_PATH = Path(__file__).parent / "outputs" / "distractors.csv"
-# Cache PERSISTANT inter-run/inter-livre — voir le docstring du module.
-# Jamais sous outputs/ (que --restart peut vider) ni pipeline_out/.
+# Racine des résultats, un sous-répertoire par fichier d'entrée (voir SORTIE
+# dans le docstring du module et RunPaths ci-dessous) — jamais de --out à
+# chemin libre, même principe que build_vocabulary_to_learn_pipeline.py.
+DEFAULT_OUT_ROOT = Path(__file__).parent / "out"
+# Cache PERSISTANT inter-run/inter-FICHIER — voir CACHE PERSISTANT dans le
+# docstring du module. SIBLING de out/, délibérément PAS dedans (ni --restart
+# ni --out-dir ne doivent pouvoir l'affecter).
 DEFAULT_CACHE_PATH = Path(__file__).parent / "cache" / "distractors_cache.csv"
-DEFAULT_CACHE_AUDIT_PATH = Path(__file__).parent / "cache" / "distractors_cache_audit.csv"
 
 MAX_TOKENS = 4000
 DEFAULT_BATCH_SIZE = 50
@@ -165,6 +197,34 @@ AUDIT_CSV_HEADER = ["type", "expression", "distracteur_rejete", "traduction_corr
 CACHE_INVALIDATION_RAISON = (
     "distracteur en cache correspond désormais à une traduction connue de cette expression"
 )
+
+
+# --------------------------------------------------------------------------
+# Résolution des chemins de sortie à partir du fichier d'entrée — voir
+# SORTIE dans le docstring du module.
+# --------------------------------------------------------------------------
+
+def slugify(stem: str) -> str:
+    """Copié à l'identique de
+    build_vocabulary_to_learn_pipeline.py::slugify — nomme le répertoire de
+    sortie du fichier d'entrée traité : minuscules, séparateurs (espaces,
+    tirets...) collapsés en un seul '_'."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", stem).strip("_").lower()
+    return slug or "vocabulaire"
+
+
+@dataclass
+class RunPaths:
+    """Chemins de sortie d'UN run, tous dérivés de output_root
+    (out_root/slug) — voir SORTIE dans le docstring du module."""
+
+    output_root: Path
+    slug: str
+
+    def __post_init__(self) -> None:
+        self.out = self.output_root / f"{self.slug}-distractors.csv"
+        self.audit = self.output_root / "audit"
+        self.cache_audit = self.audit / "distractors_cache_audit.csv"
 
 
 # --------------------------------------------------------------------------
@@ -684,18 +744,20 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--in", dest="in_path", default=str(DEFAULT_IN_PATH),
                          help="Chemin du CSV d'entrée (défaut : inputs/vocabulary_input_example.csv)")
-    parser.add_argument("--out", dest="out_path", default=str(DEFAULT_OUT_PATH),
-                         help="Chemin du CSV de sortie (défaut : outputs/distractors.csv) — sert "
-                              "aussi de journal de reprise, voir --restart")
+    parser.add_argument("--out-dir", dest="out_root", default=str(DEFAULT_OUT_ROOT),
+                         help="Répertoire RACINE des résultats (défaut : out/) — le résultat de CE "
+                              "fichier va dans <out-dir>/<slug>/ (voir slugify dans le docstring du "
+                              "module), jamais un chemin libre, pour ne jamais écraser le résultat "
+                              "d'un autre fichier par erreur")
     parser.add_argument("--limit", type=int, default=0,
                          help="Plafond d'expressions uniques considérées depuis l'entrée (0 = toutes, défaut)")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
                          help="Nombre d'expressions par lot avant appel groupé à catgpt "
                               "(défaut : 50 ; 0 = mode séquentiel, un appel par expression)")
     parser.add_argument("--restart", action="store_true",
-                         help="Ignore et réécrit le CSV de sortie existant au lieu de reprendre "
-                              "là où le run précédent s'est arrêté — n'affecte JAMAIS le cache "
-                              "persistant de distracteurs (--cache-path), voir --ignore-cache")
+                         help="Supprime tout <out-dir>/<slug>/ (résultat + audit/ de CE run) au lieu "
+                              "de reprendre là où le run précédent s'est arrêté — n'affecte JAMAIS le "
+                              "cache persistant de distracteurs (--cache-path), voir --ignore-cache")
     parser.add_argument("--no-cache", action="store_true",
                          help="Désactive le cache disque persistant de DSPy (~/.dspy_cache) : "
                               "force un appel catgpt réel pour chaque lot/expression, sans jamais "
@@ -706,10 +768,11 @@ def parse_args() -> argparse.Namespace:
                          help="Chemin du cache PERSISTANT de distracteurs (défaut : "
                               "cache/distractors_cache.csv) — réutilisé entre livres/runs, jamais "
                               "vidé par --restart, voir CACHE PERSISTANT dans le docstring du module")
-    parser.add_argument("--cache-audit-path", dest="cache_audit_path", default=str(DEFAULT_CACHE_AUDIT_PATH),
+    parser.add_argument("--cache-audit-path", dest="cache_audit_path", default=None,
                          help="Chemin du journal d'audit des entrées de cache invalidées (défaut : "
-                              "cache/distractors_cache_audit.csv) — une ligne par distracteur en "
-                              "cache qui échoue désormais le garde-fou anti-traduction pour ce livre")
+                              "<out-dir>/<slug>/audit/distractors_cache_audit.csv, propre à CE run, "
+                              "vidé par --restart) — une ligne par distracteur en cache qui échoue "
+                              "désormais le garde-fou anti-traduction pour ce fichier")
     parser.add_argument("--ignore-cache", action="store_true",
                          help="Ignore le cache persistant de distracteurs EN LECTURE (force un appel "
                               "LLM pour toute expression, même déjà en cache) ; le cache est quand "
@@ -723,18 +786,22 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     in_path = Path(args.in_path)
-    out_path = Path(args.out_path)
     cache_path = Path(args.cache_path)
-    cache_audit_path = Path(args.cache_audit_path)
 
     if not in_path.exists():
         print(f"CSV d'entrée introuvable : {in_path}")
         return 1
 
-    if args.restart and out_path.exists():
-        out_path.unlink()  # --restart ne touche jamais cache_path / cache_audit_path (persistants)
+    slug = slugify(in_path.stem)
+    paths = RunPaths(output_root=Path(args.out_root) / slug, slug=slug)
+    out_path = paths.out
+    cache_audit_path = Path(args.cache_audit_path) if args.cache_audit_path else paths.cache_audit
 
-    print(f"Entrée : {in_path}")
+    if args.restart and not args.dry_run and paths.output_root.exists():
+        shutil.rmtree(paths.output_root)  # résultat + audit/ de CE run — jamais cache_path (persistant)
+
+    print(f"Entrée : {in_path}  (slug : {slug})")
+    print(f"Sortie : {paths.output_root}")
     entries, read_counters = read_input_csv(in_path)
     print(f"{read_counters['lignes_lues']} ligne(s) lue(s), "
           f"{read_counters['lignes_ignorees']} ignorée(s) (type inconnu ou expression vide), "
