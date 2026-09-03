@@ -71,17 +71,22 @@ d'en-tête, les deux sont détectés automatiquement.
 
 ## Format de sortie
 
-Une vraie traduction se présente souvent comme plusieurs mots de même sens
-(`fauteuil inclinable | fauteuil relax`) ; chaque distracteur est donc lui
-aussi un GROUPE de plusieurs mots français synonymes entre eux (2 à 4), pas
+Une vraie traduction se présente souvent comme 3 mots ou plus de même sens
+(`audible | perceptible | que l'on peut entendre`) ; chaque distracteur est
+donc lui aussi un GROUPE de plusieurs mots français synonymes entre eux, pas
 un mot isolé — pour que le quizz puisse afficher plusieurs formulations
-acceptées, aussi bien pour la bonne réponse que pour les mauvaises. La
-colonne `distractors` encode cette liste de groupes : les mots d'un même
-groupe sont joints par `" | "`, les groupes eux-mêmes par `" || "`.
+acceptées, aussi bien pour la bonne réponse que pour les mauvaises, SANS
+qu'un joueur puisse repérer la bonne réponse rien qu'en comptant les mots par
+option. Le LLM est invité à proposer 5 synonymes par groupe (classés du
+meilleur au moins bon) ; les mots qui échouent au garde-fou anti-traduction
+sont retirés, puis chaque groupe est tronqué aux 4 meilleurs survivants —
+cible 3 à 4 mots par groupe, jamais 2 systématiquement. La colonne
+`distractors` encode cette liste de groupes : les mots d'un même groupe sont
+joints par `" | "`, les groupes eux-mêmes par `" || "`.
 
 ```
 type,expression,distractors,nb_distractors
-word,staircase,ascenseur | élévateur || couloir | corridor || échelle | échelle à barreaux,3
+word,staircase,couloir | corridor | passage intérieur | dégagement || ascenseur | élévateur | monte-charge | appareil élévateur || échelle | échelle à barreaux | échelle portative | échelle droite,3
 ```
 
 Ici, 3 groupes (3 mauvaises réponses possibles dans le quizz) : "ascenseur"

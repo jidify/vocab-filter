@@ -251,12 +251,21 @@ DEFAULT_BATCH_SIZE = 50
 # d'options de réponse dans le quizz) — inchangé depuis la 1re version.
 MIN_DISTRACTORS = 2
 MAX_DISTRACTORS = 3
-# MIN/MAX_SYNONYMS_PER_GROUP : nombre de mots FR par groupe (synonymes ou
-# quasi-synonymes du MÊME sens erroné) — voir GROUPES DE SYNONYMES dans le
-# docstring du module. Un groupe qui tombe à 0 après le garde-fou est retiré
-# en entier ; un groupe réduit à 1 mot est conservé (toujours utilisable
-# comme option de réponse) mais compté à part (voir check_distractors).
-MIN_SYNONYMS_PER_GROUP = 2
+# SYNONYMES PAR GROUPE — décidé avec l'utilisateur : la plupart des vraies
+# traductions ont 3 mots ou plus ("audible | perceptible | que l'on peut
+# entendre") ; si les distracteurs plafonnent systématiquement à 2 (biais
+# observé : le LLM ancre sur le bas d'une fourchette "2 à 4"), le nombre de
+# mots par groupe devient à lui seul un indice pour repérer la bonne réponse,
+# indépendamment de tout sens. Stratégie "demande 5, garde les meilleurs 3-4" :
+# REQUESTED_SYNONYMS_PER_GROUP est ce qu'on demande au LLM (marge avant
+# filtrage/troncature) ; MIN/MAX_SYNONYMS_PER_GROUP sont la fourchette CIBLE
+# après check_distractors (troncature aux MAX_SYNONYMS_PER_GROUP meilleurs
+# survivants, voir check_distractors). Un groupe qui tombe à 0 après le
+# garde-fou est retiré en entier ; un groupe qui reste sous MIN_SYNONYMS_PER_GROUP
+# après troncature (peu de survivants au garde-fou) est conservé (toujours
+# utilisable comme option de réponse) mais compté à part.
+REQUESTED_SYNONYMS_PER_GROUP = 5
+MIN_SYNONYMS_PER_GROUP = 3
 MAX_SYNONYMS_PER_GROUP = 4
 
 # Copie documentée du schéma écrit par
@@ -341,12 +350,13 @@ class ExpressionDistractors(BaseModel):
     expression: str = Field(description="Recopiée à l'identique depuis l'entrée, jamais reformulée ni traduite.")
     distractors: list[list[str]] = Field(
         description=f"2 ou 3 GROUPES, un par sens erroné distinct, triés du meilleur groupe au "
-                    f"moins bon. Chaque groupe contient {MIN_SYNONYMS_PER_GROUP} à "
-                    f"{MAX_SYNONYMS_PER_GROUP} mots ou expressions françaises SYNONYMES entre eux "
-                    "(différentes façons de dire la MÊME chose fausse) — jamais un seul mot par "
-                    "groupe. Aucun mot, dans aucun groupe, n'est une traduction possible de "
-                    "expression, quel qu'en soit le sens ; aucun mot n'apparaît dans plus d'un "
-                    "groupe."
+                    f"moins bon. Chaque groupe contient EXACTEMENT {REQUESTED_SYNONYMS_PER_GROUP} "
+                    "mots ou expressions françaises SYNONYMES entre eux (différentes façons de dire "
+                    "la MÊME chose fausse), triés du meilleur au moins bon — jamais un seul mot par "
+                    "groupe : la plupart des vraies traductions ont 3 mots ou plus, un groupe trop "
+                    "court trahirait la bonne réponse par son nombre de mots. Aucun mot, dans aucun "
+                    "groupe, n'est une traduction possible de expression, quel qu'en soit le sens ; "
+                    "aucun mot n'apparaît dans plus d'un groupe."
     )
 
 
@@ -359,12 +369,13 @@ class ProposeDistracteursMot(dspy.Signature):
     traduction à choix multiples. Pour le mot anglais reçu (entree.expression),
     propose 2 ou 3 SENS ERRONÉS distincts pour servir de mauvaises réponses.
 
-    IMPORTANT — chaque sens erroné est un GROUPE de 2 à 4 mots français
+    IMPORTANT — chaque sens erroné est un GROUPE d'EXACTEMENT 5 mots français
     SYNONYMES ENTRE EUX (différentes façons de dire la MÊME chose fausse),
-    JAMAIS un seul mot isolé — exactement
-    comme une vraie traduction se présente souvent comme plusieurs mots de
-    même sens (ex. "fauteuil inclinable | fauteuil relax"). distractors est
-    donc une LISTE DE GROUPES (une liste de listes), pas une liste de mots.
+    classés du meilleur au moins bon — la plupart des vraies traductions ont
+    3 mots ou plus (ex. "fauteuil inclinable | fauteuil relax"), donc un
+    groupe trop court trahirait la bonne réponse par son seul nombre de mots ;
+    demander 5 laisse une marge si certains sont écartés ensuite. distractors
+    est donc une LISTE DE GROUPES (une liste de listes), pas une liste de mots.
 
     Contraintes strictes, pour CHAQUE mot de CHAQUE groupe :
       - Doit être un mot français courant et réel.
@@ -394,6 +405,9 @@ class ProposeDistracteursMot(dspy.Signature):
         autres — ne mélange jamais deux sens dans un même groupe, et ne
         répète jamais le même sens dans deux groupes.
       - Un mot ne doit apparaître que dans UN SEUL groupe.
+      - DANS un groupe, classe les 5 mots du meilleur au moins bon (les
+        derniers serviront de réserve si les premiers sont écartés par un
+        contrôle automatique) — ne renvoie JAMAIS moins de 5 mots par groupe.
 
     Classe les groupes par qualité décroissante (le meilleur en premier)
     dans distractors. Ne renvoie que les 2 ou 3 meilleurs groupes.
@@ -438,12 +452,13 @@ class ProposeDistracteursMwe(dspy.Signature):
     une expression figée), propose 2 ou 3 SENS ERRONÉS distincts pour servir
     de mauvaises réponses.
 
-    IMPORTANT — chaque sens erroné est un GROUPE de 2 à 4 mots ou expressions
-    françaises SYNONYMES ENTRE EUX (différentes façons de dire la MÊME chose
-    fausse), JAMAIS un seul mot isolé — exactement comme une vraie traduction
-    se présente souvent comme plusieurs mots de même sens (ex. "revenir |
-    retourner"). distractors est donc une LISTE DE GROUPES (une liste de
-    listes), pas une liste de mots.
+    IMPORTANT — chaque sens erroné est un GROUPE d'EXACTEMENT 5 mots ou
+    expressions françaises SYNONYMES ENTRE EUX (différentes façons de dire la
+    MÊME chose fausse), classés du meilleur au moins bon — la plupart des
+    vraies traductions ont 3 mots ou plus (ex. "revenir | retourner"), donc un
+    groupe trop court trahirait la bonne réponse par son seul nombre de mots ;
+    demander 5 laisse une marge si certains sont écartés ensuite. distractors
+    est donc une LISTE DE GROUPES (une liste de listes), pas une liste de mots.
 
     Contraintes strictes, pour CHAQUE mot de CHAQUE groupe :
       - Doit être un mot ou une expression française courante et réelle.
@@ -473,6 +488,9 @@ class ProposeDistracteursMwe(dspy.Signature):
         autres — ne mélange jamais deux sens dans un même groupe, et ne
         répète jamais le même sens dans deux groupes.
       - Un mot ne doit apparaître que dans UN SEUL groupe.
+      - DANS un groupe, classe les 5 mots du meilleur au moins bon (les
+        derniers serviront de réserve si les premiers sont écartés par un
+        contrôle automatique) — ne renvoie JAMAIS moins de 5 mots par groupe.
 
     Classe les groupes par qualité décroissante (le meilleur en premier)
     dans distractors. Ne renvoie que les 2 ou 3 meilleurs groupes.
@@ -539,8 +557,11 @@ class ProposeDistracteursMotRejeu(dspy.Signature):
     synonyme immédiat).
 
     Contraintes strictes (rappel, identiques à un premier essai) :
-      - distractors est une LISTE DE GROUPES, chaque groupe = 2 à 4 mots
-        français SYNONYMES entre eux pour UN sens erroné.
+      - distractors est une LISTE DE GROUPES, chaque groupe = EXACTEMENT 5
+        mots français SYNONYMES entre eux pour UN sens erroné (la plupart des
+        vraies traductions ont 3 mots ou plus, un groupe trop court trahirait
+        la bonne réponse par son seul nombre de mots ; demander 5 laisse une
+        marge si certains sont écartés ensuite).
       - Chaque mot doit être français, courant et réel.
       - Aucun mot ne doit en aucun cas être une traduction possible du mot
         source, quel que soit le contexte.
@@ -554,12 +575,14 @@ class ProposeDistracteursMotRejeu(dspy.Signature):
       - Privilégie des mots de fréquence et de difficulté similaires au mot
         source. Évite les mots trop rares, archaïques, techniques ou
         manifestement absurdes.
+      - DANS un groupe, classe les 5 mots du meilleur au moins bon.
       - Si tu hésites sur un mot (y compris sur son lien avec un élément de
         a_eviter), ne le propose pas et cherche une alternative plus sûre.
 
     Classe les groupes par qualité décroissante dans distractors. Ne renvoie
-    que les 2 ou 3 meilleurs groupes — AUCUN mot, dans AUCUN groupe, ne doit
-    figurer dans a_eviter, ni en être une variante évidente."""
+    que les 2 ou 3 meilleurs groupes, JAMAIS moins de 5 mots par groupe —
+    AUCUN mot, dans AUCUN groupe, ne doit figurer dans a_eviter, ni en être
+    une variante évidente."""
 
     entree: ExpressionAvecExclusions = dspy.InputField()
     resultat: ExpressionDistractors = dspy.OutputField()
@@ -593,8 +616,11 @@ class ProposeDistracteursMweRejeu(dspy.Signature):
     AUCUN groupe, ni une variante évidente.
 
     Contraintes strictes (rappel, identiques à un premier essai) :
-      - distractors est une LISTE DE GROUPES, chaque groupe = 2 à 4 mots ou
-        expressions françaises SYNONYMES entre eux pour UN sens erroné.
+      - distractors est une LISTE DE GROUPES, chaque groupe = EXACTEMENT 5
+        mots ou expressions françaises SYNONYMES entre eux pour UN sens
+        erroné (la plupart des vraies traductions ont 3 mots ou plus, un
+        groupe trop court trahirait la bonne réponse par son seul nombre de
+        mots ; demander 5 laisse une marge si certains sont écartés ensuite).
       - Chaque mot doit être français, courant et réel.
       - Aucun mot ne doit en aucun cas être une traduction possible de
         l'expression source, ni de son sens LITTÉRAL (mot à mot), ni de son
@@ -610,12 +636,14 @@ class ProposeDistracteursMweRejeu(dspy.Signature):
       - Privilégie des mots de fréquence et de difficulté similaires à
         l'expression source. Évite les mots trop rares, archaïques,
         techniques ou manifestement absurdes.
+      - DANS un groupe, classe les 5 mots du meilleur au moins bon.
       - Si tu hésites sur un mot (y compris sur son lien avec un élément de
         a_eviter), ne le propose pas et cherche une alternative plus sûre.
 
     Classe les groupes par qualité décroissante dans distractors. Ne renvoie
-    que les 2 ou 3 meilleurs groupes — AUCUN mot, dans AUCUN groupe, ne doit
-    figurer dans a_eviter, ni en être une variante évidente."""
+    que les 2 ou 3 meilleurs groupes, JAMAIS moins de 5 mots par groupe —
+    AUCUN mot, dans AUCUN groupe, ne doit figurer dans a_eviter, ni en être
+    une variante évidente."""
 
     entree: ExpressionAvecExclusions = dspy.InputField()
     resultat: ExpressionDistractors = dspy.OutputField()
@@ -931,9 +959,17 @@ def check_distractors(
     un mot qui coïncide avec une traduction connue est retiré de SON groupe
     (pas tout le groupe) ; un mot dupliqué DANS un groupe ou ENTRE deux
     groupes (un même mot ne doit représenter qu'un seul sens erroné) est
-    aussi retiré. Un groupe vidé de tous ses mots est retiré EN ENTIER ; un
-    groupe réduit à 1 mot est conservé mais compté à part
-    (`groupes_sous_min_synonymes`, voir MIN_SYNONYMS_PER_GROUP)."""
+    aussi retiré. Un groupe vidé de tous ses mots est retiré EN ENTIER.
+
+    Le LLM est invité à proposer REQUESTED_SYNONYMS_PER_GROUP (5) mots par
+    groupe, classés du meilleur au moins bon — volontairement plus que la
+    cible, en réserve pour ce garde-fou. Après filtrage, chaque groupe
+    survivant est TRONQUÉ aux MAX_SYNONYMS_PER_GROUP meilleurs mots restants
+    (préserve l'ordre = le classement du LLM), pour ne jamais laisser un
+    groupe démesurément long trahir la bonne réponse dans l'autre sens. Un
+    groupe qui reste sous MIN_SYNONYMS_PER_GROUP après troncature (peu de
+    mots ont survécu au garde-fou) est conservé mais compté à part
+    (`groupes_sous_min_synonymes`)."""
     if result.expression.strip().casefold() != entry.expression.strip().casefold():
         print(f"  ATTENTION expression renvoyée différente : {result.expression!r} != {entry.expression!r}")
         stats["expression_mismatch"] += 1
@@ -964,6 +1000,8 @@ def check_distractors(
             if group:  # groupe non-vide en entrée mais vidé par le garde-fou -> compté
                 stats["groupes_vides_retires"] += 1
             continue
+        if len(cleaned_group) > MAX_SYNONYMS_PER_GROUP:
+            cleaned_group = cleaned_group[:MAX_SYNONYMS_PER_GROUP]  # garde les N meilleurs (ordre du LLM)
         if len(cleaned_group) < MIN_SYNONYMS_PER_GROUP:
             stats["groupes_sous_min_synonymes"] += 1
         cleaned_groups.append(cleaned_group)
