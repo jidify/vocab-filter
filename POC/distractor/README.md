@@ -30,7 +30,7 @@ expression déjà connue d'un traitement précédent.
 | `--restart` | off | Repart de zéro pour ce fichier (supprime `out/<slug>/`) |
 | `--ignore-cache` | off | Ignore le cache de distracteurs en lecture (le réécrit quand même) |
 | `--cache-path` | `cache/distractors_cache.csv` | Chemin du cache persistant de distracteurs |
-| `--cache-audit-path` | `out/<slug>/audit/distractors_cache_audit.csv` | Journal des conflits cache/traduction de ce run |
+| `--rejected-out` | `out/<slug>/audit/distractors_rejected.csv` | Journal (`expression,cause`) des distracteurs rejetés par le garde-fou de ce run |
 | `--no-cache` | off | Désactive le cache disque de DSPy (~/.dspy_cache) — sans rapport avec `--cache-path` |
 | `--dry-run` | off | Dédoublonne et affiche le plan de lots sans appeler le LLM ni rien écrire |
 

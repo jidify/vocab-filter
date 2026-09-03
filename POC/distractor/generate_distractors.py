@@ -43,8 +43,19 @@ adapté d'écraser silencieusement le résultat d'un autre fichier) :
                                      translate_word_context.py / le CSV
                                      d'entrée)
         audit/
-            distractors_cache_audit.csv  <- conflits cache/traduction de CE
-                                             run (voir CACHE PERSISTANT)
+            distractors_rejected.csv  <- distracteurs rejetés par le garde-fou
+                                          anti-traduction pendant CE run,
+                                          colonnes expression,cause — cause
+                                          est le distracteur rejeté LUI-MÊME
+                                          (ex. "silence" pour "beat"), pas une
+                                          explication : réutilisable tel quel
+                                          dans une consigne de re-soumission
+                                          au LLM ("ne pas utiliser <cause>",
+                                          voir CONTRÔLES ci-dessous ; la
+                                          re-soumission elle-même N'EST PAS
+                                          implémentée — ce fichier ne fait
+                                          QUE journaliser, décision utilisateur
+                                          explicite)
 
 slug = slugify(nom du fichier d'entrée sans extension) — copié tel quel de
 build_vocabulary_to_learn_pipeline.py::slugify (minuscules, séparateurs
@@ -77,12 +88,32 @@ mots) :
   - expression renvoyée != expression d'entrée (casefold) -> comptage seul
   - GARDE-FOU TRADUCTIONS : tout distracteur qui coïncide (strip+casefold)
     avec une des translations connues de cette expression (union de tous ses
-    sens) est RETIRÉ de la liste, journalisé et compté — seul contrôle qui
-    modifie la sortie, la contrainte anti-traduction étant le cœur de la
-    demande et l'entrée nous donnant gratuitement une partie de la réponse.
-  - distracteurs vides ou dupliqués dans la même ligne -> retirés + comptés
-  - après retraits, hors de [2, 3] -> rattrapage individuel une fois, puis
-    écrit quand même (jamais perdu silencieusement) et compté à part.
+    sens) est RETIRÉ de la liste — seul contrôle qui modifie la sortie, la
+    contrainte anti-traduction étant le cœur de la demande et l'entrée nous
+    donnant gratuitement une partie de la réponse. Journalisé À LA FOIS sur
+    stdout (ATTENTION) ET dans out/<slug>/audit/distractors_rejected.csv
+    (colonnes expression,cause — voir SORTIE ci-dessus) : PAS de fichier
+    d'audit avant cette entrée du docstring — un run réel qui déclenche ce
+    garde-fou perdait la trace de l'expression concernée dès que le seul
+    ATTENTION stdout défilait hors de l'écran (cas vécu sur "beat"/"silence").
+  - distracteurs vides ou dupliqués dans la même ligne -> retirés + comptés,
+    JAMAIS journalisés dans distractors_rejected.csv (rien d'utile à faire
+    éviter au LLM dans ces deux cas — juste du bruit de formatage).
+  - après retraits, hors de [2, 3] -> rattrapage individuel une fois (avec le
+    MÊME prompt, sans tenir compte des causes journalisées ci-dessus — voir
+    RÉ-SOUMISSION plus bas), puis écrit quand même (jamais perdu
+    silencieusement) et compté à part.
+
+RÉ-SOUMISSION AU LLM AVEC LES CAUSES JOURNALISÉES : PAS IMPLÉMENTÉE
+(décision utilisateur explicite) — distractors_rejected.csv existe pour
+qu'un futur run puisse relire ce journal et rejouer chaque expression
+concernée avec une consigne supplémentaire ("ne pas utiliser <cause>"), mais
+ce script ne le fait pas lui-même aujourd'hui. Une expression dont TOUS les
+distracteurs ont été rejetés (ex. "beat" -> 0 distracteur) reste donc dans le
+CSV de sortie avec un compte < 2, sans nouvelle tentative automatique au-delà
+du rattrapage individuel déjà décrit ci-dessus (qui rejoue le MÊME prompt,
+sans exclure les causes) — à corriger manuellement ou via un futur run outillé
+pour ça.
 
 REPRISE : le CSV de sortie (<slug>/<slug>-distractors.csv) fait office de
 journal (colonne `expression`, casefold) — --restart pour ignorer et repartir
@@ -116,10 +147,12 @@ calcul initial). Si AU MOINS UN distracteur en cache correspond désormais à
 une traduction connue, l'entrée en cache est ENTIÈREMENT rejetée (pas de
 filtrage partiel) : l'expression repart en calcul LLM comme si elle n'était
 pas en cache, et le conflit est journalisé — un ATTENTION sur stdout, PLUS une
-ligne dans out/<slug>/audit/distractors_cache_audit.csv (colonnes type,
-expression, distracteur_rejete, traduction_correspondante, raison), motif
-déjà utilisé dans le pipeline de prod pour ses journaux d'anomalies par livre
-(ex. transient/audit/localisation_unmatched.csv de
+ligne dans out/<slug>/audit/distractors_rejected.csv (MÊME fichier, MÊMES
+colonnes expression,cause que pour les rejets de calcul frais ci-dessus — le
+fait générateur diffère, cache ou LLM, mais l'info utile est identique : "ce
+distracteur-là est disqualifié pour cette expression"), motif déjà utilisé
+dans le pipeline de prod pour ses journaux d'anomalies par livre (ex.
+transient/audit/localisation_unmatched.csv de
 build_vocabulary_to_learn_pipeline.py) — CE fichier-là, contrairement au
 cache, EST vidé par --restart (il fait partie de out/<slug>/, propre à CE
 run).
@@ -190,13 +223,13 @@ INPUT_COLUMNS = [
 
 CSV_HEADER = ["type", "expression", "distractors", "nb_distractors"]
 
-# Journal d'audit des entrées de cache invalidées par le garde-fou
-# anti-traduction (une ligne par distracteur en cache rejeté) — voir CACHE
-# PERSISTANT dans le docstring du module.
-AUDIT_CSV_HEADER = ["type", "expression", "distracteur_rejete", "traduction_correspondante", "raison"]
-CACHE_INVALIDATION_RAISON = (
-    "distracteur en cache correspond désormais à une traduction connue de cette expression"
-)
+# Journal d'audit des distracteurs rejetés par le garde-fou anti-traduction
+# (calcul frais OU relecture de cache invalidée — voir CONTRÔLES et CACHE
+# PERSISTANT dans le docstring du module) — une ligne par distracteur rejeté.
+# `cause` est le distracteur rejeté LUI-MÊME (pas une explication) : pensé
+# pour être injecté tel quel dans une future consigne de re-soumission au
+# LLM ("ne pas utiliser <cause>") — re-soumission NON implémentée ici.
+AUDIT_CSV_HEADER = ["expression", "cause"]
 
 
 # --------------------------------------------------------------------------
@@ -224,7 +257,7 @@ class RunPaths:
     def __post_init__(self) -> None:
         self.out = self.output_root / f"{self.slug}-distractors.csv"
         self.audit = self.output_root / "audit"
-        self.cache_audit = self.audit / "distractors_cache_audit.csv"
+        self.rejected = self.audit / "distractors_rejected.csv"
 
 
 # --------------------------------------------------------------------------
@@ -563,8 +596,13 @@ def append_results_csv(row_type: str, results: list[ExpressionDistractors], out_
 # --------------------------------------------------------------------------
 
 def check_distractors(
-    result: ExpressionDistractors, entry: VocabEntry, stats: dict[str, int],
+    result: ExpressionDistractors, entry: VocabEntry, stats: dict[str, int], rejected_rows: list[list[str]],
 ) -> ExpressionDistractors:
+    """rejected_rows reçoit une ligne [expression, cause] par distracteur
+    écarté pour cause de traduction connue (voir AUDIT_CSV_HEADER) — PAS pour
+    les distracteurs vides/dupliqués, qui n'ont rien d'utile à faire éviter
+    au LLM (voir CONTRÔLES dans le docstring du module). Muté en place :
+    l'appelant l'écrit dans out/<slug>/audit/distractors_rejected.csv."""
     if result.expression.strip().casefold() != entry.expression.strip().casefold():
         print(f"  ATTENTION expression renvoyée différente : {result.expression!r} != {entry.expression!r}")
         stats["expression_mismatch"] += 1
@@ -581,6 +619,7 @@ def check_distractors(
         if key in known_translations:
             print(f"  ATTENTION distracteur écarté (traduction connue de {entry.expression!r}) : {d!r}")
             stats["distracteurs_traduction_retires"] += 1
+            rejected_rows.append([entry.expression, d])
             continue
         if key in seen:
             stats["distracteurs_doublons_retires"] += 1
@@ -612,8 +651,8 @@ def split_by_cache(
         correspond désormais à une traduction connue de cette expression
         dans ce livre) — aucun filtrage partiel, l'expression repart en
         calcul LLM comme si elle n'était pas en cache.
-      - audit_rows : une ligne par distracteur en cache rejeté (voir
-        AUDIT_CSV_HEADER), à journaliser par l'appelant."""
+      - audit_rows : une ligne [expression, cause] par distracteur en cache
+        rejeté (voir AUDIT_CSV_HEADER), à journaliser par l'appelant."""
     from_cache: list[tuple[str, ExpressionDistractors]] = []
     needs_llm: list[VocabEntry] = []
     audit_rows: list[list[str]] = []
@@ -635,7 +674,7 @@ def split_by_cache(
                 print(f"  ATTENTION cache invalidé pour {entry.expression!r} ({entry.type}) : le "
                       f"distracteur {distractor!r} correspond désormais à la traduction connue "
                       f"{translation!r} -> recalcul via le LLM.")
-                audit_rows.append([entry.type, entry.expression, distractor, translation, CACHE_INVALIDATION_RAISON])
+                audit_rows.append([entry.expression, distractor])
             needs_llm.append(entry)
         else:
             stats["expressions_depuis_cache"] += 1
@@ -661,7 +700,8 @@ def new_stats(expressions_total: int, expressions_skipped_done: int) -> dict[str
 
 
 def run_batches(
-    row_type: str, batches: list[list[VocabEntry]], out_path: Path, cache_path: Path, stats: dict[str, int],
+    row_type: str, batches: list[list[VocabEntry]], out_path: Path, cache_path: Path,
+    audit_path: Path, stats: dict[str, int],
 ) -> None:
     unit_analyser = dspy.ChainOfThought(ProposeDistracteursMot if row_type == "word" else ProposeDistracteursMwe)
     lot_analyser = dspy.ChainOfThought(ProposeDistracteursLotMot if row_type == "word" else ProposeDistracteursLotMwe)
@@ -688,6 +728,7 @@ def run_batches(
 
         seen_keys: set[str] = set()
         kept: list[ExpressionDistractors] = []
+        rejected_rows: list[list[str]] = []
         for result in results:
             key = result.expression.strip().casefold()
             entry = entries_by_key.get(key)
@@ -696,7 +737,7 @@ def run_batches(
                 continue
             seen_keys.add(key)
             stats["resultats"] += 1
-            kept.append(check_distractors(result, entry, stats))
+            kept.append(check_distractors(result, entry, stats, rejected_rows))
 
         missing = [e for e in batch if e.expression.casefold() not in seen_keys]
         if missing:
@@ -706,7 +747,11 @@ def run_batches(
 
         append_results_csv(row_type, kept, out_path)
         append_results_csv(row_type, kept, cache_path)  # résultats frais -> réutilisables par un futur livre
-        print(f"  -> {len(kept)} résultat(s) écrit(s)")
+        if rejected_rows:
+            ensure_csv_with_header(audit_path, AUDIT_CSV_HEADER)
+            append_audit_rows(rejected_rows, audit_path)
+        print(f"  -> {len(kept)} résultat(s) écrit(s)"
+              f"{f', {len(rejected_rows)} distracteur(s) rejeté(s) -> {audit_path}' if rejected_rows else ''}")
 
     if not pending_retry:
         return
@@ -730,10 +775,15 @@ def run_batches(
             continue
 
         stats["resultats"] += 1
-        kept = check_distractors(result, entry, stats)
+        rejected_rows: list[list[str]] = []
+        kept = check_distractors(result, entry, stats, rejected_rows)
         append_results_csv(row_type, [kept], out_path)
         append_results_csv(row_type, [kept], cache_path)  # résultat frais -> réutilisable par un futur livre
-        print("  -> 1 résultat écrit")
+        if rejected_rows:
+            ensure_csv_with_header(audit_path, AUDIT_CSV_HEADER)
+            append_audit_rows(rejected_rows, audit_path)
+        print("  -> 1 résultat écrit"
+              f"{f', {len(rejected_rows)} distracteur(s) rejeté(s) -> {audit_path}' if rejected_rows else ''}")
 
 
 # --------------------------------------------------------------------------
@@ -768,11 +818,13 @@ def parse_args() -> argparse.Namespace:
                          help="Chemin du cache PERSISTANT de distracteurs (défaut : "
                               "cache/distractors_cache.csv) — réutilisé entre livres/runs, jamais "
                               "vidé par --restart, voir CACHE PERSISTANT dans le docstring du module")
-    parser.add_argument("--cache-audit-path", dest="cache_audit_path", default=None,
-                         help="Chemin du journal d'audit des entrées de cache invalidées (défaut : "
-                              "<out-dir>/<slug>/audit/distractors_cache_audit.csv, propre à CE run, "
-                              "vidé par --restart) — une ligne par distracteur en cache qui échoue "
-                              "désormais le garde-fou anti-traduction pour ce fichier")
+    parser.add_argument("--rejected-out", dest="rejected_path", default=None,
+                         help="Chemin du journal des distracteurs rejetés par le garde-fou "
+                              "anti-traduction (défaut : <out-dir>/<slug>/audit/"
+                              "distractors_rejected.csv, propre à CE run, vidé par --restart) — "
+                              "colonnes expression,cause (cause = le distracteur rejeté lui-même) ; "
+                              "couvre à la fois les rejets sur calcul frais et sur relecture de "
+                              "cache invalidée")
     parser.add_argument("--ignore-cache", action="store_true",
                          help="Ignore le cache persistant de distracteurs EN LECTURE (force un appel "
                               "LLM pour toute expression, même déjà en cache) ; le cache est quand "
@@ -795,7 +847,7 @@ def main() -> int:
     slug = slugify(in_path.stem)
     paths = RunPaths(output_root=Path(args.out_root) / slug, slug=slug)
     out_path = paths.out
-    cache_audit_path = Path(args.cache_audit_path) if args.cache_audit_path else paths.cache_audit
+    rejected_path = Path(args.rejected_path) if args.rejected_path else paths.rejected
 
     if args.restart and not args.dry_run and paths.output_root.exists():
         shutil.rmtree(paths.output_root)  # résultat + audit/ de CE run — jamais cache_path (persistant)
@@ -831,7 +883,7 @@ def main() -> int:
     from_cache, needs_llm, audit_rows = split_by_cache(todo_words + todo_mwes, cache, stats)
     print(f"{len(from_cache)} expression(s) réutilisée(s) depuis le cache, "
           f"{stats['expressions_cache_invalidees']} entrée(s) de cache invalidée(s) "
-          f"(garde-fou anti-traduction, voir cache_audit_path), "
+          f"(garde-fou anti-traduction, voir rejected_path), "
           f"{len(needs_llm)} expression(s) à traiter par le LLM.")
 
     needs_llm_words = [e for e in needs_llm if e.type == "word"]
@@ -858,9 +910,9 @@ def main() -> int:
     ensure_csv_with_header(cache_path)
 
     if audit_rows:
-        ensure_csv_with_header(cache_audit_path, AUDIT_CSV_HEADER)
-        append_audit_rows(audit_rows, cache_audit_path)
-        print(f"{len(audit_rows)} conflit(s) cache/traduction journalisé(s) -> {cache_audit_path}")
+        ensure_csv_with_header(rejected_path, AUDIT_CSV_HEADER)
+        append_audit_rows(audit_rows, rejected_path)
+        print(f"{len(audit_rows)} conflit(s) cache/traduction journalisé(s) -> {rejected_path}")
 
     if from_cache:
         from_cache_by_type: dict[str, list[ExpressionDistractors]] = {"word": [], "mwe": []}
@@ -872,9 +924,9 @@ def main() -> int:
     if needs_llm:
         configure_dspy(no_cache=args.no_cache)
         if word_batches:
-            run_batches("word", word_batches, out_path, cache_path, stats)
+            run_batches("word", word_batches, out_path, cache_path, rejected_path, stats)
         if mwe_batches:
-            run_batches("mwe", mwe_batches, out_path, cache_path, stats)
+            run_batches("mwe", mwe_batches, out_path, cache_path, rejected_path, stats)
 
     print()
     print("=== Récapitulatif ===")
@@ -895,6 +947,8 @@ def main() -> int:
     print()
     print(f"-> {out_path}")
     print(f"-> cache : {cache_path}")
+    if rejected_path.exists():
+        print(f"-> distracteurs rejetés (audit) : {rejected_path}")
     return 0
 
 
