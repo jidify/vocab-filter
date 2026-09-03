@@ -116,6 +116,8 @@ DEFAULT_BOOK_PATH = ROOT / "books" / "The Humans - Stephen Karam.txt"
 DEFAULT_OUT_PATH = Path(__file__).parent / "word_contexts.csv"
 DEFAULT_MWE_EXCLUSIONS_OUT_PATH = Path(__file__).parent / "mwe_exclusions.csv"
 DEFAULT_COGNATES_REMOVED_OUT_PATH = Path(__file__).parent / "cognates_removed.csv"
+DEFAULT_PKNOWN_CEFR_EXCLUDED_OUT_PATH = Path(__file__).parent / "pknown_cefr_excluded.csv"
+DEFAULT_BASIC_LEVEL_EXCLUDED_OUT_PATH = Path(__file__).parent / "basic_level_excluded.csv"
 
 AOA_PATH = ROOT / "poc_datasets" / "kuperman-aoa.csv"  # non utilisé (rapport : AoA informatif seulement)
 PREVALENCE_PATH = ROOT / "poc_datasets" / "word-prevalence.txt"
@@ -407,7 +409,8 @@ def iter_book_lines(book_path: Path, skip_lines: int = 0):
 
 def build_word_contexts(
     book_path: Path, skip_lines: int = 0,
-) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict], dict[str, int]]:
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict], dict[tuple[str, str], dict],
+           dict[str, dict], dict[str, int]]:
     pknown_scores = load_pknown_scores()
     cefr_by_word = load_cefr_by_word()
     cognates = load_cognates()
@@ -432,6 +435,10 @@ def build_word_contexts(
     seen_types: set[tuple[str, str]] = set()
     passed_types: set[tuple[str, str]] = set()
     rescued_types: set[tuple[str, str]] = set()
+    # (lemma, upos) -> formes de surface rencontrées, quel que soit le sort
+    # du type (retenu ou non) — utilisé uniquement par l'audit du filtre 1-3
+    # ci-dessous (pknown_cefr_zipf_excluded), voir sa docstring.
+    type_surfaces: dict[tuple[str, str], set[str]] = {}
 
     # lemma -> {"surfaces": set[str], "phrases": dict[phrase_key, text]}
     by_lemma: dict[str, dict] = {}
@@ -478,6 +485,7 @@ def build_word_contexts(
             stats["tokens_alpha"] += 1
 
             type_key = (lemma, upos)
+            type_surfaces.setdefault(type_key, set()).add(token.text)
 
             if type_key not in seen_types:
                 seen_types.add(type_key)
@@ -535,6 +543,29 @@ def build_word_contexts(
             )
             phrase_entry["token_spans"].append((token_start, token_end))
 
+    # Audit filtres 1-3 (Pknown / CEFR basique / repêchage Zipf) : jusqu'ici
+    # ces trois filtres ne laissaient AUCUNE trace écrite (seuls des
+    # compteurs agrégés en console), contrairement aux filtres 0bis et 5 —
+    # voir write_pknown_cefr_zipf_excluded_csv. Un type (lemma, upos) VU
+    # dans le texte (seen_types) mais jamais RETENU (passed_types) a été
+    # écarté soit au filtre 1 (Pknown absent ou <= MIN_PKNOWN), soit au
+    # filtre 2 (CEFR A1/A2 exclusif pour ce POS) faute d'avoir été repêché
+    # par le filtre 3 (Zipf < ZIPF_RESCUE_THRESHOLD) — passes_filter() est
+    # la seule source de vérité pour distinguer les deux cas, rejouée ici
+    # à l'identique (même cache, donc gratuite).
+    pknown_cefr_zipf_excluded: dict[tuple[str, str], dict] = {}
+    for lemma, upos in seen_types - passed_types:
+        pknown = pknown_scores.get(lemma)
+        reason = (
+            "pknown_absent_or_low" if pknown is None or not (pknown > MIN_PKNOWN)
+            else "cefr_basic_not_rescued_by_zipf"
+        )
+        pknown_cefr_zipf_excluded[(lemma, upos)] = {
+            "reason": reason,
+            "pknown": pknown,
+            "surfaces": type_surfaces.get((lemma, upos), set()),
+        }
+
     # Filtre supplémentaire 4 : exclusion finale des lemmes ayant un niveau
     # A1/A2 pour n'importe quel POS dans cefrj.csv (voir lemma_has_basic_level).
     # Un faux-ami (filtre 0bis) est protégé : jamais exclu ici.
@@ -543,6 +574,15 @@ def build_word_contexts(
         if lemma not in false_friends
         and lemma_has_basic_level(cefr_by_word, lemma, lemma_basic_cache)
     ]
+    # Détails capturés AVANT suppression de by_lemma (voir
+    # write_basic_level_excluded_csv) — même principe d'audit que ci-dessus.
+    basic_level_excluded: dict[str, dict] = {
+        lemma: {
+            "upos": set(by_lemma[lemma]["upos"]),
+            "surfaces": set(by_lemma[lemma]["surfaces"]),
+        }
+        for lemma in excluded_lemmas
+    }
     for lemma in excluded_lemmas:
         del by_lemma[lemma]
     stats["lemmas_excluded_basic_level_any_pos"] = len(excluded_lemmas)
@@ -572,7 +612,10 @@ def build_word_contexts(
     final_lemmas = set(by_lemma)
     stats["lemmas_retained"] = len(by_lemma)
     stats["types_retained"] = sum(1 for lemma, _upos in passed_types if lemma in final_lemmas)
-    return by_lemma, mwe_exclusions, cognates_removed, stats
+    return (
+        by_lemma, mwe_exclusions, cognates_removed,
+        pknown_cefr_zipf_excluded, basic_level_excluded, stats,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -651,6 +694,62 @@ def write_mwe_exclusions_csv(
         writer.writerows(rows)
 
 
+def write_pknown_cefr_zipf_excluded_csv(
+    excluded: dict[tuple[str, str], dict], out_path: Path, cefr_by_word: dict,
+) -> None:
+    """(lemma, POS) rencontré dans le texte mais jamais entré dans by_lemma —
+    filtre 1 (Pknown absent ou <= MIN_PKNOWN) ou filtre 2/3 (CEFR A1/A2
+    exclusif pour ce POS, non repêché par ZIPF_RESCUE_THRESHOLD), voir
+    passes_filter() et le calcul de `pknown_cefr_zipf_excluded` dans
+    build_word_contexts(). Contrairement aux filtres 0bis/5, cette
+    exclusion n'avait jusqu'ici aucune trace écrite (seuls des compteurs
+    agrégés en console) — d'où ce fichier, ajouté après coup sur un cas
+    concret (le verbe "draw", A1 mais trop fréquent — Zipf 4.81 — pour être
+    repêché)."""
+    rows = sorted(
+        (
+            lemma, upos, data["reason"],
+            f"{data['pknown']:.2f}" if data["pknown"] is not None else "",
+            "/".join(sorted(cefr_levels_for(cefr_by_word, lemma, upos))),
+            f"{zipf_frequency(lemma, 'en'):.2f}",
+            "/".join(sorted(data["surfaces"])),
+        )
+        for (lemma, upos), data in excluded.items()
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["lemma", "pos", "reason", "pknown", "cefr", "zipf", "surface_forms"])
+        writer.writerows(rows)
+
+
+def write_basic_level_excluded_csv(
+    excluded: dict[str, dict], out_path: Path, cefr_by_word: dict,
+) -> None:
+    """Lemme exclu par le filtre 4 (lemma_has_basic_level) : au moins un
+    niveau A1/A2 connu pour ce lemme, TOUS POS confondus dans cefrj.csv —
+    même quand le(s) POS effectivement rencontré(s) dans le texte (colonne
+    `pos`, remplie AVANT suppression de by_lemma) n'était pas lui-même
+    A1/A2 (sinon le lemme aurait déjà été écarté au filtre 2/3, voir
+    write_pknown_cefr_zipf_excluded_csv ci-dessus). `cefr` liste ici
+    l'union tous-POS (all_cefr_levels_for_lemma), pas seulement celui du
+    POS rencontré."""
+    rows = sorted(
+        (
+            lemma,
+            "/".join(sorted(data["upos"])),
+            "/".join(sorted(all_cefr_levels_for_lemma(cefr_by_word, lemma))),
+            "/".join(sorted(data["surfaces"])),
+        )
+        for lemma, data in excluded.items()
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["lemma", "pos", "cefr", "surface_forms"])
+        writer.writerows(rows)
+
+
 def write_cognates_removed_csv(
     cognates_removed: dict[str, dict], out_path: Path,
     cefr_by_word: dict, aoa_scores: dict[str, float], false_friends: set[str],
@@ -698,6 +797,14 @@ def parse_args() -> argparse.Namespace:
                               "et de leur(s) idiome(s)")
     parser.add_argument("--cognates-removed-out", default=str(DEFAULT_COGNATES_REMOVED_OUT_PATH),
                          help="Chemin du CSV des lemmes retirés par le filtre 0bis (cognats)")
+    parser.add_argument("--pknown-cefr-excluded-out",
+                         default=str(DEFAULT_PKNOWN_CEFR_EXCLUDED_OUT_PATH),
+                         help="Chemin du CSV des (lemme, POS) écartés par le filtre 1 (Pknown) "
+                              "ou le filtre 2/3 (CEFR A1/A2 non repêché par le Zipf)")
+    parser.add_argument("--basic-level-excluded-out",
+                         default=str(DEFAULT_BASIC_LEVEL_EXCLUDED_OUT_PATH),
+                         help="Chemin du CSV des lemmes écartés par le filtre 4 "
+                              "(A1/A2 pour au moins un POS, tous POS cefrj.csv confondus)")
     parser.add_argument("--max-phrases", type=int, default=0,
                          help="Plafond de phrases affichées par lemme dans la colonne "
                               "'phrases' (0 = toutes, défaut). Ne change pas nb_phrases.")
@@ -714,15 +821,18 @@ def main() -> int:
     out_path = Path(args.out)
     mwe_exclusions_out_path = Path(args.mwe_exclusions_out)
     cognates_removed_out_path = Path(args.cognates_removed_out)
+    pknown_cefr_excluded_out_path = Path(args.pknown_cefr_excluded_out)
+    basic_level_excluded_out_path = Path(args.basic_level_excluded_out)
 
     if not book_path.exists():
         print(f"Livre introuvable : {book_path}")
         return 1
 
     print(f"Livre : {book_path}")
-    by_lemma, mwe_exclusions, cognates_removed, stats = build_word_contexts(
-        book_path, skip_lines=args.skip_lines
-    )
+    (
+        by_lemma, mwe_exclusions, cognates_removed,
+        pknown_cefr_zipf_excluded, basic_level_excluded, stats,
+    ) = build_word_contexts(book_path, skip_lines=args.skip_lines)
 
     # Rechargés ici pour les colonnes informatives des CSV (false_friend/
     # cefr/zipf/aoa) — fichiers légers, cohérent avec le style du script
@@ -737,6 +847,12 @@ def main() -> int:
     )
     write_cognates_removed_csv(
         cognates_removed, cognates_removed_out_path, cefr_by_word, aoa_scores, false_friends
+    )
+    write_pknown_cefr_zipf_excluded_csv(
+        pknown_cefr_zipf_excluded, pknown_cefr_excluded_out_path, cefr_by_word
+    )
+    write_basic_level_excluded_csv(
+        basic_level_excluded, basic_level_excluded_out_path, cefr_by_word
     )
 
     print()
@@ -756,6 +872,10 @@ def main() -> int:
     print(f"-> {out_path}")
     print(f"-> {mwe_exclusions_out_path} ({len(mwe_exclusions)} lemme(s) exclu(s) par le filtre 5)")
     print(f"-> {cognates_removed_out_path} ({len(cognates_removed)} lemme(s) retiré(s) par le filtre 0bis)")
+    print(f"-> {pknown_cefr_excluded_out_path} "
+          f"({len(pknown_cefr_zipf_excluded)} type(s) écarté(s) par le filtre 1/2/3)")
+    print(f"-> {basic_level_excluded_out_path} "
+          f"({len(basic_level_excluded)} lemme(s) écarté(s) par le filtre 4)")
     return 0
 
 

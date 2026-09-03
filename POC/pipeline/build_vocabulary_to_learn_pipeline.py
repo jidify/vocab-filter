@@ -21,20 +21,41 @@ soit vers un nom de fichier qui écrase silencieusement le résultat d'un
 autre livre. Cet orchestrateur passe TOUJOURS tous les chemins
 explicitement — aucun défaut de script n'est utilisé.
 
+Arborescence de sortie — tout dérive de --file, un seul répertoire racine
+par livre traité, jamais partagé entre deux livres :
+
+    POC/pipeline/out/<slug-du-livre>/
+        vocabulary.csv              <- résultat final (ou --output <nom>)
+        transient/                  <- intermédiaires par étape (reprise)
+            01_word_contexts.csv
+            02_word_analysis.csv        (journal de reprise, étape LLM)
+            03_mwe_contexts.csv
+            04_mwe_analysis.csv         (journal de reprise, étape LLM)
+            04_mwe_analysis_empty.csv   (second journal, étape LLM)
+            05_word_and_mwe_analysis.csv
+            audit/                  <- rejets/exclusions de chaque filtre
+                mwe_exclusions.csv           (filtre 5 : membre de MWE)
+                cognates_removed.csv         (filtre 0bis : cognat)
+                pknown_cefr_excluded.csv     (filtre 1/2/3 : Pknown/CEFR/Zipf)
+                basic_level_excluded.csv     (filtre 4 : A1/A2 tous POS)
+                mwe_gate_rejections.csv
+                vpc_candidates.jsonl / rules_plus_candidates.jsonl (x2)
+                zone_layout.json
+                localisation_unmatched.csv
+
 Usage :
     uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py \\
-        --file "books_excerpts/The Humans - Stephen Karam - excerpt.txt" \\
-        --output "POC/pipeline/out/humans_excerpt_vocab.csv"
+        --file "books_excerpts/The Humans - Stephen Karam - excerpt.txt"
+    # -> POC/pipeline/out/the_humans_stephen_karam_excerpt/vocabulary.csv
 
     # Livre complet (front matter connu : copyright/sommaire/distribution
     # jusqu'à la ligne 182 avant les épigraphes) :
     uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py \\
-        --file "books/The Humans - Stephen Karam.txt" --skip-lines 182 \\
-        --output "POC/pipeline/out/humans_full_vocab.csv"
+        --file "books/The Humans - Stephen Karam.txt" --skip-lines 182
 
     # Reprendre à partir d'une étape, ou n'en lancer qu'une :
-    uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py --file ... --output ... --from mwe_extract
-    uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py --file ... --output ... --only word_translate
+    uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py --file ... --from mwe_extract
+    uv run POC/pipeline/build_vocabulary_to_learn_pipeline.py --file ... --only word_translate
 """
 
 from __future__ import annotations
@@ -45,7 +66,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 POC_ROOT = Path(__file__).resolve().parent.parent
@@ -57,6 +78,8 @@ WORD_DIR = POC_ROOT / "traitement_word" / "claude"
 MWE_DIR = POC_ROOT / "traitement_mwe" / "claude"
 MERGE_DIR = POC_ROOT / "traitement_merge"
 LOCALIZE_DIR = POC_ROOT / "traitement_localisation"
+
+DEFAULT_OUTPUT_FILENAME = "vocabulary.csv"
 
 STAGE_NAMES = [
     "word_extract", "word_translate", "mwe_extract", "mwe_translate",
@@ -72,25 +95,32 @@ DETERMINISTIC_STAGES = {"word_extract", "mwe_extract", "merge", "localize"}
 
 
 def slugify(stem: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", stem).strip("-")
+    """'The Humans - Stephen Karam - excerpt' -> 'the_humans_stephen_karam_excerpt'
+    — minuscules, séparateurs (espaces, tirets...) collapsés en un seul '_'.
+    Nomme le répertoire de sortie racine du livre (voir docstring du module)."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", stem).strip("_").lower()
     return slug or "book"
 
 
 @dataclass
 class RunPaths:
-    work_dir: Path
-    output: Path
+    output_root: Path
+    output_filename: str
 
     def __post_init__(self) -> None:
-        self.word_contexts = self.work_dir / "01_word_contexts.csv"
-        self.word_analysis = self.work_dir / "02_word_analysis.csv"
-        self.mwe_contexts = self.work_dir / "03_mwe_contexts.csv"
-        self.mwe_analysis = self.work_dir / "04_mwe_analysis.csv"
-        self.mwe_analysis_empty = self.work_dir / "04_mwe_analysis_empty.csv"
-        self.merged = self.work_dir / "05_word_and_mwe_analysis.csv"
-        self.audit = self.work_dir / "audit"
+        self.output = self.output_root / self.output_filename
+        self.transient = self.output_root / "transient"
+        self.word_contexts = self.transient / "01_word_contexts.csv"
+        self.word_analysis = self.transient / "02_word_analysis.csv"
+        self.mwe_contexts = self.transient / "03_mwe_contexts.csv"
+        self.mwe_analysis = self.transient / "04_mwe_analysis.csv"
+        self.mwe_analysis_empty = self.transient / "04_mwe_analysis_empty.csv"
+        self.merged = self.transient / "05_word_and_mwe_analysis.csv"
+        self.audit = self.transient / "audit"
         self.mwe_exclusions = self.audit / "mwe_exclusions.csv"
         self.cognates_removed = self.audit / "cognates_removed.csv"
+        self.pknown_cefr_excluded = self.audit / "pknown_cefr_excluded.csv"
+        self.basic_level_excluded = self.audit / "basic_level_excluded.csv"
         self.mwe_gate_rejections = self.audit / "mwe_gate_rejections.csv"
         self.vpc_candidates_extract = self.audit / "vpc_candidates.jsonl"
         self.rules_plus_candidates_extract = self.audit / "rules_plus_candidates.jsonl"
@@ -103,9 +133,7 @@ class RunPaths:
 @dataclass
 class Options:
     file: Path
-    output: Path
     skip_lines: int
-    work_dir: Path
     force: bool
     restart: bool
     no_cache: bool
@@ -158,6 +186,8 @@ def run_word_extract(opts: Options, paths: RunPaths) -> None:
         "--out", str(paths.word_contexts),
         "--mwe-exclusions-out", str(paths.mwe_exclusions),
         "--cognates-removed-out", str(paths.cognates_removed),
+        "--pknown-cefr-excluded-out", str(paths.pknown_cefr_excluded),
+        "--basic-level-excluded-out", str(paths.basic_level_excluded),
         "--max-phrases", str(opts.max_phrases),
         "--skip-lines", str(opts.skip_lines),
     ])
@@ -250,14 +280,18 @@ LLM_STAGES = {"word_translate", "mwe_translate"}
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--file", required=True, help="Livre .txt en entrée")
-    parser.add_argument("--output", required=True, help="CSV final localisé")
+    parser.add_argument("--output", default=DEFAULT_OUTPUT_FILENAME,
+                         help=f"Nom du CSV final (défaut : {DEFAULT_OUTPUT_FILENAME}) — "
+                              "toujours écrit à la racine du répertoire de sortie du livre "
+                              "(voir --out-dir) ; seul le NOM de fichier est pris en compte, "
+                              "un chemin éventuel est ignoré.")
     parser.add_argument("--skip-lines", type=int, default=0,
                          help="Lignes de tête à ignorer (hors-œuvre) en plus de la détection "
                               "par motifs (0 = aucune, défaut ; 182 pour le livre complet "
                               "The Humans). Voir poc_pipeline/config.py::FRONT_MATTER_SKIP_LINES.")
-    parser.add_argument("--work-dir", default=None,
-                         help="Répertoire des intermédiaires et de l'audit "
-                              "(défaut : POC/pipeline/runs/<slug-du-livre>)")
+    parser.add_argument("--out-dir", default=None,
+                         help="Répertoire de sortie racine pour ce livre — résultat final "
+                              "et transient/ (défaut : POC/pipeline/out/<slug-du-livre>)")
     parser.add_argument("--from", dest="from_stage", default=None, choices=STAGE_NAMES,
                          help="Reprendre à partir de cette étape")
     parser.add_argument("--only", dest="only_stage", default=None, choices=STAGE_NAMES,
@@ -304,22 +338,21 @@ def main() -> int:
             print(f"Script POC introuvable : {directory}")
             return 1
 
-    work_dir = Path(args.work_dir).resolve() if args.work_dir else (
-        POC_ROOT / "pipeline" / "runs" / slugify(book_path.stem)
+    output_root = Path(args.out_dir).resolve() if args.out_dir else (
+        POC_ROOT / "pipeline" / "out" / slugify(book_path.stem)
     )
-    work_dir.mkdir(parents=True, exist_ok=True)
-    (work_dir / "audit").mkdir(parents=True, exist_ok=True)
+    output_filename = Path(args.output).name or DEFAULT_OUTPUT_FILENAME
 
-    output_path = Path(args.output).resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    paths = RunPaths(output_root=output_root, output_filename=output_filename)
+    paths.output_root.mkdir(parents=True, exist_ok=True)
+    paths.audit.mkdir(parents=True, exist_ok=True)
 
     opts = Options(
-        file=book_path, output=output_path, skip_lines=args.skip_lines,
-        work_dir=work_dir, force=args.force, restart=args.restart,
+        file=book_path, skip_lines=args.skip_lines,
+        force=args.force, restart=args.restart,
         no_cache=args.no_cache, batch_max_phrases=args.batch_max_phrases,
         limit=args.limit, max_phrases=args.max_phrases, zone_percent=args.zone_percent,
     )
-    paths = RunPaths(work_dir=work_dir, output=output_path)
 
     if args.only_stage:
         stages = [(n, fn) for n, fn in STAGES if n == args.only_stage]
@@ -340,15 +373,15 @@ def main() -> int:
             )
             return 1
 
-    print(f"Livre           : {book_path}")
-    print(f"Sortie finale   : {output_path}")
-    print(f"Répertoire de run : {work_dir}")
-    print(f"Lignes ignorées : {opts.skip_lines}")
+    print(f"Livre              : {book_path}")
+    print(f"Répertoire racine  : {output_root}")
+    print(f"Sortie finale      : {paths.output}")
+    print(f"Lignes ignorées    : {opts.skip_lines}")
 
     for name, fn in stages:
         fn(opts, paths)
 
-    print(f"\nTerminé -> {output_path}")
+    print(f"\nTerminé -> {paths.output}")
     return 0
 
 

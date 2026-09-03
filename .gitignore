@@ -55,9 +55,8 @@ POC/traitement_localisation/zone_layout.json
 POC/traitement_localisation/localisation_unmatched.csv
 
 # Pipeline POC autonome (POC/pipeline/build_vocabulary_to_learn_pipeline.py) —
-# intermédiaires/audit par run (runs/<slug>/) et sorties finales (out/) sont
-# régénérables via une seule commande, mêmes conventions que ci-dessus.
-POC/pipeline/runs/
+# out/<slug-du-livre>/ (résultat final + transient/ intermédiaires+audit)
+# est régénérable via une seule commande, mêmes conventions que ci-dessus.
 POC/pipeline/out/
 
 # Exceptions aux règles ci-dessus (word-prevalence.txt, kuperman-aoa.csv,
