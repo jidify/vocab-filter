@@ -1,10 +1,22 @@
 # TODO — intégrer le fix de tokenizer "tiret collé après ponctuation fermante"
 
-**Statut : pas encore intégré en production, volontairement.** Prototypé et
-mesuré dans `fix_pipeline/detection_benchmark/tokenizer_boundary_fix.py` +
+**Statut : intégré côté POC (`POC/`), PAS en production (`pipeline/`).**
+Voir le plan "Stage 0 du pipeline POC — configuration unique du tokenizer" :
+`POC/poc_pipeline/tokenizer_setup.py::configure_tokenizer` applique
+`patch_dash_after_punctuation` aux trois tokenizers du POC (analyze.get_nlp,
+extract_word_contexts.py, et — nouveau — `matcher.nlp` d'idiomatch), avant
+tout parsing. Le blocage n°2 ci-dessous (accès au `nlp` interne d'idiomatch)
+est donc levé côté POC : `matcher.nlp` était déjà exposé en clair dans
+`poc_pipeline/mwe.py`.
+
+`pipeline/analyze.py` (PRODUCTION) n'a toujours PAS été touché — les risques
+1 (inventaire figé) et 3 (re-run S1→S6) ci-dessous restent entiers pour la
+prod, ils ne s'appliquent pas au POC (pas d'inventaire figé, pas de
+`data/sense_fr.jsonl` à préserver). Prototypé et mesuré dans
+`fix_pipeline/detection_benchmark/tokenizer_boundary_fix.py` +
 `phase_tokenizer_fix_probe.py`/`_report.md` (probe hors plan, après Phase 6
-de `fix_pipeline/plan_detection_benchmark_funnel.md`). `pipeline/analyze.py`
-n'a pas été touché — voir "Pourquoi pas maintenant" ci-dessous.
+de `fix_pipeline/plan_detection_benchmark_funnel.md`) — voir "Pourquoi pas
+maintenant" ci-dessous pour la production.
 
 ## La cause
 
@@ -66,12 +78,13 @@ qui vaut la peine pour elle-même.
    (au moins relancer `scan_suspect_tokens`) sur le prochain livre traité
    avant de supposer qu'il suffit.
 
-## Plan d'intégration à étudier (pas encore fait)
+## Plan d'intégration à étudier (pas encore fait, PRODUCTION seulement)
 
-1. Décider du sort du `nlp` interne d'idiomatch (risque 2) : soit le
-   patcher aussi (vérifier faisabilité — `Idiomatcher.from_pretrained` ne
-   semble pas exposer son `nlp` pour patch externe facile), soit
-   documenter explicitement l'incohérence comme acceptable et pourquoi.
+1. ~~Décider du sort du `nlp` interne d'idiomatch (risque 2)~~ — résolu côté
+   POC : `Idiomatcher.from_pretrained().nlp` est accessible directement
+   (`poc_pipeline/mwe.py::get_matcher`, déjà utilisé en clair ailleurs dans
+   ce module) et reçoit désormais le patch. Reste à faire le même geste côté
+   `pipeline/mwe.py` si ce TODO est un jour porté en production.
 2. Ajouter `tokenizer_boundary_fix.patch_dash_after_punctuation` (ou son
    équivalent promu depuis `fix_pipeline/` vers `pipeline/`) dans
    `pipeline/analyze.py::get_nlp()`, à côté d'`EMAIL_SPECIAL_CASES`.

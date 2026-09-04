@@ -11,11 +11,11 @@ segment.
 from __future__ import annotations
 
 import spacy
-from spacy.symbols import ORTH
 from functools import lru_cache
 
 from poc_pipeline import atomic, config, custom_lexicon, multi_token, rules_plus, zones
 from poc_pipeline.corpus import Segment, load_segments
+from poc_pipeline.tokenizer_setup import configure_tokenizer
 from poc_pipeline.vpc import adapter as vpc_adapter
 from poc_pipeline.vpc import service as vpc_service
 from nltk.corpus import wordnet as nwn
@@ -135,27 +135,19 @@ def validate_occurrence_schema(occurrences: list[dict], segments: list[Segment])
         if not isinstance(analysis.get("alternatives"), list):
             raise ValueError(f"alternatives invalides pour {occ['occurrence_id']}")
 
-# Sans ça, spaCy coupe "e-mail" en 3 tokens ("e" / "-" ponctuation / "mail")
-# : le "e" (trop court) disparaît et "mail" seul se fait désambiguïser vers
-# mail.v.01 "envoyer par la poste" au lieu du sens email — mesuré sur The
-# Humans (4 occurrences verbales mal rattachées, voir le plan du 2026-08-27
-# "Correction manuelle smart-ass / e-mail sans re-run complet", qui corrige
-# ce livre sans rejouer S1-S5 via data/manual_corrections.jsonl ; ces cas
-# spéciaux ne servent qu'aux PROCHAINS livres). Vérifié empiriquement :
-# gardé en un seul token, spaCy lui assigne tout seul le lemme "e-mail",
-# que WordNet reconnaît nativement (lemme alternatif du synset
-# electronic_mail.n.01 / e-mail.v.01) — pas besoin de forcer le lemme ici.
-EMAIL_SPECIAL_CASES = ["e-mail", "e-mails", "e-mailing", "e-mailed"]
+# EMAIL_SPECIAL_CASES a déménagé dans poc_pipeline/tokenizer_setup.py (voir
+# sa docstring pour la justification empirique) — configure_tokenizer()
+# ci-dessous l'applique aux TROIS tokenizers du POC, pas seulement à celui-ci.
 
 
 def get_nlp():
     global _NLP
     if _NLP is None:
         _NLP = spacy.load("en_core_web_sm")
-        # EMAIL_SPECIAL_CASES (socle en dur) + data/custom_lexicon.jsonl
-        # (ajouté sans édition de code depuis pipeline/review_ui.py).
-        for surface in EMAIL_SPECIAL_CASES + custom_lexicon.load_tokenizer_surfaces():
-            _NLP.tokenizer.add_special_case(surface, [{ORTH: surface}])
+        # Stage 0 : patch de tiret + cas spéciaux (email, custom_lexicon,
+        # liste blanche à tirets) — voir tokenizer_setup.py. Appliqué AVANT
+        # tout parsing, dans ce même bloc `if _NLP is None`.
+        configure_tokenizer(_NLP)
     return _NLP
 
 

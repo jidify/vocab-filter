@@ -54,11 +54,17 @@ Volontairement ABSENT (contrairement à un run de prod complet) :
   REVIEW_FIX_PIPELINE/RAPPORT/rapport_filtrage.md:7, les 498 lignes
   `unit_type == "mwe"` traversant le filtrage sans y être soumises).
 
-Divergence assumée avec extract_word_contexts.py : ce script n'applique PAS
-`fix_pipeline/detection_benchmark/tokenizer_boundary_fix.py::
-patch_dash_after_punctuation` — ce patch n'est jamais entré en prod
-(`pipeline.analyze.get_nlp()` ne l'applique pas) ; l'appliquer ici
-décalerait la détection MWE par rapport à ce que voient réellement S1/S2.
+Divergence avec extract_word_contexts.py levée (elle existait avant
+`poc_pipeline/tokenizer_setup.py`, voir le plan "Stage 0 du pipeline POC —
+configuration unique du tokenizer") : ce script hérite du patch de tiret
+(`tokenizer_boundary_fix.patch_dash_after_punctuation`) via
+`analyze_module.get_nlp()` (S1) ET via `mwe_module.get_matcher()` (S2,
+idiomatch) — les deux configurés au même point de chargement, avant tout
+parsing. Décalage volontaire restant, distinct de celui-ci : le `nlp`
+d'idiomatch ne reçoit PAS la liste blanche à tirets (mots comme
+"off-white" figés en un seul token dans S1, pas dans S2) — ses motifs sont
+compilés token par token, figer un composé casserait un motif MWE construit
+dessus. Voir `tokenizer_setup.configure_tokenizer(..., hyphen_whitelist=)`.
 
 Correction, au passage, d'une limite documentée dans
 extract_word_contexts.py:66-70 ("VPC et rules_plus [...] hors de portée

@@ -41,6 +41,7 @@ qu'un --output à chemin libre permettait) :
                 cognates_removed.csv         (filtre 0bis : cognat)
                 pknown_cefr_excluded.csv     (filtre 1/2/3 : Pknown/CEFR/Zipf)
                 basic_level_excluded.csv     (filtre 4 : A1/A2 tous POS)
+                hyphen_admitted.csv          (filtre 0ter : liste blanche à tirets)
                 mwe_gate_rejections.csv
                 vpc_candidates.jsonl / rules_plus_candidates.jsonl (x2)
                 zone_layout.json
@@ -120,6 +121,7 @@ class RunPaths:
         self.cognates_removed = self.audit / "cognates_removed.csv"
         self.pknown_cefr_excluded = self.audit / "pknown_cefr_excluded.csv"
         self.basic_level_excluded = self.audit / "basic_level_excluded.csv"
+        self.hyphen_admitted = self.audit / "hyphen_admitted.csv"
         self.mwe_gate_rejections = self.audit / "mwe_gate_rejections.csv"
         self.vpc_candidates_extract = self.audit / "vpc_candidates.jsonl"
         self.rules_plus_candidates_extract = self.audit / "rules_plus_candidates.jsonl"
@@ -187,6 +189,7 @@ def run_word_extract(opts: Options, paths: RunPaths) -> None:
         "--cognates-removed-out", str(paths.cognates_removed),
         "--pknown-cefr-excluded-out", str(paths.pknown_cefr_excluded),
         "--basic-level-excluded-out", str(paths.basic_level_excluded),
+        "--hyphen-admitted-out", str(paths.hyphen_admitted),
         "--max-phrases", str(opts.max_phrases),
         "--skip-lines", str(opts.skip_lines),
     ])

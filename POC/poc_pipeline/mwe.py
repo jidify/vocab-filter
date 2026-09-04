@@ -22,6 +22,7 @@ from idiomatch import Idiomatcher
 
 from poc_pipeline import atomic, config, custom_lexicon, mwe_alignment, mwe_gates
 from poc_pipeline.corpus import load_segments
+from poc_pipeline.tokenizer_setup import configure_tokenizer
 
 _MATCHER = None
 _IDIOMS_YML: dict[str, dict] | None = None
@@ -129,6 +130,18 @@ def get_matcher():
                 del idiomatcher_module.open
             else:
                 idiomatcher_module.open = previous_open
+        # Stage 0 : patch de tiret SEUL sur ce tokenizer (hyphen_whitelist=
+        # special_cases=False) — voir tokenizer_setup.py. La liste blanche à
+        # tirets figerait des composés (ex. "able-bodied") en un seul token,
+        # ce qui casserait les motifs idiomatch construits token par token
+        # dessus (voir mwe_alignment.py::patterns_for_idiom). Les cas
+        # spéciaux (email/custom_lexicon) sont exclus eux aussi : mesuré sur
+        # *The Humans* complet, les admettre ici change le compte de slop
+        # d'un match et fait apparaître 1 candidat "to the letter" sur "to
+        # e-mail the rec letter" — pas un vrai idiome. Appliqué AVANT tout
+        # matching, donc avant repair_corrupt_anchor_lemmas/add_idioms
+        # ci-dessous.
+        configure_tokenizer(_MATCHER.nlp, hyphen_whitelist=False, special_cases=False)
         # Porte D (fix_pipeline/s2_fix/) : répare les entrées idiomatch dont
         # l'ancre a été compilée sur un lemme spaCy erroné (voir
         # mwe_gates.CORRUPT_ANCHOR_REPAIRS) AVANT d'ajouter les idiomes

@@ -44,6 +44,19 @@ Filtres supplémentaires (hors rapport, ajoutés pour ce script) :
          passant toujours), filtre 4 (A1/A2) et filtre 5 (MWE) — et
          apparaît donc toujours dans la liste finale, quel que soit son
          Pknown/CEFR/Zipf ou son appartenance à une MWE détectée.
+  0ter. Liste blanche à tirets (poc_datasets/hyphen_words_without_npe.txt,
+     via poc_pipeline/tokenizer_setup.py::load_hyphen_whitelist — voir ce
+     module pour la construction) : un token dont le texte replié (casefold)
+     figure dans cette liste (ex. "off-white", "deep-set") est exempté du
+     filtre 0 (`token.is_alpha` est faux pour un mot à tiret ; `token.pos_`
+     y échappe aussi) ET du filtre 1-3 (passes_filter court-circuité, comme
+     un faux-ami). Contrairement au faux-ami, PAS exempté du filtre 4
+     (A1/A2 tous POS) ni du filtre 5 (MWE) : ces deux filtres restent actifs
+     pour lui. Nécessaire — la liste est absente de word-prevalence.txt et
+     cefrj.csv par construction (respectivement 5 et 42 des 9115 entrées
+     mono-bloc du fichier y figurent), le filtre 1 les écarterait donc tous
+     sans cette dérogation. Journalisé dans hyphen_admitted.csv (voir
+     write_hyphen_admitted_csv), jamais silencieux.
   4. Exclusion A1/A2 stricte, tous POS confondus : si, pour un lemme, au
      moins un des niveaux CEFR connus dans cefrj.csv (n'importe quel POS,
      pas seulement celui matché par le filtre 2) est A1 ou A2, le lemme
@@ -108,8 +121,9 @@ sys.path.insert(0, str(ROOT))
 from poc_pipeline.corpus import is_hors_oeuvre  # noqa: E402
 from poc_pipeline import mwe as mwe_module  # noqa: E402
 from poc_pipeline import mwe_alignment, mwe_gates  # noqa: E402
-from poc_pipeline.tokenizer_boundary_fix import (  # noqa: E402
-    patch_dash_after_punctuation,
+from poc_pipeline.tokenizer_setup import (  # noqa: E402
+    configure_tokenizer,
+    load_hyphen_whitelist,
 )
 
 DEFAULT_BOOK_PATH = ROOT / "books" / "The Humans - Stephen Karam.txt"
@@ -118,6 +132,7 @@ DEFAULT_MWE_EXCLUSIONS_OUT_PATH = Path(__file__).parent / "mwe_exclusions.csv"
 DEFAULT_COGNATES_REMOVED_OUT_PATH = Path(__file__).parent / "cognates_removed.csv"
 DEFAULT_PKNOWN_CEFR_EXCLUDED_OUT_PATH = Path(__file__).parent / "pknown_cefr_excluded.csv"
 DEFAULT_BASIC_LEVEL_EXCLUDED_OUT_PATH = Path(__file__).parent / "basic_level_excluded.csv"
+DEFAULT_HYPHEN_ADMITTED_OUT_PATH = Path(__file__).parent / "hyphen_admitted.csv"
 
 AOA_PATH = ROOT / "poc_datasets" / "kuperman-aoa.csv"  # non utilisé (rapport : AoA informatif seulement)
 PREVALENCE_PATH = ROOT / "poc_datasets" / "word-prevalence.txt"
@@ -410,7 +425,7 @@ def iter_book_lines(book_path: Path, skip_lines: int = 0):
 def build_word_contexts(
     book_path: Path, skip_lines: int = 0,
 ) -> tuple[dict[str, dict], dict[str, dict], dict[str, dict], dict[tuple[str, str], dict],
-           dict[str, dict], dict[str, int]]:
+           dict[str, dict], dict[str, dict], dict[str, int]]:
     pknown_scores = load_pknown_scores()
     cefr_by_word = load_cefr_by_word()
     cognates = load_cognates()
@@ -419,7 +434,12 @@ def build_word_contexts(
     lemma_basic_cache: dict[str, bool] = {}
 
     nlp = spacy.load(SPACY_MODEL, disable=["ner"])
-    patch_dash_after_punctuation(nlp)
+    # Stage 0 : patch de tiret + cas spéciaux (email, custom_lexicon, liste
+    # blanche à tirets) — voir tokenizer_setup.py. Ce tokenizer désactive le
+    # NER (au-dessus) mais ça ne concerne pas le tokenizer lui-même, appliqué
+    # avant tout composant du pipeline spaCy.
+    configure_tokenizer(nlp)
+    hyphen_whitelist = load_hyphen_whitelist()
 
     stats = {
         "tokens_alpha": 0,
@@ -431,6 +451,7 @@ def build_word_contexts(
         "lemmas_excluded_mwe_member": 0,
         "lemmas_removed_cognate": 0,
         "false_friend_lemmas_seen": 0,
+        "types_admitted_hyphen": 0,
     }
     seen_types: set[tuple[str, str]] = set()
     passed_types: set[tuple[str, str]] = set()
@@ -446,15 +467,27 @@ def build_word_contexts(
     # retirés avant même d'atteindre by_lemma (voir write_cognates_removed_csv)
     cognates_removed: dict[str, dict] = {}
     false_friend_lemmas_seen: set[str] = set()
+    # lemma -> {"surfaces": set[str], "upos": set[str], "count": int} —
+    # filtre 0ter, chaque admission par la liste blanche à tirets, journalisée
+    # même quand le lemme est ensuite retenu (voir write_hyphen_admitted_csv :
+    # ce CSV documente une DÉROGATION, pas une exclusion).
+    hyphen_admitted: dict[str, dict] = {}
 
     lines = list(iter_book_lines(book_path, skip_lines=skip_lines))
     for line_idx, doc in enumerate(nlp.pipe(lines, batch_size=64)):
         sents = list(doc.sents)
         sent_idx_by_start = {s.start_char: i for i, s in enumerate(sents)}
         for token in doc:
-            if not token.is_alpha:
+            # Filtre 0ter — liste blanche à tirets : dérogation aux filtres 0
+            # (is_alpha/EXCLUDED_UPOS) ci-dessous, sur la forme de SURFACE
+            # (pas le lemme, pas encore calculé ici) repliée en casefold —
+            # voir la docstring du module. "off-white".isalpha() est faux ;
+            # sans cette dérogation, le mot ne survivrait jamais au filtre 0
+            # même gardé en un seul token par configure_tokenizer().
+            is_whitelisted_hyphen = token.text.casefold() in hyphen_whitelist
+            if not token.is_alpha and not is_whitelisted_hyphen:
                 continue
-            if token.pos_ in EXCLUDED_UPOS:
+            if token.pos_ in EXCLUDED_UPOS and not is_whitelisted_hyphen:
                 continue
 
             lemma = token.lemma_.casefold()
@@ -501,11 +534,27 @@ def build_word_contexts(
                         rescued_types.add(type_key)
                         stats["types_rescued_zipf"] += 1
 
-            if not is_false_friend and not passes_filter(
+            # Filtre 0ter (suite) : même dérogation que le faux-ami, sur la
+            # chaîne Pknown/CEFR/Zipf (filtres 1-3) — nécessaire, la liste
+            # blanche est absente de word-prevalence.txt/cefrj.csv par
+            # construction (voir docstring du module). Contrairement au
+            # faux-ami, PAS de dérogation aux filtres 4/5 plus bas : un mot à
+            # tiret reste soumis à l'exclusion A1/A2 et à l'exclusion MWE.
+            if not is_false_friend and not is_whitelisted_hyphen and not passes_filter(
                 lemma, upos, pknown_scores, cefr_by_word, filter_cache
             ):
                 continue
             passed_types.add(type_key)
+
+            if is_whitelisted_hyphen:
+                if lemma not in hyphen_admitted:
+                    stats["types_admitted_hyphen"] += 1
+                admitted = hyphen_admitted.setdefault(
+                    lemma, {"surfaces": set(), "upos": set(), "count": 0}
+                )
+                admitted["surfaces"].add(token.text)
+                admitted["upos"].add(upos)
+                admitted["count"] += 1
 
             sent = token.sent
             sent_idx = sent_idx_by_start[sent.start_char]
@@ -614,7 +663,7 @@ def build_word_contexts(
     stats["types_retained"] = sum(1 for lemma, _upos in passed_types if lemma in final_lemmas)
     return (
         by_lemma, mwe_exclusions, cognates_removed,
-        pknown_cefr_zipf_excluded, basic_level_excluded, stats,
+        pknown_cefr_zipf_excluded, basic_level_excluded, hyphen_admitted, stats,
     )
 
 
@@ -782,6 +831,36 @@ def write_cognates_removed_csv(
         writer.writerows(rows)
 
 
+def write_hyphen_admitted_csv(
+    hyphen_admitted: dict[str, dict], out_path: Path,
+    cefr_by_word: dict, aoa_scores: dict[str, float], false_friends: set[str],
+) -> None:
+    """Chaque lemme à tiret admis par le filtre 0ter (liste blanche
+    hyphen_words_without_npe.txt) — dérogation aux filtres 0 et 1-3, PAS aux
+    filtres 4/5 (voir docstring du module et build_word_contexts). Ce CSV
+    documente une admission, pas une exclusion : un lemme qui y figure peut
+    tout de même être absent du CSV final s'il a ensuite été écarté par le
+    filtre 4 (A1/A2) ou le filtre 5 (MWE)."""
+    rows = sorted(
+        (
+            lemma,
+            "/".join(sorted(data["upos"])),
+            *lemma_annotations(lemma, cefr_by_word, aoa_scores, false_friends),
+            "/".join(sorted(data["surfaces"])),
+            data["count"],
+        )
+        for lemma, data in hyphen_admitted.items()
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["lemma", "pos", "false_friend", "cefr", "zipf", "aoa",
+             "surface_forms", "occurrences_admitted"]
+        )
+        writer.writerows(rows)
+
+
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
@@ -805,6 +884,10 @@ def parse_args() -> argparse.Namespace:
                          default=str(DEFAULT_BASIC_LEVEL_EXCLUDED_OUT_PATH),
                          help="Chemin du CSV des lemmes écartés par le filtre 4 "
                               "(A1/A2 pour au moins un POS, tous POS cefrj.csv confondus)")
+    parser.add_argument("--hyphen-admitted-out",
+                         default=str(DEFAULT_HYPHEN_ADMITTED_OUT_PATH),
+                         help="Chemin du CSV des lemmes à tiret admis par le filtre 0ter "
+                              "(liste blanche hyphen_words_without_npe.txt)")
     parser.add_argument("--max-phrases", type=int, default=0,
                          help="Plafond de phrases affichées par lemme dans la colonne "
                               "'phrases' (0 = toutes, défaut). Ne change pas nb_phrases.")
@@ -823,6 +906,7 @@ def main() -> int:
     cognates_removed_out_path = Path(args.cognates_removed_out)
     pknown_cefr_excluded_out_path = Path(args.pknown_cefr_excluded_out)
     basic_level_excluded_out_path = Path(args.basic_level_excluded_out)
+    hyphen_admitted_out_path = Path(args.hyphen_admitted_out)
 
     if not book_path.exists():
         print(f"Livre introuvable : {book_path}")
@@ -831,7 +915,7 @@ def main() -> int:
     print(f"Livre : {book_path}")
     (
         by_lemma, mwe_exclusions, cognates_removed,
-        pknown_cefr_zipf_excluded, basic_level_excluded, stats,
+        pknown_cefr_zipf_excluded, basic_level_excluded, hyphen_admitted, stats,
     ) = build_word_contexts(book_path, skip_lines=args.skip_lines)
 
     # Rechargés ici pour les colonnes informatives des CSV (false_friend/
@@ -854,6 +938,9 @@ def main() -> int:
     write_basic_level_excluded_csv(
         basic_level_excluded, basic_level_excluded_out_path, cefr_by_word
     )
+    write_hyphen_admitted_csv(
+        hyphen_admitted, hyphen_admitted_out_path, cefr_by_word, aoa_scores, false_friends
+    )
 
     print()
     print("=== Entonnoir (au niveau type lemme+POS) ===")
@@ -864,6 +951,7 @@ def main() -> int:
     print(f"Après filtre 1 (Pknown > {MIN_PKNOWN}) : {stats['types_after_pknown']}")
     print(f"Après filtre 2 (CEFR {sorted(EXCLUDED_CEFR)} exclusif) : {stats['types_after_cefr']}")
     print(f"Repêchés filtre 3 (Zipf < {ZIPF_RESCUE_THRESHOLD}) : {stats['types_rescued_zipf']}")
+    print(f"Admis filtre 0ter (liste blanche tirets) : {stats['types_admitted_hyphen']}")
     print(f"Lemmes exclus filtre 4 (A1/A2 tous POS) : {stats['lemmas_excluded_basic_level_any_pos']}")
     print(f"Lemmes exclus filtre 5 (membre de MWE) : {stats['lemmas_excluded_mwe_member']}")
     print(f"Total types retenus            : {stats['types_retained']}")
@@ -876,6 +964,8 @@ def main() -> int:
           f"({len(pknown_cefr_zipf_excluded)} type(s) écarté(s) par le filtre 1/2/3)")
     print(f"-> {basic_level_excluded_out_path} "
           f"({len(basic_level_excluded)} lemme(s) écarté(s) par le filtre 4)")
+    print(f"-> {hyphen_admitted_out_path} "
+          f"({len(hyphen_admitted)} lemme(s) admis par le filtre 0ter)")
     return 0
 
 
